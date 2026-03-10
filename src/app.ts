@@ -1,0 +1,43 @@
+import express from 'express';
+import cors from 'cors';
+import { env } from './config/env';
+import { errorHandler } from './middleware/errorHandler';
+
+import customerRoutes from './routes/customer.routes';
+import opticalNumberRoutes from './routes/opticalNumber.routes';
+import fragranceRoutes from './routes/fragrance.routes';
+import frameRoutes from './routes/frame.routes';
+import invoiceItemRoutes from './routes/invoiceItem.routes';
+import invoiceRoutes from './routes/invoice.routes';
+
+const app = express();
+
+// Middleware
+const corsOrigin = env.NODE_ENV === 'development'
+  ? (origin: string | undefined, cb: (e: Error | null, ok?: boolean) => void) => cb(null, true)
+  : env.CORS_ORIGIN;
+app.use(cors({ origin: corsOrigin, credentials: true }));
+app.use(express.json());
+
+// Health check
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// API Routes
+app.use('/api/customers', customerRoutes);
+app.use('/api/optical-numbers', opticalNumberRoutes);
+app.use('/api/fragrances', fragranceRoutes);
+app.use('/api/frames', frameRoutes);
+app.use('/api/invoice-items', invoiceItemRoutes);
+app.use('/api/invoices', invoiceRoutes);
+
+// 404 handler
+app.use((_req, res) => {
+  res.status(404).json({ message: 'Route not found' });
+});
+
+// Global error handler
+app.use(errorHandler);
+
+export default app;
