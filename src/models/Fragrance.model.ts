@@ -4,6 +4,8 @@ export interface IFragrance extends Document {
   type: 'perfume' | 'attar' | 'bakhoor';
   companyName: string;
   name: string;
+  costPrice?: number;
+  sellPrice?: number;
 }
 
 const FragranceSchema = new Schema<IFragrance>(
@@ -15,6 +17,8 @@ const FragranceSchema = new Schema<IFragrance>(
     },
     companyName: { type: String, required: true, trim: true },
     name: { type: String, required: true, trim: true },
+    costPrice: { type: Number, min: 0 },
+    sellPrice: { type: Number, min: 0 },
   },
   { timestamps: true }
 );

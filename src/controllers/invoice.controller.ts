@@ -2,12 +2,15 @@ import { Request, Response, NextFunction } from 'express';
 import mongoose from 'mongoose';
 import { Invoice } from '../models/Invoice.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
+import { OpticalLens } from '../models/OpticalLens.model';
+import { Prescription } from '../models/Prescription.model';
 import { OpticalNumber } from '../models/OpticalNumber.model';
 import { Customer } from '../models/Customer.model';
 import type { CreateInvoiceInput, CreateInvoiceItemInput, InlineOpticalNumberInput } from '../types';
 
 // ── Populate helper ──────────────────────────────────────────────────────────
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const populateInvoice = (query: any) =>
   query
     .populate('customer')
@@ -16,6 +19,7 @@ const populateInvoice = (query: any) =>
       populate: [
         { path: 'frame' },
         { path: 'opticalLens' },
+        { path: 'prescription' },
         { path: 'fragrance' },
       ],
     });
@@ -105,11 +109,12 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
   // Track created docs for rollback
   const createdInvoiceItemIds: mongoose.Types.ObjectId[] = [];
   const createdOpticalNumberIds: mongoose.Types.ObjectId[] = [];
+  const createdPrescriptionIds: mongoose.Types.ObjectId[] = [];
   let createdCustomerId: mongoose.Types.ObjectId | null = null;
 
   try {
     const body: CreateInvoiceInput = req.body;
-    const { customer: customerIdRaw, customerName, customerMobile, customerAddress, items } = body;
+    const { customer: customerIdRaw, customerName, customerMobile, customerAddress, items, discount = 0, billDate: billDateRaw } = body;
 
     // ── 1. Validate items ────────────────────────────────────────────────────
     if (!items || items.length === 0) {
@@ -122,11 +127,28 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       return;
     }
 
-    // ── 2. Resolve customer ──────────────────────────────────────────────────
+    // ── 2. Validate discount ─────────────────────────────────────────────────
+    if (typeof discount !== 'number' || discount < 0) {
+      res.status(400).json({ message: 'Discount must be a non-negative number.' });
+      return;
+    }
+
+    // ── 3. Validate billDate ────────────────────────────────────────────────
+    let billDate: Date;
+    if (billDateRaw) {
+      billDate = new Date(billDateRaw);
+      if (isNaN(billDate.getTime())) {
+        res.status(400).json({ message: 'Invalid billDate. Must be a valid ISO date string.' });
+        return;
+      }
+    } else {
+      billDate = new Date();
+    }
+
+    // ── 4. Resolve customer ──────────────────────────────────────────────────
     let customerId: mongoose.Types.ObjectId;
 
     if (customerIdRaw && mongoose.isValidObjectId(customerIdRaw)) {
-      // Use existing customer
       const existing = await Customer.findById(customerIdRaw);
       if (!existing) {
         res.status(404).json({ message: 'Customer not found.' });
@@ -134,7 +156,6 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       }
       customerId = existing._id as mongoose.Types.ObjectId;
     } else {
-      // Create new customer
       if (!customerName?.trim() || !customerMobile?.trim()) {
         res.status(400).json({ message: 'customerName and customerMobile are required when creating a new customer.' });
         return;
@@ -148,13 +169,32 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       createdCustomerId = customerId;
     }
 
-    // ── 3. Create inline OpticalNumbers ─────────────────────────────────────
-    const resolvedItems: Array<CreateInvoiceItemInput & { _resolvedOpticalLens?: mongoose.Types.ObjectId }> = [];
+    // ── 5. Create inline OpticalNumbers / Prescriptions ──────────────────────
+    const resolvedItems: Array<CreateInvoiceItemInput & {
+      _resolvedOpticalLens?: mongoose.Types.ObjectId;
+      _resolvedPrescription?: mongoose.Types.ObjectId;
+    }> = [];
 
     for (const item of items) {
       if (item.type === 'opticalLens' && item.inlineOpticalNumber && !item.opticalLens) {
         const rx = item.inlineOpticalNumber;
-        const newOptical = await OpticalNumber.create({
+        // Create Prescription (new system)
+        const newPrescription = (await Prescription.create({
+          customer: customerId,
+          label: rx.name.trim(),
+          leftSpherical: rx.leftSpherical,
+          leftCylinder: rx.leftCylinder,
+          leftAddition: rx.leftAddition,
+          leftAxis: rx.leftAxis,
+          rightSpherical: rx.rightSpherical,
+          rightCylinder: rx.rightCylinder,
+          rightAddition: rx.rightAddition,
+          rightAxis: rx.rightAxis,
+        })) as { _id: mongoose.Types.ObjectId };
+        createdPrescriptionIds.push(newPrescription._id);
+
+        // Also keep backward compat with OpticalNumber
+        const newOptical = (await OpticalNumber.create({
           customer: customerId,
           name: rx.name.trim(),
           lensType: rx.lensType || undefined,
@@ -166,19 +206,24 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
           rightCylinder: rx.rightCylinder,
           rightAddition: rx.rightAddition,
           rightAxis: rx.rightAxis,
+        })) as { _id: mongoose.Types.ObjectId };
+        createdOpticalNumberIds.push(newOptical._id);
+
+        resolvedItems.push({
+          ...item,
+          _resolvedOpticalLens: newOptical._id,
+          _resolvedPrescription: newPrescription._id,
         });
-        createdOpticalNumberIds.push(newOptical._id as mongoose.Types.ObjectId);
-        resolvedItems.push({ ...item, _resolvedOpticalLens: newOptical._id as mongoose.Types.ObjectId });
       } else {
         resolvedItems.push({ ...item });
       }
     }
 
-    // ── 4. Create InvoiceItems ───────────────────────────────────────────────
+    // ── 6. Create InvoiceItems ───────────────────────────────────────────────
     const invoiceItemIds: mongoose.Types.ObjectId[] = [];
 
     for (const item of resolvedItems) {
-      const doc: Record<string, any> = {
+      const doc: Record<string, unknown> = {
         quantity: item.quantity,
         price: item.price,
       };
@@ -186,6 +231,8 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       if (item.type === 'fragrance' && item.fragrance) doc.fragrance = item.fragrance;
       if (item.type === 'opticalLens') {
         doc.opticalLens = item._resolvedOpticalLens ?? item.opticalLens;
+        if (item._resolvedPrescription) doc.prescription = item._resolvedPrescription;
+        if (item.prescription) doc.prescription = item.prescription;
       }
 
       const invoiceItem = await InvoiceItem.create(doc);
@@ -193,10 +240,16 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       invoiceItemIds.push(invoiceItem._id as mongoose.Types.ObjectId);
     }
 
-    // ── 5. Calculate total ───────────────────────────────────────────────────
-    const total = resolvedItems.reduce((sum, i) => sum + i.quantity * i.price, 0);
+    // ── 7. Calculate totals ──────────────────────────────────────────────────
+    const subtotal = resolvedItems.reduce((sum, i) => sum + i.quantity * i.price, 0);
 
-    // ── 6. Resolve initialPayment ─────────────────────────────────────────────
+    if (discount >= subtotal) {
+      res.status(400).json({ message: 'Discount cannot be equal to or greater than the subtotal.' });
+      return;
+    }
+    const total = subtotal - discount;
+
+    // ── 8. Resolve initialPayment ─────────────────────────────────────────────
     const { initialPayment } = body;
     const initialPayments: Array<{ date: Date; amount: number }> = [];
     let billClearDate: Date | undefined;
@@ -216,12 +269,14 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       }
     }
 
-    // ── 7. Create Invoice ────────────────────────────────────────────────────
+    // ── 9. Create Invoice ────────────────────────────────────────────────────
     const invoice = await Invoice.create({
       customer: customerId,
       items: invoiceItemIds,
+      subtotal,
+      discount,
       total,
-      billDate: new Date(),
+      billDate,
       payments: initialPayments,
       ...(billClearDate ? { billClearDate } : {}),
     });
@@ -231,10 +286,13 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
   } catch (error) {
     // ── Rollback ─────────────────────────────────────────────────────────────
     if (createdInvoiceItemIds.length > 0) {
-      await InvoiceItem.deleteMany({ _id: { $in: createdInvoiceItemIds } }).catch(() => {});
+      await InvoiceItem.deleteMany({ _id: { $in: createdInvoiceItemIds } }).catch(() => { });
     }
     if (createdOpticalNumberIds.length > 0) {
-      await OpticalNumber.deleteMany({ _id: { $in: createdOpticalNumberIds } }).catch(() => {});
+      await OpticalNumber.deleteMany({ _id: { $in: createdOpticalNumberIds } }).catch(() => { });
+    }
+    if (createdPrescriptionIds.length > 0) {
+      await Prescription.deleteMany({ _id: { $in: createdPrescriptionIds } }).catch(() => { });
     }
     // Note: we do NOT delete createdCustomerId — a customer may have been legitimately kept
     next(error);

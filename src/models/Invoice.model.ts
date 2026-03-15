@@ -8,6 +8,8 @@ export interface IPayment {
 export interface IInvoice extends Document {
   customer: mongoose.Types.ObjectId;
   items: mongoose.Types.ObjectId[];
+  subtotal: number;
+  discount: number;
   total: number;
   payments: IPayment[];
   billDate: Date;
@@ -23,6 +25,8 @@ const InvoiceSchema = new Schema<IInvoice>(
   {
     customer: { type: Schema.Types.ObjectId, ref: 'Customer', required: true },
     items: [{ type: Schema.Types.ObjectId, ref: 'InvoiceItem' }],
+    subtotal: { type: Number, required: true, min: 0, default: 0 },
+    discount: { type: Number, default: 0, min: 0 },
     total: { type: Number, required: true, min: 0 },
     payments: [PaymentSchema],
     billDate: { type: Date, required: true, default: Date.now },

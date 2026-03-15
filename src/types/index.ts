@@ -15,6 +15,7 @@ export interface CreateInvoiceItemInput {
   type: 'frame' | 'opticalLens' | 'fragrance';
   frame?: string;
   opticalLens?: string;
+  prescription?: string;
   inlineOpticalNumber?: InlineOpticalNumberInput;
   fragrance?: string;
   quantity: number;
@@ -28,4 +29,6 @@ export interface CreateInvoiceInput {
   customerMobile?: string;
   items: CreateInvoiceItemInput[];
   initialPayment?: number;    // optional upfront payment recorded at creation time
+  discount?: number;          // optional discount in rupees (default 0)
+  billDate?: string;          // ISO date string (default: today)
 }
