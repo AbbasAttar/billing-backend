@@ -12,7 +12,7 @@ const CustomerSchema = new Schema<ICustomer>(
   {
     name: { type: String, required: true, trim: true },
     address: { type: String, trim: true },
-    mobileNumber: { type: String, required: true, trim: true },
+    mobileNumber: { type: String, required: false, trim: true },
   },
   { timestamps: true }
 );

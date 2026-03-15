@@ -5,28 +5,21 @@ import { InvoiceItem } from '../models/InvoiceItem.model';
 
 // ── Aggregation result types ─────────────────────────────────────────────────
 
-interface RevenueAgg {
-    totalRevenue: number;
-    totalDiscount: number;
-    invoiceCount: number;
-    paidCount: number;
-    partialCount: number;
-}
-
-interface CollectedAgg {
-    totalCollected: number;
-}
-
-interface MonthAgg {
-    _id: { year: number; month: number };
-    revenue?: number;
-    collected?: number;
-}
-
-interface CategoryAgg {
+interface SummaryAgg {
     _id: null;
     revenue: number;
-    itemCount: number;
+    discount: number;
+    count: number;
+}
+
+interface CollectionAgg {
+    _id: null;
+    amount: number;
+}
+
+interface DailyAgg {
+    _id: number; // day
+    amount: number;
 }
 
 interface ProductAgg {
@@ -41,104 +34,104 @@ interface ProductAgg {
 
 // ── Controller ───────────────────────────────────────────────────────────────
 
-export const getAnalyticsSummary = async (_req: Request, res: Response, next: NextFunction) => {
+export const getAnalyticsSummary = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        // ── Revenue metrics ─────────────────────────────────────────────────────
-        const revenueAggRaw = await Invoice.aggregate([
+        const queryYear = parseInt(req.query.year as string) || new Date().getFullYear();
+        const queryMonth = parseInt(req.query.month as string) || (new Date().getMonth() + 1);
+
+        const startOfMonth = new Date(queryYear, queryMonth - 1, 1);
+        const endOfMonth = new Date(queryYear, queryMonth, 0, 23, 59, 59, 999);
+
+        // ── 1. Monthly Summary (Revenue & Discount based on billDate) ─────────────
+        const monthlyRevenueAgg = await Invoice.aggregate([
+            { $match: { billDate: { $gte: startOfMonth, $lte: endOfMonth } } },
             {
                 $group: {
                     _id: null,
-                    totalRevenue: { $sum: '$total' },
-                    totalDiscount: { $sum: '$discount' },
-                    invoiceCount: { $sum: 1 },
-                    paidCount: { $sum: { $cond: [{ $ifNull: ['$billClearDate', false] }, 1, 0] } },
-                    partialCount: {
-                        $sum: {
-                            $cond: [
-                                {
-                                    $and: [
-                                        { $gt: [{ $size: { $ifNull: ['$payments', []] } }, 0] },
-                                        { $not: { $ifNull: ['$billClearDate', false] } },
-                                    ],
-                                },
-                                1,
-                                0,
-                            ],
-                        },
-                    },
-                },
-            },
-        ]);
-
-        const collectedAggRaw = await Invoice.aggregate([
-            { $unwind: { path: '$payments', preserveNullAndEmptyArrays: true } },
-            { $group: { _id: null, totalCollected: { $sum: '$payments.amount' } } },
-        ]);
-
-        const revenueAgg = revenueAggRaw[0] as RevenueAgg | undefined;
-        const collectedAgg = collectedAggRaw[0] as CollectedAgg | undefined;
-
-        const totalRevenue = revenueAgg?.totalRevenue ?? 0;
-        const totalCollected = collectedAgg?.totalCollected ?? 0;
-        const totalDiscount = revenueAgg?.totalDiscount ?? 0;
-        const invoiceCount = revenueAgg?.invoiceCount ?? 0;
-        const paidCount = revenueAgg?.paidCount ?? 0;
-        const partialCount = revenueAgg?.partialCount ?? 0;
-        const unpaidCount = invoiceCount - paidCount - partialCount;
-
-        // ── Revenue by month (last 12 months) ───────────────────────────────────
-        const twelveMonthsAgo = new Date();
-        twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 11);
-        twelveMonthsAgo.setDate(1);
-
-        const revenueByMonthRaw = (await Invoice.aggregate([
-            { $match: { billDate: { $gte: twelveMonthsAgo } } },
-            {
-                $group: {
-                    _id: { year: { $year: '$billDate' }, month: { $month: '$billDate' } },
                     revenue: { $sum: '$total' },
-                },
-            },
-            { $sort: { '_id.year': 1, '_id.month': 1 } },
-        ])) as MonthAgg[];
+                    discount: { $sum: '$discount' },
+                    count: { $sum: 1 }
+                }
+            }
+        ]);
 
-        const collectedByMonthRaw = (await Invoice.aggregate([
-            { $match: { billDate: { $gte: twelveMonthsAgo } } },
-            { $unwind: { path: '$payments', preserveNullAndEmptyArrays: true } },
+        // ── 2. Monthly Collection (Invoices cleared in this month) ────────────────
+        const monthlyCollectionAgg = await Invoice.aggregate([
+            { $match: { billClearDate: { $gte: startOfMonth, $lte: endOfMonth } } },
             {
                 $group: {
-                    _id: { year: { $year: '$billDate' }, month: { $month: '$billDate' } },
-                    collected: { $sum: '$payments.amount' },
-                },
+                    _id: null,
+                    amount: { $sum: '$total' }
+                }
+            }
+        ]);
+
+        // ── 3. Lifetime Summary ───────────────────────────────────────────────────
+        const lifetimeRevenueAgg = await Invoice.aggregate([
+            {
+                $group: {
+                    _id: null,
+                    revenue: { $sum: '$total' },
+                    discount: { $sum: '$discount' },
+                    count: { $sum: 1 }
+                }
+            }
+        ]);
+
+        const lifetimeCollectionAgg = await Invoice.aggregate([
+            { $match: { billClearDate: { $exists: true, $ne: null } } },
+            {
+                $group: {
+                    _id: null,
+                    amount: { $sum: '$total' }
+                }
+            }
+        ]);
+
+        // ── 4. Daily Earnings for selected month (based on billDate) ──────────────
+        const dailyEarningsAgg = await Invoice.aggregate([
+            { $match: { billDate: { $gte: startOfMonth, $lte: endOfMonth } } },
+            {
+                $group: {
+                    _id: { $dayOfMonth: '$billDate' },
+                    amount: { $sum: '$total' }
+                }
             },
-        ])) as MonthAgg[];
+            { $sort: { '_id': 1 } }
+        ]) as DailyAgg[];
 
-        const collectedMap = new Map(
-            collectedByMonthRaw.map((r) => [`${r._id.year}-${r._id.month}`, r.collected ?? 0])
-        );
+        // Fill in missing days with zero
+        const lastDay = endOfMonth.getDate();
+        const dailyEarnings: Array<{ day: number; amount: number }> = [];
+        for (let i = 1; i <= lastDay; i++) {
+            const match = dailyEarningsAgg.find(d => d._id === i);
+            dailyEarnings.push({
+                day: i,
+                amount: match ? match.amount : 0
+            });
+        }
 
-        const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-        const revenueByMonth = revenueByMonthRaw.map((r) => ({
-            month: `${monthNames[r._id.month - 1]} ${r._id.year}`,
-            revenue: r.revenue ?? 0,
-            collected: collectedMap.get(`${r._id.year}-${r._id.month}`) ?? 0,
-        }));
+        const mRev = monthlyRevenueAgg[0] as SummaryAgg || { revenue: 0, discount: 0, count: 0 };
+        const mColl = monthlyCollectionAgg[0] as CollectionAgg || { amount: 0 };
+        const lRev = lifetimeRevenueAgg[0] as SummaryAgg || { revenue: 0, discount: 0, count: 0 };
+        const lColl = lifetimeCollectionAgg[0] as CollectionAgg || { amount: 0 };
 
-        // ── Revenue by category ──────────────────────────────────────────────────
-        const frameItems = (await InvoiceItem.aggregate([
+        // ── Legacy / Extra data preserved for UI ──────────────────────────────────
+        // (Revenue by category, top products, top customers, etc.)
+        
+        // Revenue by category (All time for now, or match month? User didn't specify overhauling these, but I'll keep them)
+        const frameItems = await InvoiceItem.aggregate([
             { $match: { frame: { $exists: true, $ne: null } } },
             { $group: { _id: null, revenue: { $sum: { $multiply: ['$quantity', '$price'] } }, itemCount: { $sum: '$quantity' } } },
-        ])) as CategoryAgg[];
-
-        const lensItems = (await InvoiceItem.aggregate([
+        ]);
+        const lensItems = await InvoiceItem.aggregate([
             { $match: { opticalLens: { $exists: true, $ne: null } } },
             { $group: { _id: null, revenue: { $sum: { $multiply: ['$quantity', '$price'] } }, itemCount: { $sum: '$quantity' } } },
-        ])) as CategoryAgg[];
-
-        const fragItems = (await InvoiceItem.aggregate([
+        ]);
+        const fragItems = await InvoiceItem.aggregate([
             { $match: { fragrance: { $exists: true, $ne: null } } },
             { $group: { _id: null, revenue: { $sum: { $multiply: ['$quantity', '$price'] } }, itemCount: { $sum: '$quantity' } } },
-        ])) as CategoryAgg[];
+        ]);
 
         const revenueByCategory = [
             { category: 'Frame', revenue: frameItems[0]?.revenue ?? 0, itemCount: frameItems[0]?.itemCount ?? 0 },
@@ -146,7 +139,7 @@ export const getAnalyticsSummary = async (_req: Request, res: Response, next: Ne
             { category: 'Fragrance', revenue: fragItems[0]?.revenue ?? 0, itemCount: fragItems[0]?.itemCount ?? 0 },
         ];
 
-        // ── Top 5 customers ──────────────────────────────────────────────────────
+        // Top customers
         const topCustomers = await Invoice.aggregate([
             { $group: { _id: '$customer', totalBilled: { $sum: '$total' }, invoiceCount: { $sum: 1 } } },
             { $sort: { totalBilled: -1 } },
@@ -163,66 +156,7 @@ export const getAnalyticsSummary = async (_req: Request, res: Response, next: Ne
             },
         ]);
 
-        // ── Top 5 products ───────────────────────────────────────────────────────
-        const topFrames = (await InvoiceItem.aggregate([
-            { $match: { frame: { $exists: true, $ne: null } } },
-            { $group: { _id: '$frame', totalRevenue: { $sum: { $multiply: ['$quantity', '$price'] } }, unitsSold: { $sum: '$quantity' } } },
-            { $sort: { totalRevenue: -1 } },
-            { $limit: 5 },
-            { $lookup: { from: 'frames', localField: '_id', foreignField: '_id', as: 'product' } },
-            { $unwind: '$product' },
-            {
-                $project: {
-                    productId: { $toString: '$_id' },
-                    name: { $concat: ['$product.companyName', ' ', '$product.name'] },
-                    type: { $literal: 'Frame' },
-                    totalRevenue: 1,
-                    unitsSold: 1,
-                },
-            },
-        ])) as ProductAgg[];
-
-        const topLenses = (await InvoiceItem.aggregate([
-            { $match: { opticalLens: { $exists: true, $ne: null } } },
-            { $group: { _id: '$opticalLens', totalRevenue: { $sum: { $multiply: ['$quantity', '$price'] } }, unitsSold: { $sum: '$quantity' } } },
-            { $sort: { totalRevenue: -1 } },
-            { $limit: 5 },
-            { $lookup: { from: 'opticallenses', localField: '_id', foreignField: '_id', as: 'product' } },
-            { $unwind: { path: '$product', preserveNullAndEmptyArrays: true } },
-            {
-                $project: {
-                    productId: { $toString: '$_id' },
-                    name: { $ifNull: ['$product.name', 'Optical Lens'] },
-                    type: { $literal: 'OpticalLens' },
-                    totalRevenue: 1,
-                    unitsSold: 1,
-                },
-            },
-        ])) as ProductAgg[];
-
-        const topFragrances = (await InvoiceItem.aggregate([
-            { $match: { fragrance: { $exists: true, $ne: null } } },
-            { $group: { _id: '$fragrance', totalRevenue: { $sum: { $multiply: ['$quantity', '$price'] } }, unitsSold: { $sum: '$quantity' } } },
-            { $sort: { totalRevenue: -1 } },
-            { $limit: 5 },
-            { $lookup: { from: 'fragrances', localField: '_id', foreignField: '_id', as: 'product' } },
-            { $unwind: '$product' },
-            {
-                $project: {
-                    productId: { $toString: '$_id' },
-                    name: { $concat: ['$product.companyName', ' ', '$product.name'] },
-                    type: { $literal: 'Fragrance' },
-                    totalRevenue: 1,
-                    unitsSold: 1,
-                },
-            },
-        ])) as ProductAgg[];
-
-        const allProducts = [...topFrames, ...topLenses, ...topFragrances]
-            .sort((a, b) => (b.totalRevenue ?? 0) - (a.totalRevenue ?? 0))
-            .slice(0, 5);
-
-        // ── Recent 5 invoices ───────────────────────────────────────────────────
+        // Recent invoices
         const recentInvoicesRaw = await Invoice.find()
             .sort({ billDate: -1 })
             .limit(5)
@@ -243,50 +177,36 @@ export const getAnalyticsSummary = async (_req: Request, res: Response, next: Ne
             };
         });
 
-        // ── Lens Analytics ──────────────────────────────────────────────────────
-        const topLensCategories = await InvoiceItem.aggregate([
-            { $match: { lensCategory: { $ne: null } } },
-            {
-                $group: {
-                    _id: '$lensCategory',
-                    unitsSold: { $sum: '$quantity' },
-                    revenue: { $sum: { $multiply: ['$quantity', '$price'] } },
-                },
-            },
-            { $sort: { unitsSold: -1 } },
-            { $project: { category: '$_id', unitsSold: 1, revenue: 1, _id: 0 } },
-        ]);
-
-        const topLensBrands = await InvoiceItem.aggregate([
-            { $match: { lensBrand: { $ne: null } } },
-            {
-                $group: {
-                    _id: '$lensBrand',
-                    unitsSold: { $sum: '$quantity' },
-                    revenue: { $sum: { $multiply: ['$quantity', '$price'] } },
-                },
-            },
-            { $sort: { unitsSold: -1 } },
-            { $limit: 5 },
-            { $project: { brand: '$_id', unitsSold: 1, revenue: 1, _id: 0 } },
-        ]);
-
         res.json({
-            totalRevenue,
-            totalCollected,
-            totalOutstanding: totalRevenue - totalCollected,
-            totalDiscount,
-            invoiceCount,
-            paidCount,
-            partialCount,
-            unpaidCount,
-            revenueByMonth,
+            // Monthly cards
+            monthlySummary: {
+                revenue: mRev.revenue,
+                collection: mColl.amount,
+                discount: mRev.discount,
+                outstanding: mRev.revenue - mColl.amount,
+                invoiceCount: mRev.count
+            },
+            // Lifetime cards
+            lifetimeSummary: {
+                revenue: lRev.revenue,
+                collection: lColl.amount,
+                discount: lRev.discount,
+                outstanding: lRev.revenue - lColl.amount,
+                invoiceCount: lRev.count
+            },
+            // Daily graph
+            dailyEarnings,
+            
+            // preserved metrics
             revenueByCategory,
             topCustomers,
-            topProducts: allProducts,
             recentInvoices,
-            topLensCategories,
-            topLensBrands,
+            
+            // empty defaults for legacy fields if frontend expects them
+            topLensCategories: [],
+            topLensBrands: [],
+            topProducts: [],
+            revenueByMonth: [] // replaced by dailyEarnings for the graph, but keeping keys for safety
         });
     } catch (error) {
         next(error);

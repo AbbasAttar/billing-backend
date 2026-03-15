@@ -6,6 +6,8 @@ import { OpticalLens } from '../models/OpticalLens.model';
 import { Prescription } from '../models/Prescription.model';
 import { OpticalNumber } from '../models/OpticalNumber.model';
 import { Customer } from '../models/Customer.model';
+import { Frame } from '../models/Frame.model';
+import { Fragrance } from '../models/Fragrance.model';
 import type { CreateInvoiceInput, CreateInvoiceItemInput } from '../types';
 
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -145,13 +147,13 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       customerId = existing._id as mongoose.Types.ObjectId;
       resolvedCustomerName = existing.name;
     } else {
-      if (!customerName?.trim() || !customerMobile?.trim()) {
-        res.status(400).json({ message: 'customerName and customerMobile are required when creating a new customer.' });
+      if (!customerName?.trim()) {
+        res.status(400).json({ message: 'customerName is required when creating a new customer.' });
         return;
       }
       const newCustomer = await Customer.create({
         name: customerName.trim(),
-        mobileNumber: customerMobile.trim(),
+        mobileNumber: customerMobile?.trim() || undefined,
         address: customerAddress?.trim() || undefined,
       });
       customerId = newCustomer._id as mongoose.Types.ObjectId;
@@ -160,43 +162,32 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
     }
 
     // ── 5. Create inline OpticalNumbers / Prescriptions ──────────────────────
-    const resolvedItems: Array<CreateInvoiceItemInput & {
-      _resolvedOpticalLens?: mongoose.Types.ObjectId;
-      _resolvedPrescription?: mongoose.Types.ObjectId;
-    }> = [];
-
+    const resolvedItems: any[] = [];
     const newPrescriptionGroups = new Map<string, { userName: string; label: string; items: any[] }>();
 
     console.log(`[createInvoice] Processing ${items.length} items`);
 
     for (const item of items) {
       if (item.type === 'opticalLens') {
-        const enhancedItem: CreateInvoiceItemInput & {
-          _resolvedOpticalLens?: mongoose.Types.ObjectId;
-          _resolvedPrescription?: mongoose.Types.ObjectId;
-        } = { ...item };
+        const enhancedItem: any = { ...item };
         let targetUserName = item.userName?.trim() || resolvedCustomerName;
 
         if (item.prescription && mongoose.isValidObjectId(item.prescription)) {
-          // A prescription was selected.
           const rx = await Prescription.findById(item.prescription);
           if (rx) {
-            console.log(`[createInvoice] Using existing prescription for ${targetUserName}`);
             if (!item.userName?.trim() && rx.userName) targetUserName = rx.userName;
             if (!item.lensLabel?.trim()) enhancedItem.lensLabel = rx.label;
           }
         } else if (item.lensLabel?.trim() || item.spherical !== null) {
-          // Inland entry: we should save a new Prescription grouping
           const label = item.lensLabel?.trim() || "Prescription";
           const groupKey = `${targetUserName}|${label}`;
           if (!newPrescriptionGroups.has(groupKey)) {
-            console.log(`[createInvoice] Queuing new prescription creation: ${groupKey}`);
             newPrescriptionGroups.set(groupKey, { userName: targetUserName, label: label, items: [] });
           }
           newPrescriptionGroups.get(groupKey)!.items.push(enhancedItem);
         }
 
-        // ── Auto-Catalogue logic (Part 3) ────────────────────────────────────
+        // Auto-Catalogue Sync
         if (item.lensBrand?.trim() && item.lensName?.trim() && item.lensCategory) {
           const filter = {
             brand: item.lensBrand.trim(),
@@ -207,10 +198,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
             spherical: item.spherical === undefined ? null : item.spherical,
             cylinder: item.cylinder === undefined ? null : item.cylinder,
             addition: item.addition === undefined ? null : item.addition,
-            sellPrice: item.price,
           };
-
-          console.log(`[createInvoice] Catalogue Sync (Eye: ${item.eye}) - Filter:`, JSON.stringify(filter, null, 2));
 
           let lensDoc = await OpticalLens.findOne({
             brand: { $regex: new RegExp(`^${escapeRegExp(filter.brand)}$`, 'i') },
@@ -225,46 +213,43 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
 
           if (!lensDoc) {
             try {
-              console.log(`[createInvoice] No match found. Creating new lens: ${filter.brand} ${filter.name} (${item.eye} eye)`);
-              lensDoc = await OpticalLens.create(filter as any);
-              console.log(`[createInvoice] Lens created successfully:`, JSON.stringify(lensDoc, null, 2));
+              lensDoc = await OpticalLens.create({ ...filter, sellPrice: item.price } as any);
             } catch (err: any) {
               if (err.code === 11000) {
-                console.log(`[createInvoice] Duplicate detected (Race Condition). Fetching existing lens.`);
-                lensDoc = await OpticalLens.findOne({
-                  brand: { $regex: new RegExp(`^${escapeRegExp(filter.brand)}$`, 'i') },
-                  name: { $regex: new RegExp(`^${escapeRegExp(filter.name)}$`, 'i') },
-                  category: filter.category,
-                  index: filter.index,
-                  coating: filter.coating,
-                  spherical: filter.spherical,
-                  cylinder: filter.cylinder,
-                  addition: filter.addition,
-                } as any);
+                lensDoc = await OpticalLens.findOne(filter as any);
               } else {
-                console.error(`[createInvoice] Failed to create lens:`, err);
                 throw err;
               }
             }
-          } else {
-            console.log(`[createInvoice] Match found! Linking to lens ID: ${lensDoc._id}`);
           }
+
           if (lensDoc) {
-            console.log(`[createInvoice] Lens resolved: ${lensDoc._id}`);
-            enhancedItem._resolvedOpticalLens = lensDoc._id as mongoose.Types.ObjectId;
+            // Update sell price even for existing lenses
+            await OpticalLens.findByIdAndUpdate(lensDoc._id, { sellPrice: item.price });
+            enhancedItem._resolvedOpticalLens = lensDoc._id;
           }
         }
 
         enhancedItem.userName = targetUserName;
         resolvedItems.push(enhancedItem);
+      } else if (item.type === 'frame') {
+        if (item.frame && mongoose.isValidObjectId(item.frame)) {
+          await Frame.findByIdAndUpdate(item.frame, { sellPrice: item.price });
+        }
+        resolvedItems.push({ ...(item as any) });
+      } else if (item.type === 'fragrance') {
+        if (item.fragrance && mongoose.isValidObjectId(item.fragrance)) {
+          await Fragrance.findByIdAndUpdate(item.fragrance, { sellPrice: item.price });
+        }
+        resolvedItems.push({ ...(item as any) });
       } else {
-        resolvedItems.push({ ...item });
+        resolvedItems.push({ ...(item as any) });
       }
     }
 
     // Process new inline prescriptions
     for (const group of Array.from(newPrescriptionGroups.values())) {
-      const rxDoc: Record<string, any> = {
+      const rxDoc: any = {
         customer: customerId,
         label: group.label,
         userName: group.userName,
@@ -288,7 +273,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       createdPrescriptionIds.push(newPrescription._id as mongoose.Types.ObjectId);
 
       for (const i of group.items) {
-        i._resolvedPrescription = newPrescription._id as mongoose.Types.ObjectId;
+        i._resolvedPrescription = newPrescription._id;
       }
     }
 
@@ -296,15 +281,15 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
     const invoiceItemIds: mongoose.Types.ObjectId[] = [];
 
     for (const item of resolvedItems) {
-      const doc: Record<string, unknown> = {
+      const doc: any = {
         quantity: item.quantity,
         price: item.price,
       };
       if (item.type === 'frame' && item.frame) doc.frame = item.frame;
       if (item.type === 'fragrance' && item.fragrance) doc.fragrance = item.fragrance;
       if (item.type === 'opticalLens') {
-        doc.opticalLens = item._resolvedOpticalLens ?? item.opticalLens;
-        doc.prescription = item._resolvedPrescription ?? item.prescription;
+        doc.opticalLens = item._resolvedOpticalLens || item.opticalLens;
+        doc.prescription = item._resolvedPrescription || item.prescription;
         doc.eye = item.eye;
         doc.userName = item.userName;
         doc.spherical = item.spherical;
@@ -312,8 +297,6 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         doc.axis = item.axis;
         doc.addition = item.addition;
         doc.lensLabel = item.lensLabel;
-
-        // Denormalized lens spec fields
         doc.lensBrand = item.lensBrand || null;
         doc.lensName = item.lensName || null;
         doc.lensCategory = item.lensCategory || null;
@@ -371,7 +354,6 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
     res.status(201).json(populated);
   } catch (error) {
     console.error('[createInvoice] Critical failure, rolling back:', error);
-    // ── Rollback ─────────────────────────────────────────────────────────────
     if (createdInvoiceItemIds.length > 0) {
       await InvoiceItem.deleteMany({ _id: { $in: createdInvoiceItemIds } }).catch(() => { });
     }
@@ -381,7 +363,6 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
     if (createdPrescriptionIds.length > 0) {
       await Prescription.deleteMany({ _id: { $in: createdPrescriptionIds } }).catch(() => { });
     }
-    // Note: we do NOT delete createdCustomerId — a customer may have been legitimately kept
     next(error);
   }
 };
