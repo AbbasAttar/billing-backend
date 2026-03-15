@@ -332,9 +332,9 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         res.status(400).json({ message: 'Initial payment cannot exceed invoice total.' });
         return;
       }
-      initialPayments.push({ date: new Date(), amount: initialPayment });
+      initialPayments.push({ date: billDate, amount: initialPayment });
       if (initialPayment === total) {
-        billClearDate = new Date();
+        billClearDate = billDate;
       }
     }
 

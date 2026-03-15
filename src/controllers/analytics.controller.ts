@@ -66,7 +66,23 @@ export const getAnalyticsSummary = async (req: Request, res: Response, next: Nex
             }
         ]);
 
-        // ── 3. Lifetime Summary ───────────────────────────────────────────────────
+        // ── 3. Monthly Outstanding (Pending balances for bills in this month) ────
+        const monthlyOutstandingAgg = await Invoice.aggregate([
+            { $match: { billDate: { $gte: startOfMonth, $lte: endOfMonth }, billClearDate: null } },
+            {
+                $project: {
+                    balance: { 
+                        $subtract: [
+                            "$total", 
+                            { $reduce: { input: "$payments", initialValue: 0, in: { $add: ["$$value", "$$this.amount"] } } }
+                        ] 
+                    }
+                }
+            },
+            { $group: { _id: null, total: { $sum: "$balance" } } }
+        ]);
+
+        // ── 4. Lifetime Summary ───────────────────────────────────────────────────
         const lifetimeRevenueAgg = await Invoice.aggregate([
             {
                 $group: {
@@ -86,6 +102,21 @@ export const getAnalyticsSummary = async (req: Request, res: Response, next: Nex
                     amount: { $sum: '$total' }
                 }
             }
+        ]);
+
+        const lifetimeOutstandingAgg = await Invoice.aggregate([
+            { $match: { billClearDate: null } },
+            {
+                $project: {
+                    balance: { 
+                        $subtract: [
+                            "$total", 
+                            { $reduce: { input: "$payments", initialValue: 0, in: { $add: ["$$value", "$$this.amount"] } } }
+                        ] 
+                    }
+                }
+            },
+            { $group: { _id: null, total: { $sum: "$balance" } } }
         ]);
 
         // ── 4. Daily Earnings for selected month (based on billDate) ──────────────
@@ -113,8 +144,11 @@ export const getAnalyticsSummary = async (req: Request, res: Response, next: Nex
 
         const mRev = monthlyRevenueAgg[0] as SummaryAgg || { revenue: 0, discount: 0, count: 0 };
         const mColl = monthlyCollectionAgg[0] as CollectionAgg || { amount: 0 };
+        const mOut = (monthlyOutstandingAgg[0] as any)?.total || 0;
+
         const lRev = lifetimeRevenueAgg[0] as SummaryAgg || { revenue: 0, discount: 0, count: 0 };
         const lColl = lifetimeCollectionAgg[0] as CollectionAgg || { amount: 0 };
+        const lOut = (lifetimeOutstandingAgg[0] as any)?.total || 0;
 
         // ── Legacy / Extra data preserved for UI ──────────────────────────────────
         // (Revenue by category, top products, top customers, etc.)
@@ -183,7 +217,7 @@ export const getAnalyticsSummary = async (req: Request, res: Response, next: Nex
                 revenue: mRev.revenue,
                 collection: mColl.amount,
                 discount: mRev.discount,
-                outstanding: mRev.revenue - mColl.amount,
+                outstanding: mOut,
                 invoiceCount: mRev.count
             },
             // Lifetime cards
@@ -191,7 +225,7 @@ export const getAnalyticsSummary = async (req: Request, res: Response, next: Nex
                 revenue: lRev.revenue,
                 collection: lColl.amount,
                 discount: lRev.discount,
-                outstanding: lRev.revenue - lColl.amount,
+                outstanding: lOut,
                 invoiceCount: lRev.count
             },
             // Daily graph
