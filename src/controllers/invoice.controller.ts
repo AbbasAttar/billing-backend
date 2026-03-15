@@ -33,8 +33,8 @@ const validateAxis = (val?: number): boolean =>
 
 function validateItems(items: CreateInvoiceItemInput[]): string | null {
   for (const [i, item] of items.entries()) {
-    if (typeof item.quantity !== 'number' || item.quantity < 0.25) {
-      return `Item ${i + 1}: quantity must be a positive quarter.`;
+    if (typeof item.quantity !== 'number' || item.quantity <= 0) {
+      return `Item ${i + 1}: quantity must be a positive number.`;
     }
     if (typeof item.price !== 'number' || item.price < 0) {
       return `Item ${i + 1}: price must be a non-negative number.`;
