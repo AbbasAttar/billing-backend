@@ -3,6 +3,7 @@ import mongoose, { Schema, Document } from 'mongoose';
 export interface IPrescription extends Document {
     customer: mongoose.Types.ObjectId;
     label: string;
+    userName?: string;
     leftSpherical?: number;
     leftCylinder?: number;
     leftAddition?: number;
@@ -18,6 +19,7 @@ const PrescriptionSchema = new Schema<IPrescription>(
     {
         customer: { type: Schema.Types.ObjectId, ref: 'Customer', required: true },
         label: { type: String, required: true, trim: true },
+        userName: { type: String, required: false, trim: true },
         leftSpherical: { type: Number },
         leftCylinder: { type: Number },
         leftAddition: { type: Number },

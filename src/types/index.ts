@@ -1,26 +1,36 @@
-export interface InlineOpticalNumberInput {
-  name: string;
-  leftSpherical?: number;
-  leftCylinder?: number;
-  leftAddition?: number;
-  leftAxis?: number;
-  rightSpherical?: number;
-  rightCylinder?: number;
-  rightAddition?: number;
-  rightAxis?: number;
-  lensType?: string;
-}
-
-export interface CreateInvoiceItemInput {
-  type: 'frame' | 'opticalLens' | 'fragrance';
-  frame?: string;
-  opticalLens?: string;
-  prescription?: string;
-  inlineOpticalNumber?: InlineOpticalNumberInput;
-  fragrance?: string;
+export interface CreateFrameItemInput {
+  type: 'frame';
+  frame: string;
   quantity: number;
   price: number;
 }
+
+export interface CreateFragranceItemInput {
+  type: 'fragrance';
+  fragrance: string;
+  quantity: number;
+  price: number;
+}
+
+export interface CreateOpticalLensItemInput {
+  type: "opticalLens";
+  eye: "left" | "right";
+  opticalLens?: string;
+  prescription?: string;
+  userName?: string;
+  spherical?: number | null;
+  cylinder?: number | null;
+  axis?: number | null;
+  addition?: number | null;
+  lensLabel?: string;
+  quantity: number;
+  price: number;
+}
+
+export type CreateInvoiceItemInput =
+  | CreateFrameItemInput
+  | CreateFragranceItemInput
+  | CreateOpticalLensItemInput;
 
 export interface CreateInvoiceInput {
   customer?: string;          // ObjectId if existing customer

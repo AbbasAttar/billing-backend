@@ -25,7 +25,22 @@ export const getPrescriptionById = async (req: Request, res: Response, next: Nex
 
 export const createPrescription = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const prescription = new Prescription(req.body);
+        const { customer, userName, ...rest } = req.body;
+        let finalUserName = userName?.trim() || undefined;
+
+        if (!finalUserName && customer) {
+            import('../models/Customer.model').then(async ({ Customer }) => {
+                const custDoc = await Customer.findById(customer);
+                finalUserName = custDoc?.name || undefined;
+
+                const prescription = new Prescription({ customer, userName: finalUserName, ...rest });
+                const saved = await prescription.save();
+                res.status(201).json(saved);
+            }).catch(next);
+            return;
+        }
+
+        const prescription = new Prescription({ customer, userName: finalUserName, ...rest });
         const saved = await prescription.save();
         res.status(201).json(saved);
     } catch (error) {

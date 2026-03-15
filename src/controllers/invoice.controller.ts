@@ -6,7 +6,7 @@ import { OpticalLens } from '../models/OpticalLens.model';
 import { Prescription } from '../models/Prescription.model';
 import { OpticalNumber } from '../models/OpticalNumber.model';
 import { Customer } from '../models/Customer.model';
-import type { CreateInvoiceInput, CreateInvoiceItemInput, InlineOpticalNumberInput } from '../types';
+import type { CreateInvoiceInput, CreateInvoiceItemInput } from '../types';
 
 // ── Populate helper ──────────────────────────────────────────────────────────
 
@@ -38,26 +38,11 @@ function validateItems(items: CreateInvoiceItemInput[]): string | null {
       return `Item ${i + 1}: price must be a non-negative number.`;
     }
     if (item.type === 'opticalLens') {
-      const hasRef = !!item.opticalLens;
-      const hasInline = !!item.inlineOpticalNumber;
-      if (!hasRef && !hasInline) {
-        return `Item ${i + 1}: optical lens item must provide either opticalLens (id) or inlineOpticalNumber.`;
+      if (item.eye !== 'left' && item.eye !== 'right') {
+        return `Item ${i + 1}: optical lens item must declare eye as 'left' or 'right'.`;
       }
-      if (hasRef && hasInline) {
-        return `Item ${i + 1}: provide either opticalLens or inlineOpticalNumber, not both.`;
-      }
-      if (hasInline) {
-        const rx = item.inlineOpticalNumber!;
-        if (!rx.name?.trim()) {
-          return `Item ${i + 1}: inlineOpticalNumber.name is required.`;
-        }
-        const axisFields: (keyof InlineOpticalNumberInput)[] = ['leftAxis', 'rightAxis'];
-        for (const field of axisFields) {
-          const val = rx[field] as number | undefined;
-          if (!validateAxis(val)) {
-            return `Item ${i + 1}: ${field} must be between 0 and 180.`;
-          }
-        }
+      if (!validateAxis(item.axis ?? undefined)) {
+        return `Item ${i + 1}: axis must be between 0 and 180.`;
       }
     }
   }
@@ -147,6 +132,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
 
     // ── 4. Resolve customer ──────────────────────────────────────────────────
     let customerId: mongoose.Types.ObjectId;
+    let resolvedCustomerName: string = 'Customer';
 
     if (customerIdRaw && mongoose.isValidObjectId(customerIdRaw)) {
       const existing = await Customer.findById(customerIdRaw);
@@ -155,6 +141,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         return;
       }
       customerId = existing._id as mongoose.Types.ObjectId;
+      resolvedCustomerName = existing.name;
     } else {
       if (!customerName?.trim() || !customerMobile?.trim()) {
         res.status(400).json({ message: 'customerName and customerMobile are required when creating a new customer.' });
@@ -167,6 +154,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       });
       customerId = newCustomer._id as mongoose.Types.ObjectId;
       createdCustomerId = customerId;
+      resolvedCustomerName = newCustomer.name;
     }
 
     // ── 5. Create inline OpticalNumbers / Prescriptions ──────────────────────
@@ -175,47 +163,70 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       _resolvedPrescription?: mongoose.Types.ObjectId;
     }> = [];
 
+    const newPrescriptionGroups = new Map<string, { userName: string; label: string; items: any[] }>();
+
     for (const item of items) {
-      if (item.type === 'opticalLens' && item.inlineOpticalNumber && !item.opticalLens) {
-        const rx = item.inlineOpticalNumber;
-        // Create Prescription (new system)
-        const newPrescription = (await Prescription.create({
-          customer: customerId,
-          label: rx.name.trim(),
-          leftSpherical: rx.leftSpherical,
-          leftCylinder: rx.leftCylinder,
-          leftAddition: rx.leftAddition,
-          leftAxis: rx.leftAxis,
-          rightSpherical: rx.rightSpherical,
-          rightCylinder: rx.rightCylinder,
-          rightAddition: rx.rightAddition,
-          rightAxis: rx.rightAxis,
-        })) as { _id: mongoose.Types.ObjectId };
-        createdPrescriptionIds.push(newPrescription._id);
+      if (item.type === 'opticalLens') {
+        const enhancedItem = { ...item };
+        let targetUserName = item.userName?.trim() || resolvedCustomerName;
 
-        // Also keep backward compat with OpticalNumber
-        const newOptical = (await OpticalNumber.create({
-          customer: customerId,
-          name: rx.name.trim(),
-          lensType: rx.lensType || undefined,
-          leftSpherical: rx.leftSpherical,
-          leftCylinder: rx.leftCylinder,
-          leftAddition: rx.leftAddition,
-          leftAxis: rx.leftAxis,
-          rightSpherical: rx.rightSpherical,
-          rightCylinder: rx.rightCylinder,
-          rightAddition: rx.rightAddition,
-          rightAxis: rx.rightAxis,
-        })) as { _id: mongoose.Types.ObjectId };
-        createdOpticalNumberIds.push(newOptical._id);
+        if (item.prescription && mongoose.isValidObjectId(item.prescription)) {
+          // A prescription was selected. Still fetch it to get power arrays if they weren't fully provided
+          // But since the new frontend sends powers inline even when loaded, we can just use the powers directly.
+          // Wait, the new prompt says: "Load Saved Rx: ... user can edit before saving ... store prescription_id".
+          // If the powers are inline, they are already on the item object. We don't fetch and overwrite them unless we need to.
+          // The prompt says: "If prescription ObjectId is provided fetch the Prescription document. Extract values based on item.eye... Store these values... Also copy prescription.userName".
+          // Wait, "edited values override the loaded ones." "The prescription _id is still sent so history is maintained, but the stored InvoiceItem power reflects what was actually ordered."
+          // So if the frontend already submits `spherical`, `cylinder` etc as edited, we SHOULD use the ones provided in `item` first?
+          // Let's just use what's in `item`. But we need to make sure we don't wipe it out.
+          const rx = await Prescription.findById(item.prescription);
+          if (rx) {
+            if (!item.userName?.trim() && rx.userName) targetUserName = rx.userName;
+            if (!item.lensLabel?.trim()) enhancedItem.lensLabel = rx.label;
+          }
+        } else if (item.lensLabel?.trim()) {
+          // Inland entry with a label: we should save a new Prescription grouping
+          const groupKey = `${targetUserName}|${item.lensLabel.trim()}`;
+          if (!newPrescriptionGroups.has(groupKey)) {
+            newPrescriptionGroups.set(groupKey, { userName: targetUserName, label: item.lensLabel.trim(), items: [] });
+          }
+          newPrescriptionGroups.get(groupKey)!.items.push(enhancedItem);
+        }
 
-        resolvedItems.push({
-          ...item,
-          _resolvedOpticalLens: newOptical._id,
-          _resolvedPrescription: newPrescription._id,
-        });
+        enhancedItem.userName = targetUserName;
+        resolvedItems.push(enhancedItem);
       } else {
         resolvedItems.push({ ...item });
+      }
+    }
+
+    // Process new inline prescriptions
+    for (const group of Array.from(newPrescriptionGroups.values())) {
+      const rxDoc: Record<string, any> = {
+        customer: customerId,
+        label: group.label,
+        userName: group.userName,
+      };
+
+      for (const i of group.items) {
+        if (i.eye === 'right') {
+          rxDoc.rightSpherical = i.spherical;
+          rxDoc.rightCylinder = i.cylinder;
+          rxDoc.rightAxis = i.axis;
+          rxDoc.rightAddition = i.addition;
+        } else if (i.eye === 'left') {
+          rxDoc.leftSpherical = i.spherical;
+          rxDoc.leftCylinder = i.cylinder;
+          rxDoc.leftAxis = i.axis;
+          rxDoc.leftAddition = i.addition;
+        }
+      }
+
+      const newPrescription = await Prescription.create(rxDoc);
+      createdPrescriptionIds.push(newPrescription._id as mongoose.Types.ObjectId);
+
+      for (const i of group.items) {
+        i._resolvedPrescription = newPrescription._id as mongoose.Types.ObjectId;
       }
     }
 
@@ -231,8 +242,14 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       if (item.type === 'fragrance' && item.fragrance) doc.fragrance = item.fragrance;
       if (item.type === 'opticalLens') {
         doc.opticalLens = item._resolvedOpticalLens ?? item.opticalLens;
-        if (item._resolvedPrescription) doc.prescription = item._resolvedPrescription;
-        if (item.prescription) doc.prescription = item.prescription;
+        doc.prescription = item._resolvedPrescription ?? item.prescription;
+        doc.eye = item.eye;
+        doc.userName = item.userName;
+        doc.spherical = item.spherical;
+        doc.cylinder = item.cylinder;
+        doc.axis = item.axis;
+        doc.addition = item.addition;
+        doc.lensLabel = item.lensLabel;
       }
 
       const invoiceItem = await InvoiceItem.create(doc);
