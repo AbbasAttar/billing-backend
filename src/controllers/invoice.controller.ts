@@ -8,6 +8,8 @@ import { OpticalNumber } from '../models/OpticalNumber.model';
 import { Customer } from '../models/Customer.model';
 import type { CreateInvoiceInput, CreateInvoiceItemInput } from '../types';
 
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 // ── Populate helper ──────────────────────────────────────────────────────────
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -31,8 +33,8 @@ const validateAxis = (val?: number): boolean =>
 
 function validateItems(items: CreateInvoiceItemInput[]): string | null {
   for (const [i, item] of items.entries()) {
-    if (!Number.isInteger(item.quantity) || item.quantity < 1) {
-      return `Item ${i + 1}: quantity must be a positive integer.`;
+    if (typeof item.quantity !== 'number' || item.quantity < 0.25) {
+      return `Item ${i + 1}: quantity must be a positive quarter.`;
     }
     if (typeof item.price !== 'number' || item.price < 0) {
       return `Item ${i + 1}: price must be a non-negative number.`;
@@ -165,6 +167,8 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
 
     const newPrescriptionGroups = new Map<string, { userName: string; label: string; items: any[] }>();
 
+    console.log(`[createInvoice] Processing ${items.length} items`);
+
     for (const item of items) {
       if (item.type === 'opticalLens') {
         const enhancedItem: CreateInvoiceItemInput & {
@@ -177,14 +181,17 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
           // A prescription was selected.
           const rx = await Prescription.findById(item.prescription);
           if (rx) {
+            console.log(`[createInvoice] Using existing prescription for ${targetUserName}`);
             if (!item.userName?.trim() && rx.userName) targetUserName = rx.userName;
             if (!item.lensLabel?.trim()) enhancedItem.lensLabel = rx.label;
           }
-        } else if (item.lensLabel?.trim()) {
-          // Inland entry with a label: we should save a new Prescription grouping
-          const groupKey = `${targetUserName}|${item.lensLabel.trim()}`;
+        } else if (item.lensLabel?.trim() || item.spherical !== null) {
+          // Inland entry: we should save a new Prescription grouping
+          const label = item.lensLabel?.trim() || "Prescription";
+          const groupKey = `${targetUserName}|${label}`;
           if (!newPrescriptionGroups.has(groupKey)) {
-            newPrescriptionGroups.set(groupKey, { userName: targetUserName, label: item.lensLabel.trim(), items: [] });
+            console.log(`[createInvoice] Queuing new prescription creation: ${groupKey}`);
+            newPrescriptionGroups.set(groupKey, { userName: targetUserName, label: label, items: [] });
           }
           newPrescriptionGroups.get(groupKey)!.items.push(enhancedItem);
         }
@@ -197,34 +204,53 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
             category: item.lensCategory,
             index: item.lensIndex || null,
             coating: item.lensCoating || null,
+            spherical: item.spherical === undefined ? null : item.spherical,
+            cylinder: item.cylinder === undefined ? null : item.cylinder,
+            addition: item.addition === undefined ? null : item.addition,
+            sellPrice: item.price,
           };
 
+          console.log(`[createInvoice] Catalogue Sync (Eye: ${item.eye}) - Filter:`, JSON.stringify(filter, null, 2));
+
           let lensDoc = await OpticalLens.findOne({
-            brand: { $regex: new RegExp(`^${filter.brand}$`, 'i') },
-            name: { $regex: new RegExp(`^${filter.name}$`, 'i') },
+            brand: { $regex: new RegExp(`^${escapeRegExp(filter.brand)}$`, 'i') },
+            name: { $regex: new RegExp(`^${escapeRegExp(filter.name)}$`, 'i') },
             category: filter.category,
-            index: filter.index ?? null,
-            coating: filter.coating ?? null
+            index: filter.index,
+            coating: filter.coating,
+            spherical: filter.spherical,
+            cylinder: filter.cylinder,
+            addition: filter.addition,
           } as any);
 
           if (!lensDoc) {
             try {
-              lensDoc = await OpticalLens.create(filter);
+              console.log(`[createInvoice] No match found. Creating new lens: ${filter.brand} ${filter.name} (${item.eye} eye)`);
+              lensDoc = await OpticalLens.create(filter as any);
+              console.log(`[createInvoice] Lens created successfully:`, JSON.stringify(lensDoc, null, 2));
             } catch (err: any) {
               if (err.code === 11000) {
+                console.log(`[createInvoice] Duplicate detected (Race Condition). Fetching existing lens.`);
                 lensDoc = await OpticalLens.findOne({
-                  brand: { $regex: new RegExp(`^${filter.brand}$`, 'i') },
-                  name: { $regex: new RegExp(`^${filter.name}$`, 'i') },
+                  brand: { $regex: new RegExp(`^${escapeRegExp(filter.brand)}$`, 'i') },
+                  name: { $regex: new RegExp(`^${escapeRegExp(filter.name)}$`, 'i') },
                   category: filter.category,
-                  index: filter.index ?? null,
-                  coating: filter.coating ?? null
+                  index: filter.index,
+                  coating: filter.coating,
+                  spherical: filter.spherical,
+                  cylinder: filter.cylinder,
+                  addition: filter.addition,
                 } as any);
               } else {
+                console.error(`[createInvoice] Failed to create lens:`, err);
                 throw err;
               }
             }
+          } else {
+            console.log(`[createInvoice] Match found! Linking to lens ID: ${lensDoc._id}`);
           }
           if (lensDoc) {
+            console.log(`[createInvoice] Lens resolved: ${lensDoc._id}`);
             enhancedItem._resolvedOpticalLens = lensDoc._id as mongoose.Types.ObjectId;
           }
         }
@@ -344,6 +370,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
     const populated = await populateInvoice(Invoice.findById(invoice._id));
     res.status(201).json(populated);
   } catch (error) {
+    console.error('[createInvoice] Critical failure, rolling back:', error);
     // ── Rollback ─────────────────────────────────────────────────────────────
     if (createdInvoiceItemIds.length > 0) {
       await InvoiceItem.deleteMany({ _id: { $in: createdInvoiceItemIds } }).catch(() => { });

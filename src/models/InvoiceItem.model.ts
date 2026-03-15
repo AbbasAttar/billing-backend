@@ -35,7 +35,7 @@ const InvoiceItemSchema = new Schema<IInvoiceItem>(
     axis: { type: Number, default: null },
     addition: { type: Number, default: null },
     lensLabel: { type: String, default: null },
-    quantity: { type: Number, required: true, min: 1 },
+    quantity: { type: Number, required: true, min: 0.25 },
     price: { type: Number, required: true, min: 0 },
     // Lens product fields
     lensBrand: { type: String, default: null },
