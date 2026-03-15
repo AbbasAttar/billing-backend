@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import {
     getAllOpticalLenses,
+    getBrands,
     searchOpticalLenses,
     getOpticalLensById,
     createOpticalLens,
@@ -10,6 +11,7 @@ import {
 
 const router = Router();
 
+router.get('/brands', getBrands);
 router.get('/search', searchOpticalLenses);
 router.get('/', getAllOpticalLenses);
 router.get('/:id', getOpticalLensById);

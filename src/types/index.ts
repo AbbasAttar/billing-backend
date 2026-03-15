@@ -15,14 +15,21 @@ export interface CreateFragranceItemInput {
 export interface CreateOpticalLensItemInput {
   type: "opticalLens";
   eye: "left" | "right";
+  // Lens catalogue fields (new)
+  lensBrand?: string;
+  lensName?: string;
+  lensCategory?: string;
+  lensIndex?: string;
+  lensCoating?: string;
+  // Existing fields
   opticalLens?: string;
   prescription?: string;
   userName?: string;
+  lensLabel?: string;
   spherical?: number | null;
   cylinder?: number | null;
   axis?: number | null;
   addition?: number | null;
-  lensLabel?: string;
   quantity: number;
   price: number;
 }

@@ -11,16 +11,35 @@ export const getAllOpticalLenses = async (req: Request, res: Response, next: Nex
     }
 };
 
+export const getBrands = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const brands = await OpticalLens.distinct('brand');
+        res.json(brands.sort());
+    } catch (error) {
+        next(error);
+    }
+};
+
 export const searchOpticalLenses = async (req: Request, res: Response, next: NextFunction) => {
     try {
         const q = (req.query.q as string) || '';
-        const lenses = await OpticalLens.find({
-            $or: [
+        const brand = (req.query.brand as string);
+        const name = (req.query.name as string);
+
+        const filter: any = {};
+
+        if (brand && name) {
+            filter.brand = { $regex: new RegExp(`^${brand}$`, 'i') };
+            filter.name = { $regex: new RegExp(`^${name}$`, 'i') };
+        } else if (q) {
+            filter.$or = [
                 { name: { $regex: q, $options: 'i' } },
                 { brand: { $regex: q, $options: 'i' } },
                 { category: { $regex: q, $options: 'i' } },
-            ],
-        }).limit(15);
+            ];
+        }
+
+        const lenses = await OpticalLens.find(filter).limit(15);
         res.json(lenses);
     } catch (error) {
         next(error);

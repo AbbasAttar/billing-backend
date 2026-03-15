@@ -243,6 +243,34 @@ export const getAnalyticsSummary = async (_req: Request, res: Response, next: Ne
             };
         });
 
+        // ── Lens Analytics ──────────────────────────────────────────────────────
+        const topLensCategories = await InvoiceItem.aggregate([
+            { $match: { lensCategory: { $ne: null } } },
+            {
+                $group: {
+                    _id: '$lensCategory',
+                    unitsSold: { $sum: '$quantity' },
+                    revenue: { $sum: { $multiply: ['$quantity', '$price'] } },
+                },
+            },
+            { $sort: { unitsSold: -1 } },
+            { $project: { category: '$_id', unitsSold: 1, revenue: 1, _id: 0 } },
+        ]);
+
+        const topLensBrands = await InvoiceItem.aggregate([
+            { $match: { lensBrand: { $ne: null } } },
+            {
+                $group: {
+                    _id: '$lensBrand',
+                    unitsSold: { $sum: '$quantity' },
+                    revenue: { $sum: { $multiply: ['$quantity', '$price'] } },
+                },
+            },
+            { $sort: { unitsSold: -1 } },
+            { $limit: 5 },
+            { $project: { brand: '$_id', unitsSold: 1, revenue: 1, _id: 0 } },
+        ]);
+
         res.json({
             totalRevenue,
             totalCollected,
@@ -257,6 +285,8 @@ export const getAnalyticsSummary = async (_req: Request, res: Response, next: Ne
             topCustomers,
             topProducts: allProducts,
             recentInvoices,
+            topLensCategories,
+            topLensBrands,
         });
     } catch (error) {
         next(error);

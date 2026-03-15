@@ -167,18 +167,14 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
 
     for (const item of items) {
       if (item.type === 'opticalLens') {
-        const enhancedItem = { ...item };
+        const enhancedItem: CreateInvoiceItemInput & {
+          _resolvedOpticalLens?: mongoose.Types.ObjectId;
+          _resolvedPrescription?: mongoose.Types.ObjectId;
+        } = { ...item };
         let targetUserName = item.userName?.trim() || resolvedCustomerName;
 
         if (item.prescription && mongoose.isValidObjectId(item.prescription)) {
-          // A prescription was selected. Still fetch it to get power arrays if they weren't fully provided
-          // But since the new frontend sends powers inline even when loaded, we can just use the powers directly.
-          // Wait, the new prompt says: "Load Saved Rx: ... user can edit before saving ... store prescription_id".
-          // If the powers are inline, they are already on the item object. We don't fetch and overwrite them unless we need to.
-          // The prompt says: "If prescription ObjectId is provided fetch the Prescription document. Extract values based on item.eye... Store these values... Also copy prescription.userName".
-          // Wait, "edited values override the loaded ones." "The prescription _id is still sent so history is maintained, but the stored InvoiceItem power reflects what was actually ordered."
-          // So if the frontend already submits `spherical`, `cylinder` etc as edited, we SHOULD use the ones provided in `item` first?
-          // Let's just use what's in `item`. But we need to make sure we don't wipe it out.
+          // A prescription was selected.
           const rx = await Prescription.findById(item.prescription);
           if (rx) {
             if (!item.userName?.trim() && rx.userName) targetUserName = rx.userName;
@@ -191,6 +187,46 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
             newPrescriptionGroups.set(groupKey, { userName: targetUserName, label: item.lensLabel.trim(), items: [] });
           }
           newPrescriptionGroups.get(groupKey)!.items.push(enhancedItem);
+        }
+
+        // ── Auto-Catalogue logic (Part 3) ────────────────────────────────────
+        if (item.lensBrand?.trim() && item.lensName?.trim() && item.lensCategory) {
+          const filter = {
+            brand: item.lensBrand.trim(),
+            name: item.lensName.trim(),
+            category: item.lensCategory,
+            index: item.lensIndex || null,
+            coating: item.lensCoating || null,
+          };
+
+          let lensDoc = await OpticalLens.findOne({
+            brand: { $regex: new RegExp(`^${filter.brand}$`, 'i') },
+            name: { $regex: new RegExp(`^${filter.name}$`, 'i') },
+            category: filter.category,
+            index: filter.index ?? null,
+            coating: filter.coating ?? null
+          } as any);
+
+          if (!lensDoc) {
+            try {
+              lensDoc = await OpticalLens.create(filter);
+            } catch (err: any) {
+              if (err.code === 11000) {
+                lensDoc = await OpticalLens.findOne({
+                  brand: { $regex: new RegExp(`^${filter.brand}$`, 'i') },
+                  name: { $regex: new RegExp(`^${filter.name}$`, 'i') },
+                  category: filter.category,
+                  index: filter.index ?? null,
+                  coating: filter.coating ?? null
+                } as any);
+              } else {
+                throw err;
+              }
+            }
+          }
+          if (lensDoc) {
+            enhancedItem._resolvedOpticalLens = lensDoc._id as mongoose.Types.ObjectId;
+          }
         }
 
         enhancedItem.userName = targetUserName;
@@ -250,6 +286,13 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         doc.axis = item.axis;
         doc.addition = item.addition;
         doc.lensLabel = item.lensLabel;
+
+        // Denormalized lens spec fields
+        doc.lensBrand = item.lensBrand || null;
+        doc.lensName = item.lensName || null;
+        doc.lensCategory = item.lensCategory || null;
+        doc.lensIndex = item.lensIndex || null;
+        doc.lensCoating = item.lensCoating || null;
       }
 
       const invoiceItem = await InvoiceItem.create(doc);
