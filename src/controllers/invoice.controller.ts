@@ -433,3 +433,187 @@ export const deleteInvoice = async (req: Request, res: Response, next: NextFunct
     next(error);
   }
 };
+
+// ── ADD Item ─────────────────────────────────────────────────────────────────
+
+export const addItemToInvoice = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const invoiceId = req.params.id;
+    const invoice = await Invoice.findById(invoiceId);
+    if (!invoice) {
+      res.status(404).json({ message: 'Invoice not found' });
+      return;
+    }
+
+    const body = req.body as any;
+    
+    // Validate polymorphic rule
+    if (!body.frame && !body.opticalLens && !body.fragrance) {
+      res.status(400).json({ message: 'Each invoice item must reference exactly one of: frame, opticalLens, fragrance' });
+      return;
+    }
+    
+    if (typeof body.quantity !== 'number' || body.quantity <= 0) {
+      res.status(400).json({ message: 'Quantity must be a positive number.' });
+      return;
+    }
+    if (typeof body.price !== 'number' || body.price < 0) {
+      res.status(400).json({ message: 'Price must be a non-negative number.' });
+      return;
+    }
+    
+    const doc: any = {
+      quantity: body.quantity,
+      price: body.price,
+    };
+    if (body.type === 'frame' && body.frame) doc.frame = body.frame;
+    if (body.type === 'fragrance' && body.fragrance) doc.fragrance = body.fragrance;
+    if (body.type === 'opticalLens') {
+      doc.opticalLens = body.opticalLens;
+      doc.prescription = body.prescription;
+      doc.eye = body.eye;
+      doc.userName = body.userName;
+      doc.spherical = body.spherical;
+      doc.cylinder = body.cylinder;
+      doc.axis = body.axis;
+      doc.addition = body.addition;
+      doc.lensLabel = body.lensLabel;
+      doc.lensBrand = body.lensBrand;
+      doc.lensName = body.lensName;
+      doc.lensCategory = body.lensCategory;
+      doc.lensIndex = body.lensIndex;
+      doc.lensCoating = body.lensCoating;
+    }
+
+    const invoiceItem = await InvoiceItem.create(doc);
+    invoice.items.push(invoiceItem._id as mongoose.Types.ObjectId);
+    
+    // Recalc total
+    const allItems = await InvoiceItem.find({ _id: { $in: invoice.items } });
+    const subtotal = allItems.reduce((sum, item) => sum + item.quantity * item.price, 0);
+    const total = subtotal - invoice.discount;
+    
+    invoice.subtotal = subtotal;
+    invoice.total = total;
+    
+    const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount, 0);
+    if (totalPaid >= total) {
+      invoice.billClearDate = new Date();
+    } else {
+      invoice.billClearDate = undefined;
+    }
+    
+    await invoice.save();
+
+    const populated = await populateInvoice(Invoice.findById(invoice._id));
+    res.json(populated);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ── REMOVE Item ──────────────────────────────────────────────────────────────
+
+export const removeItemFromInvoice = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const id = req.params.id as string;
+    const itemIndex = req.params.itemIndex as string;
+    const index = parseInt(itemIndex, 10);
+    
+    const invoice = await Invoice.findById(id);
+    if (!invoice) {
+      res.status(404).json({ message: 'Invoice not found' });
+      return;
+    }
+    
+    if (invoice.items.length <= 1) {
+      res.status(400).json({ message: 'Invoice must have at least one item' });
+      return;
+    }
+    
+    if (index < 0 || index >= invoice.items.length) {
+      res.status(400).json({ message: 'Invalid item index' });
+      return;
+    }
+    
+    const itemToRemoveId = invoice.items[index];
+    invoice.items.splice(index, 1);
+    
+    await InvoiceItem.findByIdAndDelete(itemToRemoveId);
+    
+    // Recalc total
+    const allItems = await InvoiceItem.find({ _id: { $in: invoice.items } });
+    const subtotal = allItems.reduce((sum, item) => sum + item.quantity * item.price, 0);
+    const total = subtotal - invoice.discount;
+    
+    invoice.subtotal = subtotal;
+    invoice.total = total;
+    
+    const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount, 0);
+    if (totalPaid >= total) {
+      invoice.billClearDate = new Date();
+    } else {
+      invoice.billClearDate = undefined;
+    }
+    
+    await invoice.save();
+    
+    const populated = await populateInvoice(Invoice.findById(invoice._id));
+    res.json(populated);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ── UPDATE Item Inline ───────────────────────────────────────────────────────
+
+export const updateItemInInvoice = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { id, itemId } = req.params;
+    const { quantity, price } = req.body;
+    
+    if (typeof quantity !== 'number' || quantity <= 0) {
+      res.status(400).json({ message: 'Quantity must be a positive number.' });
+      return;
+    }
+    if (typeof price !== 'number' || price < 0) {
+      res.status(400).json({ message: 'Price must be a non-negative number.' });
+      return;
+    }
+    
+    const invoice = await Invoice.findById(id);
+    if (!invoice) {
+      res.status(404).json({ message: 'Invoice not found' });
+      return;
+    }
+    
+    if (!invoice.items.includes(itemId as any)) {
+      res.status(400).json({ message: 'Item does not belong to this invoice' });
+      return;
+    }
+    
+    await InvoiceItem.findByIdAndUpdate(itemId, { quantity, price });
+    
+    // Recalc total
+    const allItems = await InvoiceItem.find({ _id: { $in: invoice.items } });
+    const subtotal = allItems.reduce((sum, item) => sum + item.quantity * item.price, 0);
+    const total = subtotal - invoice.discount;
+    
+    invoice.subtotal = subtotal;
+    invoice.total = total;
+    
+    const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount, 0);
+    if (totalPaid >= total) {
+      invoice.billClearDate = new Date();
+    } else {
+      invoice.billClearDate = undefined;
+    }
+    
+    await invoice.save();
+    
+    const populated = await populateInvoice(Invoice.findById(invoice._id));
+    res.json(populated);
+  } catch (error) {
+    next(error);
+  }
+};

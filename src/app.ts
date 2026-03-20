@@ -12,6 +12,7 @@ import frameRoutes from './routes/frame.routes';
 import invoiceItemRoutes from './routes/invoiceItem.routes';
 import invoiceRoutes from './routes/invoice.routes';
 import analyticsRoutes from './routes/analytics.routes';
+import dashboardRoutes from './routes/dashboard.routes';
 
 const app = express();
 
@@ -37,6 +38,7 @@ app.use('/api/frames', frameRoutes);
 app.use('/api/invoice-items', invoiceItemRoutes);
 app.use('/api/invoices', invoiceRoutes);
 app.use('/api/analytics', analyticsRoutes);
+app.use('/api/dashboard', dashboardRoutes);
 
 // 404 handler
 app.use((_req, res) => {

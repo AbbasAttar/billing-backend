@@ -2,6 +2,9 @@ import { Request, Response, NextFunction } from 'express';
 import mongoose from 'mongoose';
 import { Invoice } from '../models/Invoice.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
+import { Fragrance } from '../models/Fragrance.model';
+import { Frame } from '../models/Frame.model';
+import { OpticalLens } from '../models/OpticalLens.model';
 
 // ── Aggregation result types ─────────────────────────────────────────────────
 
@@ -242,6 +245,251 @@ export const getAnalyticsSummary = async (req: Request, res: Response, next: Nex
             topProducts: [],
             revenueByMonth: [] // replaced by dailyEarnings for the graph, but keeping keys for safety
         });
+    } catch (error) {
+        next(error);
+    }
+};
+
+// ── GET /api/analytics/monthly-summary?year= ─────────────────────────────────
+export const getMonthlySummary = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const year = parseInt(req.query.year as string) || new Date().getFullYear();
+        const yearStart = new Date(year, 0, 1);
+        const yearEnd   = new Date(year, 11, 31, 23, 59, 59, 999);
+
+        // ── Per-invoice revenue & count ──────────────────────────────────────────
+        const revenueAgg = await Invoice.aggregate([
+            { $match: { billDate: { $gte: yearStart, $lte: yearEnd } } },
+            {
+                $group: {
+                    _id:          { $month: '$billDate' },
+                    totalRevenue: { $sum: '$total' },
+                    invoiceCount: { $sum: 1 },
+                },
+            },
+        ]);
+
+        // ── Category breakdown: join Invoice → InvoiceItem ───────────────────────
+        const categoryAgg = await Invoice.aggregate([
+            { $match: { billDate: { $gte: yearStart, $lte: yearEnd } } },
+            {
+                $lookup: {
+                    from:         'invoiceitems',
+                    localField:   'items',
+                    foreignField: '_id',
+                    as:           'itemDocs',
+                },
+            },
+            { $unwind: '$itemDocs' },
+            {
+                $project: {
+                    month:    { $month: '$billDate' },
+                    category: {
+                        $switch: {
+                            branches: [
+                                { case: { $ifNull: ['$itemDocs.frame',       false] }, then: 'frame' },
+                                { case: { $ifNull: ['$itemDocs.opticalLens', false] }, then: 'opticalLens' },
+                            ],
+                            default: 'fragrance',
+                        },
+                    },
+                    revenue:  { $multiply: ['$itemDocs.quantity', '$itemDocs.price'] },
+                    quantity: '$itemDocs.quantity',
+                },
+            },
+            {
+                $group: {
+                    _id:     { month: '$month', category: '$category' },
+                    units:   { $sum: '$quantity' },
+                    revenue: { $sum: '$revenue' },
+                },
+            },
+        ]);
+
+        // ── Fragrance type breakdown ──────────────────────────────────────────────
+        const fragranceAgg = await Invoice.aggregate([
+            { $match: { billDate: { $gte: yearStart, $lte: yearEnd } } },
+            {
+                $lookup: {
+                    from:         'invoiceitems',
+                    localField:   'items',
+                    foreignField: '_id',
+                    as:           'itemDocs',
+                },
+            },
+            { $unwind: '$itemDocs' },
+            { $match: { 'itemDocs.fragrance': { $exists: true, $ne: null } } },
+            {
+                $lookup: {
+                    from:         'fragrances',
+                    localField:   'itemDocs.fragrance',
+                    foreignField: '_id',
+                    as:           'frag',
+                },
+            },
+            { $unwind: '$frag' },
+            {
+                $group: {
+                    _id:     { month: { $month: '$billDate' }, type: '$frag.type' },
+                    units:   { $sum: '$itemDocs.quantity' },
+                    revenue: { $sum: { $multiply: ['$itemDocs.quantity', '$itemDocs.price'] } },
+                },
+            },
+        ]);
+
+        // ── Assemble 12-month result ──────────────────────────────────────────────
+        const zeroStats = () => ({ units: 0, revenue: 0 });
+
+        const months = Array.from({ length: 12 }, (_, i) => {
+            const month = i + 1;
+            const rev = revenueAgg.find((r: any) => r._id === month);
+            return {
+                month,
+                totalRevenue: rev?.totalRevenue ?? 0,
+                invoiceCount: rev?.invoiceCount ?? 0,
+                categories: {
+                    frame:       zeroStats(),
+                    opticalLens: zeroStats(),
+                    fragrance:   zeroStats(),
+                },
+                fragranceTypes: {
+                    perfume: zeroStats(),
+                    attar:   zeroStats(),
+                    bakhoor: zeroStats(),
+                },
+            };
+        });
+
+        for (const entry of categoryAgg as any[]) {
+            const m = months[entry._id.month - 1];
+            const cat = entry._id.category as 'frame' | 'opticalLens' | 'fragrance';
+            if (m?.categories[cat]) {
+                m.categories[cat].units   = entry.units;
+                m.categories[cat].revenue = entry.revenue;
+            }
+        }
+
+        for (const entry of fragranceAgg as any[]) {
+            const m = months[entry._id.month - 1];
+            const ft = entry._id.type as 'perfume' | 'attar' | 'bakhoor';
+            if (m?.fragranceTypes[ft]) {
+                m.fragranceTypes[ft].units   = entry.units;
+                m.fragranceTypes[ft].revenue = entry.revenue;
+            }
+        }
+
+        res.json({ year, months });
+    } catch (error) {
+        next(error);
+    }
+};
+
+// ── GET /api/analytics/top-items?month=&year=&category= ──────────────────────
+export const getTopItems = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const month    = parseInt(req.query.month as string) || (new Date().getMonth() + 1);
+        const year     = parseInt(req.query.year  as string) || new Date().getFullYear();
+        const category = (req.query.category as string) || 'all';
+
+        const monthStart = new Date(year, month - 1, 1);
+        const monthEnd   = new Date(year, month, 0, 23, 59, 59, 999);
+
+        const categoryMatch: Record<string, unknown> = {};
+        if (category === 'frame')       categoryMatch['itemDocs.frame']       = { $exists: true, $ne: null };
+        if (category === 'opticalLens') categoryMatch['itemDocs.opticalLens'] = { $exists: true, $ne: null };
+        if (category === 'fragrance')   categoryMatch['itemDocs.fragrance']   = { $exists: true, $ne: null };
+
+        const pipeline: any[] = [
+            { $match: { billDate: { $gte: monthStart, $lte: monthEnd } } },
+            {
+                $lookup: {
+                    from:         'invoiceitems',
+                    localField:   'items',
+                    foreignField: '_id',
+                    as:           'itemDocs',
+                },
+            },
+            { $unwind: '$itemDocs' },
+            ...(Object.keys(categoryMatch).length ? [{ $match: categoryMatch }] : []),
+            {
+                $addFields: {
+                    itemCategory: {
+                        $switch: {
+                            branches: [
+                                { case: { $ifNull: ['$itemDocs.frame',       false] }, then: 'frame' },
+                                { case: { $ifNull: ['$itemDocs.opticalLens', false] }, then: 'opticalLens' },
+                            ],
+                            default: 'fragrance',
+                        },
+                    },
+                    itemRef: { $ifNull: ['$itemDocs.frame', { $ifNull: ['$itemDocs.opticalLens', '$itemDocs.fragrance'] }] },
+                },
+            },
+            {
+                $group: {
+                    _id:     { itemRef: '$itemRef', category: '$itemCategory' },
+                    units:   { $sum: '$itemDocs.quantity' },
+                    revenue: { $sum: { $multiply: ['$itemDocs.quantity', '$itemDocs.price'] } },
+                },
+            },
+            { $sort: { units: -1 } },
+            { $limit: 5 },
+            {
+                $lookup: {
+                    from:         'frames',
+                    localField:   '_id.itemRef',
+                    foreignField: '_id',
+                    as:           'frameDoc',
+                },
+            },
+            {
+                $lookup: {
+                    from:         'fragrances',
+                    localField:   '_id.itemRef',
+                    foreignField: '_id',
+                    as:           'fragranceDoc',
+                },
+            },
+            {
+                $lookup: {
+                    from:         'opticallenses',
+                    localField:   '_id.itemRef',
+                    foreignField: '_id',
+                    as:           'lensDoc',
+                },
+            },
+            {
+                $project: {
+                    _id:      0,
+                    itemId:   { $toString: '$_id.itemRef' },
+                    category: '$_id.category',
+                    units:    1,
+                    revenue:  1,
+                    name: {
+                        $ifNull: [
+                            { $arrayElemAt: ['$frameDoc.name', 0] },
+                            { $ifNull: [
+                                { $arrayElemAt: ['$fragranceDoc.name', 0] },
+                                { $ifNull: [
+                                    { $arrayElemAt: ['$lensDoc.name', 0] },
+                                    'Unknown',
+                                ]},
+                            ]},
+                        ],
+                    },
+                    companyName: {
+                        $ifNull: [
+                            { $arrayElemAt: ['$frameDoc.companyName', 0] },
+                            { $arrayElemAt: ['$fragranceDoc.companyName', 0] },
+                        ],
+                    },
+                    type: { $arrayElemAt: ['$fragranceDoc.type', 0] },
+                },
+            },
+        ];
+
+        const result = await Invoice.aggregate(pipeline);
+        res.json(result);
     } catch (error) {
         next(error);
     }
