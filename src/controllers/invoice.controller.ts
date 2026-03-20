@@ -320,7 +320,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
 
     // ── 8. Resolve initialPayment ─────────────────────────────────────────────
     const { initialPayment } = body;
-    const initialPayments: Array<{ date: Date; amount: number }> = [];
+    const initialPayments: Array<{ date: Date; amount: number; method: 'cash' | 'online' }> = [];
     let billClearDate: Date | undefined;
 
     if (initialPayment !== undefined && initialPayment !== 0) {
@@ -332,7 +332,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         res.status(400).json({ message: 'Initial payment cannot exceed invoice total.' });
         return;
       }
-      initialPayments.push({ date: billDate, amount: initialPayment });
+      initialPayments.push({ date: billDate, amount: initialPayment, method: 'cash' });
       if (initialPayment === total) {
         billClearDate = billDate;
       }
@@ -389,10 +389,14 @@ export const updateInvoice = async (req: Request, res: Response, next: NextFunct
 
 export const addPayment = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { amount, date } = req.body;
+    const { amount, date, method } = req.body as { amount?: number; date?: string; method?: 'cash' | 'online' };
 
     if (typeof amount !== 'number' || amount <= 0) {
       res.status(400).json({ message: 'amount must be a positive number.' });
+      return;
+    }
+    if (!method || !['cash', 'online'].includes(method)) {
+      res.status(400).json({ message: "method is required and must be either 'cash' or 'online'." });
       return;
     }
 
@@ -403,11 +407,13 @@ export const addPayment = async (req: Request, res: Response, next: NextFunction
     }
 
     const paymentDate = date ? new Date(date) : new Date();
-    invoice.payments.push({ date: paymentDate, amount });
+    invoice.payments.push({ date: paymentDate, amount, method });
 
     const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount, 0);
     if (totalPaid >= invoice.total) {
       invoice.billClearDate = new Date();
+    } else {
+      invoice.billClearDate = undefined;
     }
 
     await invoice.save();
@@ -447,8 +453,8 @@ export const addItemToInvoice = async (req: Request, res: Response, next: NextFu
 
     const body = req.body as any;
     
-    // Validate polymorphic rule
-    if (!body.frame && !body.opticalLens && !body.fragrance) {
+    const refCount = [body.frame, body.opticalLens, body.fragrance].filter(Boolean).length;
+    if (refCount !== 1) {
       res.status(400).json({ message: 'Each invoice item must reference exactly one of: frame, opticalLens, fragrance' });
       return;
     }

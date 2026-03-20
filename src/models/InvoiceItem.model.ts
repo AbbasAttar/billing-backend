@@ -47,5 +47,9 @@ const InvoiceItemSchema = new Schema<IInvoiceItem>(
   { timestamps: true }
 );
 
-export const InvoiceItem = mongoose.model<IInvoiceItem>('InvoiceItem', InvoiceItemSchema);
+InvoiceItemSchema.path('frame').validate(function (this: IInvoiceItem) {
+  const refs = [this.frame, this.opticalLens, this.fragrance].filter(Boolean);
+  return refs.length === 1;
+}, 'Each invoice item must reference exactly one of: frame, opticalLens, fragrance');
 
+export const InvoiceItem = mongoose.model<IInvoiceItem>('InvoiceItem', InvoiceItemSchema);

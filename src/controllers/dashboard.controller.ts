@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import mongoose from 'mongoose';
 import { Invoice } from '../models/Invoice.model';
 import { Customer } from '../models/Customer.model';
+import { Expense } from '../models/Expense.model';
 
 // ── Helper: get today's date range ──────────────────────────────────────────
 const getTodayRange = () => {
@@ -23,6 +24,8 @@ export const getDailyKPIs = async (_req: Request, res: Response, next: NextFunct
             outstandingAgg,
             newCustomersAgg,
             billsClearedAgg,
+            expensesTodayAgg,
+            overdueAgg,
         ] = await Promise.all([
             // Today's revenue: sum of payments made today
             Invoice.aggregate([
@@ -58,15 +61,36 @@ export const getDailyKPIs = async (_req: Request, res: Response, next: NextFunct
 
             // Bills cleared today
             Invoice.countDocuments({ billClearDate: { $gte: todayStart, $lte: todayEnd } }),
+
+            Expense.aggregate([
+                { $match: { date: { $gte: todayStart, $lte: todayEnd }, isVoid: false } },
+                { $group: { _id: null, total: { $sum: '$amount' } } },
+            ]),
+
+            Invoice.countDocuments({
+                billClearDate: null,
+                billDate: { $lt: new Date(Date.now() - (30 * 86400000)) },
+            }),
         ]);
 
+        const todayRevenue = (revenueAgg[0] as any)?.total ?? 0;
+        const outstandingBalance = (outstandingAgg[0] as any)?.balance ?? 0;
+        const expensesToday = (expensesTodayAgg[0] as any)?.total ?? 0;
+        const pendingInvoicesCount = pendingAgg;
+
         res.json({
-            todayRevenue:       (revenueAgg[0] as any)?.total ?? 0,
+            todayRevenue,
             invoicesCreated:    invoicesCreatedAgg,
-            pendingPayments:    pendingAgg,
-            outstandingBalance: (outstandingAgg[0] as any)?.balance ?? 0,
+            pendingPayments:    pendingInvoicesCount,
+            outstandingBalance,
             newCustomers:       newCustomersAgg,
             billsClearedToday:  billsClearedAgg,
+            pendingInvoicesCount,
+            pendingAmount: outstandingBalance,
+            givenToday: todayRevenue,
+            expensesToday,
+            netCashToday: todayRevenue - expensesToday,
+            overdueCount: overdueAgg,
         });
     } catch (error) {
         next(error);

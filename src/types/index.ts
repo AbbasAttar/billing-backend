@@ -49,3 +49,57 @@ export interface CreateInvoiceInput {
   discount?: number;          // optional discount in rupees (default 0)
   billDate?: string;          // ISO date string (default: today)
 }
+
+export type ExpenseCategory =
+  | 'rent'
+  | 'salary'
+  | 'utilities'
+  | 'stock'
+  | 'maintenance'
+  | 'transport'
+  | 'marketing'
+  | 'miscellaneous';
+
+export type PaymentMethod = 'cash' | 'upi' | 'card' | 'bank_transfer';
+
+export interface IExpenseDto {
+  _id: string;
+  date: string;
+  amount: number;
+  category: ExpenseCategory;
+  note?: string;
+  vendorName?: string;
+  paymentMethod: PaymentMethod;
+  isVoid: boolean;
+  voidReason?: string;
+  createdAt: string;
+}
+
+export interface IExpenseSummaryDto {
+  totalExpenses: number;
+  byCategory: Record<ExpenseCategory, number>;
+  byPaymentMethod: Record<PaymentMethod, number>;
+  count: number;
+}
+
+export interface IPendingInvoiceDto {
+  invoiceId: string;
+  billDate: string;
+  customer: { _id: string; name: string; mobileNumber: string };
+  total: number;
+  paid: number;
+  balance: number;
+  daysPending: number;
+  agingBucket: '0-7' | '8-30' | '31-60' | '61-90' | '90+';
+  lastPayment: { date: string; amount: number; method: 'cash' | 'online' } | null;
+}
+
+export interface IGivenPaymentDto {
+  invoiceId: string;
+  customer: { _id: string; name: string; mobileNumber: string };
+  paymentDate: string;
+  amount: number;
+  invoiceTotal: number;
+  isClearing: boolean;
+  method: 'cash' | 'online';
+}

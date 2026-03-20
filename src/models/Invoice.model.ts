@@ -3,6 +3,7 @@ import mongoose, { Schema, Document } from 'mongoose';
 export interface IPayment {
   date: Date;
   amount: number;
+  method: 'cash' | 'online';
 }
 
 export interface IInvoice extends Document {
@@ -19,6 +20,7 @@ export interface IInvoice extends Document {
 const PaymentSchema = new Schema<IPayment>({
   date: { type: Date, required: true, default: Date.now },
   amount: { type: Number, required: true, min: 0 },
+  method: { type: String, required: true, enum: ['cash', 'online'] },
 });
 
 const InvoiceSchema = new Schema<IInvoice>(
