@@ -15,6 +15,7 @@ import analyticsRoutes from './routes/analytics.routes';
 import dashboardRoutes from './routes/dashboard.routes';
 import expenseRoutes from './routes/expense.routes';
 import paymentsRoutes from './routes/payments.routes';
+import vendorBillRoutes from './routes/vendorBill.routes';
 
 const app = express();
 
@@ -43,6 +44,7 @@ app.use('/api/analytics', analyticsRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/expenses', expenseRoutes);
 app.use('/api/payments', paymentsRoutes);
+app.use('/api/vendor-bills', vendorBillRoutes);
 
 // 404 handler
 app.use((_req, res) => {

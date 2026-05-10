@@ -46,6 +46,11 @@ export interface CreateInvoiceInput {
   customerMobile?: string;
   items: CreateInvoiceItemInput[];
   initialPayment?: number;    // optional upfront payment recorded at creation time
+  initialPayments?: Array<{
+    date?: string;
+    amount: number;
+    method: 'cash' | 'online';
+  }>;
   discount?: number;          // optional discount in rupees (default 0)
   billDate?: string;          // ISO date string (default: today)
 }

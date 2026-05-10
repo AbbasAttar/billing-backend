@@ -13,9 +13,20 @@ const getTodayRange = () => {
 };
 
 // ── GET /api/dashboard/daily ─────────────────────────────────────────────────
-export const getDailyKPIs = async (_req: Request, res: Response, next: NextFunction) => {
+export const getDailyKPIs = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { start: todayStart, end: todayEnd } = getTodayRange();
+        let todayStart: Date;
+        let todayEnd: Date;
+
+        if (req.query.date) {
+            const date = new Date(req.query.date as string);
+            todayStart = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
+            todayEnd   = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
+        } else {
+            const range = getTodayRange();
+            todayStart = range.start;
+            todayEnd   = range.end;
+        }
 
         const [
             revenueAgg,

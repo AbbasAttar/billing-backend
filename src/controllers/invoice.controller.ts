@@ -302,6 +302,12 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         doc.lensCategory = item.lensCategory || null;
         doc.lensIndex = item.lensIndex || null;
         doc.lensCoating = item.lensCoating || null;
+        // Simplified Prescription
+        doc.rightEyeNumber = item.rightEyeNumber || null;
+        doc.leftEyeNumber = item.leftEyeNumber || null;
+        doc.lensCompany = item.lensCompany || null;
+        doc.lensType = item.lensType || null;
+        doc.isSameNumber = item.isSameNumber || false;
       }
 
       const invoiceItem = await InvoiceItem.create(doc);
@@ -319,11 +325,46 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
     const total = subtotal - discount;
 
     // ── 8. Resolve initialPayment ─────────────────────────────────────────────
-    const { initialPayment } = body;
+    const { initialPayment, initialPayments: initialPaymentsInput } = body;
     const initialPayments: Array<{ date: Date; amount: number; method: 'cash' | 'online' }> = [];
     let billClearDate: Date | undefined;
 
-    if (initialPayment !== undefined && initialPayment !== 0) {
+    if (initialPaymentsInput && initialPaymentsInput.length > 0) {
+      let upfrontTotal = 0;
+
+      for (const payment of initialPaymentsInput) {
+        if (typeof payment.amount !== 'number' || payment.amount <= 0) {
+          res.status(400).json({ message: 'Each initial payment must have a positive amount.' });
+          return;
+        }
+        if (!payment.method || !['cash', 'online'].includes(payment.method)) {
+          res.status(400).json({ message: "Each initial payment must include method 'cash' or 'online'." });
+          return;
+        }
+
+        const paymentDate = payment.date ? new Date(payment.date) : billDate;
+        if (Number.isNaN(paymentDate.getTime())) {
+          res.status(400).json({ message: 'Each initial payment date must be valid.' });
+          return;
+        }
+
+        initialPayments.push({
+          date: paymentDate,
+          amount: payment.amount,
+          method: payment.method,
+        });
+        upfrontTotal += payment.amount;
+      }
+
+      if (upfrontTotal > total) {
+        res.status(400).json({ message: 'Initial payments cannot exceed invoice total.' });
+        return;
+      }
+
+      if (upfrontTotal === total) {
+        billClearDate = billDate;
+      }
+    } else if (initialPayment !== undefined && initialPayment !== 0) {
       if (typeof initialPayment !== 'number' || initialPayment <= 0) {
         res.status(400).json({ message: 'initialPayment must be a positive number.' });
         return;
@@ -623,3 +664,4 @@ export const updateItemInInvoice = async (req: Request, res: Response, next: Nex
     next(error);
   }
 };
+

@@ -20,6 +20,12 @@ export interface IInvoiceItem extends Document {
   lensCategory?: string;
   lensIndex?: string;
   lensCoating?: string;
+  // Simplified Prescription
+  rightEyeNumber?: string;
+  leftEyeNumber?: string;
+  lensCompany?: string;
+  lensType?: string;
+  isSameNumber?: boolean;
 }
 
 const InvoiceItemSchema = new Schema<IInvoiceItem>(
@@ -43,6 +49,12 @@ const InvoiceItemSchema = new Schema<IInvoiceItem>(
     lensCategory: { type: String, default: null },
     lensIndex: { type: String, default: null },
     lensCoating: { type: String, default: null },
+    // Simplified Prescription
+    rightEyeNumber: { type: String, default: null },
+    leftEyeNumber: { type: String, default: null },
+    lensCompany: { type: String, default: null },
+    lensType: { type: String, default: null },
+    isSameNumber: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

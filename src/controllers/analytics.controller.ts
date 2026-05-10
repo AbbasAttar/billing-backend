@@ -156,18 +156,30 @@ export const getAnalyticsSummary = async (req: Request, res: Response, next: Nex
         // ── Legacy / Extra data preserved for UI ──────────────────────────────────
         // (Revenue by category, top products, top customers, etc.)
         
-        // Revenue by category (All time for now, or match month? User didn't specify overhauling these, but I'll keep them)
-        const frameItems = await InvoiceItem.aggregate([
-            { $match: { frame: { $exists: true, $ne: null } } },
-            { $group: { _id: null, revenue: { $sum: { $multiply: ['$quantity', '$price'] } }, itemCount: { $sum: '$quantity' } } },
+        // Revenue by category (Filtered by selected month/year)
+        const frameItems = await Invoice.aggregate([
+            { $match: { billDate: { $gte: startOfMonth, $lte: endOfMonth } } },
+            { $unwind: '$items' },
+            { $lookup: { from: 'invoiceitems', localField: 'items', foreignField: '_id', as: 'itemDoc' } },
+            { $unwind: '$itemDoc' },
+            { $match: { 'itemDoc.frame': { $exists: true, $ne: null } } },
+            { $group: { _id: null, revenue: { $sum: { $multiply: ['$itemDoc.quantity', '$itemDoc.price'] } }, itemCount: { $sum: '$itemDoc.quantity' } } },
         ]);
-        const lensItems = await InvoiceItem.aggregate([
-            { $match: { opticalLens: { $exists: true, $ne: null } } },
-            { $group: { _id: null, revenue: { $sum: { $multiply: ['$quantity', '$price'] } }, itemCount: { $sum: '$quantity' } } },
+        const lensItems = await Invoice.aggregate([
+            { $match: { billDate: { $gte: startOfMonth, $lte: endOfMonth } } },
+            { $unwind: '$items' },
+            { $lookup: { from: 'invoiceitems', localField: 'items', foreignField: '_id', as: 'itemDoc' } },
+            { $unwind: '$itemDoc' },
+            { $match: { 'itemDoc.opticalLens': { $exists: true, $ne: null } } },
+            { $group: { _id: null, revenue: { $sum: { $multiply: ['$itemDoc.quantity', '$itemDoc.price'] } }, itemCount: { $sum: '$itemDoc.quantity' } } },
         ]);
-        const fragItems = await InvoiceItem.aggregate([
-            { $match: { fragrance: { $exists: true, $ne: null } } },
-            { $group: { _id: null, revenue: { $sum: { $multiply: ['$quantity', '$price'] } }, itemCount: { $sum: '$quantity' } } },
+        const fragItems = await Invoice.aggregate([
+            { $match: { billDate: { $gte: startOfMonth, $lte: endOfMonth } } },
+            { $unwind: '$items' },
+            { $lookup: { from: 'invoiceitems', localField: 'items', foreignField: '_id', as: 'itemDoc' } },
+            { $unwind: '$itemDoc' },
+            { $match: { 'itemDoc.fragrance': { $exists: true, $ne: null } } },
+            { $group: { _id: null, revenue: { $sum: { $multiply: ['$itemDoc.quantity', '$itemDoc.price'] } }, itemCount: { $sum: '$itemDoc.quantity' } } },
         ]);
 
         const revenueByCategory = [
