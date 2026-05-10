@@ -20,9 +20,7 @@ import vendorBillRoutes from './routes/vendorBill.routes';
 const app = express();
 
 // Middleware
-const corsOrigin = env.NODE_ENV === 'development'
-  ? (origin: string | undefined, cb: (e: Error | null, ok?: boolean) => void) => cb(null, true)
-  : env.CORS_ORIGIN.split(',');
+const corsOrigin = env.CORS_ORIGIN.split(',');
 app.use(cors({ origin: corsOrigin, credentials: true }));
 app.use(express.json());
 
