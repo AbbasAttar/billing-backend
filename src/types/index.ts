@@ -14,7 +14,7 @@ export interface CreateFragranceItemInput {
 
 export interface CreateOpticalLensItemInput {
   type: "opticalLens";
-  eye: "left" | "right";
+  eye?: "left" | "right" | "both";
   // Lens catalogue fields (new)
   lensBrand?: string;
   lensName?: string;
@@ -30,6 +30,11 @@ export interface CreateOpticalLensItemInput {
   cylinder?: number | null;
   axis?: number | null;
   addition?: number | null;
+  rightEyeNumber?: string | null;
+  leftEyeNumber?: string | null;
+  lensCompany?: string | null;
+  lensType?: string | null;
+  isSameNumber?: boolean;
   quantity: number;
   price: number;
 }

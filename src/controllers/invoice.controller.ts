@@ -42,8 +42,23 @@ function validateItems(items: CreateInvoiceItemInput[]): string | null {
       return `Item ${i + 1}: price must be a non-negative number.`;
     }
     if (item.type === 'opticalLens') {
-      if (item.eye !== 'left' && item.eye !== 'right') {
+      const hasLegacyEyeValues =
+        item.spherical !== undefined && item.spherical !== null ||
+        item.cylinder !== undefined && item.cylinder !== null ||
+        item.axis !== undefined && item.axis !== null ||
+        item.addition !== undefined && item.addition !== null;
+      const hasSimplifiedPrescription =
+        Boolean(item.prescription) ||
+        Boolean(item.rightEyeNumber?.trim()) ||
+        Boolean(item.leftEyeNumber?.trim()) ||
+        Boolean(item.lensLabel?.trim()) ||
+        Boolean(item.isSameNumber);
+
+      if (hasLegacyEyeValues && item.eye !== 'left' && item.eye !== 'right') {
         return `Item ${i + 1}: optical lens item must declare eye as 'left' or 'right'.`;
+      }
+      if (!hasLegacyEyeValues && !hasSimplifiedPrescription && item.eye !== undefined && item.eye !== 'left' && item.eye !== 'right' && item.eye !== 'both') {
+        return `Item ${i + 1}: optical lens item has an invalid eye value.`;
       }
       if (!validateAxis(item.axis ?? undefined)) {
         return `Item ${i + 1}: axis must be between 0 and 180.`;
@@ -664,4 +679,3 @@ export const updateItemInInvoice = async (req: Request, res: Response, next: Nex
     next(error);
   }
 };
-
