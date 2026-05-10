@@ -46,12 +46,10 @@ const ExpenseSchema = new Schema<IExpense>(
 ExpenseSchema.index({ date: -1 });
 ExpenseSchema.index({ category: 1 });
 
-ExpenseSchema.pre('validate', function (next) {
+ExpenseSchema.pre('validate', function (this: IExpense) {
   if (this.isVoid && !this.voidReason?.trim()) {
-    next(new Error('voidReason is required when isVoid is true'));
-    return;
+    throw new Error('voidReason is required when isVoid is true');
   }
-  next();
 });
 
 export const Expense = mongoose.model<IExpense>('Expense', ExpenseSchema);
