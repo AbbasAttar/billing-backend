@@ -54,6 +54,54 @@ export const createExpense = async (req: Request, res: Response, next: NextFunct
   }
 };
 
+export const updateExpense = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { date, amount, category, note, vendorName, paymentMethod, isVoid, voidReason } = req.body as {
+      date?: string;
+      amount?: number;
+      category?: string;
+      note?: string;
+      vendorName?: string;
+      paymentMethod?: string;
+      isVoid?: boolean;
+      voidReason?: string;
+    };
+
+    if (isVoid !== undefined || voidReason !== undefined) {
+      return fail(res, 'Use the dedicated void endpoint for void operations', 400);
+    }
+    if (typeof amount !== 'number' || amount <= 0) {
+      return fail(res, 'amount must be greater than 0', 400);
+    }
+    if (!category || !EXPENSE_CATEGORIES.includes(category as (typeof EXPENSE_CATEGORIES)[number])) {
+      return fail(res, 'Invalid expense category', 400);
+    }
+    if (!paymentMethod || !EXPENSE_PAYMENT_METHODS.includes(paymentMethod as (typeof EXPENSE_PAYMENT_METHODS)[number])) {
+      return fail(res, 'Invalid paymentMethod', 400);
+    }
+
+    const parsedDate = date ? isValidDate(date) : null;
+    if (!parsedDate) {
+      return fail(res, 'Invalid date', 400);
+    }
+
+    const expense = await Expense.findById(req.params.id);
+    if (!expense) return fail(res, 'Expense not found', 404);
+
+    expense.date = parsedDate;
+    expense.amount = amount;
+    expense.category = category as (typeof EXPENSE_CATEGORIES)[number];
+    expense.note = note;
+    expense.vendorName = vendorName;
+    expense.paymentMethod = paymentMethod as (typeof EXPENSE_PAYMENT_METHODS)[number];
+    await expense.save();
+
+    return ok(res, expense, 'Expense updated');
+  } catch (error) {
+    next(error);
+  }
+};
+
 export const getExpenses = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { startDate, endDate, category, includeVoid } = req.query as {
@@ -184,3 +232,13 @@ export const voidExpense = async (req: Request, res: Response, next: NextFunctio
   }
 };
 
+export const deleteExpense = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const expense = await Expense.findByIdAndDelete(req.params.id);
+    if (!expense) return fail(res, 'Expense not found', 404);
+
+    return ok(res, { _id: expense._id }, 'Expense deleted');
+  } catch (error) {
+    next(error);
+  }
+};

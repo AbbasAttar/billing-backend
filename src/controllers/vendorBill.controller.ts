@@ -1,14 +1,64 @@
 import { Request, Response, NextFunction } from 'express';
 import { VendorBill } from '../models/VendorBill.model';
 import { Invoice } from '../models/Invoice.model';
-import { ok, created } from '../utils/response';
+import { ok, created, fail } from '../utils/response';
 import mongoose from 'mongoose';
+
+const parseDate = (value?: string) => {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
 
 export const createBill = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const bill = new VendorBill(req.body);
     await bill.save();
     return created(res, bill);
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const updateBill = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { vendorName, billDate, dueDate, totalAmount, category, note, items } = req.body as {
+      vendorName?: string;
+      billDate?: string;
+      dueDate?: string;
+      totalAmount?: number;
+      category?: string;
+      note?: string;
+      items?: { description: string; amount: number }[];
+    };
+
+    if (!vendorName?.trim()) return fail(res, 'vendorName is required', 400);
+    if (typeof totalAmount !== 'number' || totalAmount <= 0) return fail(res, 'totalAmount must be greater than 0', 400);
+    if (!category?.trim()) return fail(res, 'category is required', 400);
+
+    const parsedBillDate = parseDate(billDate);
+    const parsedDueDate = parseDate(dueDate);
+    if (!parsedBillDate) return fail(res, 'Invalid billDate', 400);
+    if (!parsedDueDate) return fail(res, 'Invalid dueDate', 400);
+
+    const bill = await VendorBill.findById(req.params.id);
+    if (!bill) return fail(res, 'Bill not found', 404);
+    if (bill.paidAmount > totalAmount) {
+      return fail(res, 'totalAmount cannot be lower than amount already paid', 400);
+    }
+
+    bill.vendorName = vendorName.trim();
+    bill.billDate = parsedBillDate;
+    bill.dueDate = parsedDueDate;
+    bill.totalAmount = totalAmount;
+    bill.category = category.trim();
+    bill.note = note;
+    bill.items =
+      items?.filter((item) => item.description?.trim() && typeof item.amount === 'number' && item.amount >= 0)
+        .map((item) => ({ description: item.description.trim(), amount: item.amount })) ?? [];
+
+    await bill.save();
+    return ok(res, bill, 'Bill updated');
   } catch (error) {
     next(error);
   }
@@ -49,6 +99,17 @@ export const addPayment = async (req: Request, res: Response, next: NextFunction
     await bill.save();
 
     return ok(res, bill);
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const deleteBill = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const bill = await VendorBill.findByIdAndDelete(req.params.id);
+    if (!bill) return fail(res, 'Bill not found', 404);
+
+    return ok(res, { _id: bill._id }, 'Bill deleted');
   } catch (error) {
     next(error);
   }
