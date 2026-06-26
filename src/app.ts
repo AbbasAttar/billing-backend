@@ -18,6 +18,8 @@ import paymentsRoutes from './routes/payments.routes';
 import vendorBillRoutes from './routes/vendorBill.routes';
 import salesRoutes from './routes/sales.routes';
 import inventoryIntelligenceRoutes from './routes/inventory.routes';
+import personalExpenseRoutes from './routes/personalExpense.routes';
+import monthlyTargetRoutes from './routes/monthlyTarget.routes';
 
 const app = express();
 
@@ -47,6 +49,8 @@ app.use('/api/payments', paymentsRoutes);
 app.use('/api/vendor-bills', vendorBillRoutes);
 app.use('/api/sales', salesRoutes);
 app.use('/api/inventory', inventoryIntelligenceRoutes);
+app.use('/api/personal-expenses', personalExpenseRoutes);
+app.use('/api/monthly-targets', monthlyTargetRoutes);
 
 // 404 handler
 app.use((_req, res) => {
