@@ -11,8 +11,8 @@ const router = Router();
 
 router.get('/', getMonthlyTargets);
 router.get('/current', getCurrentMonthTarget);
-router.get('/:month([0-9]{4}-[0-9]{2})', getMonthlyTargetByMonth);
-router.put('/:month([0-9]{4}-[0-9]{2})', upsertMonthlyTarget);
+router.get('/:month', getMonthlyTargetByMonth);
+router.put('/:month', upsertMonthlyTarget);
 router.delete('/:id', deleteMonthlyTarget);
 
 export default router;

@@ -35,6 +35,15 @@ export interface CreateOpticalLensItemInput {
   lensCompany?: string | null;
   lensType?: string | null;
   isSameNumber?: boolean;
+  // Structured prescription fields
+  rightSpherical?: number | null;
+  rightCylinder?: number | null;
+  rightAxis?: number | null;
+  rightAddition?: number | null;
+  leftSpherical?: number | null;
+  leftCylinder?: number | null;
+  leftAxis?: number | null;
+  leftAddition?: number | null;
   quantity: number;
   price: number;
 }

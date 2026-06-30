@@ -193,6 +193,25 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
             if (!item.userName?.trim() && rx.userName) targetUserName = rx.userName;
             if (!item.lensLabel?.trim()) enhancedItem.lensLabel = rx.label;
           }
+        } else if ((item as any).rightSpherical !== undefined || (item as any).leftSpherical !== undefined) {
+          // New-style: both eyes encoded in a single item
+          const label = item.lensLabel?.trim() || (item as any).lensType?.trim() || 'Prescription';
+          const rxDoc = await Prescription.create({
+            customer: customerId,
+            label,
+            userName: targetUserName,
+            rightSpherical: (item as any).rightSpherical ?? undefined,
+            rightCylinder: (item as any).rightCylinder ?? undefined,
+            rightAxis: (item as any).rightAxis ?? undefined,
+            rightAddition: (item as any).rightAddition ?? undefined,
+            leftSpherical: (item as any).leftSpherical ?? undefined,
+            leftCylinder: (item as any).leftCylinder ?? undefined,
+            leftAxis: (item as any).leftAxis ?? undefined,
+            leftAddition: (item as any).leftAddition ?? undefined,
+          });
+          createdPrescriptionIds.push(rxDoc._id as mongoose.Types.ObjectId);
+          enhancedItem._resolvedPrescription = rxDoc._id;
+          enhancedItem.lensLabel = label;
         } else if (item.lensLabel?.trim() || item.spherical !== null) {
           const label = item.lensLabel?.trim() || "Prescription";
           const groupKey = `${targetUserName}|${label}`;
@@ -317,12 +336,21 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         doc.lensCategory = item.lensCategory || null;
         doc.lensIndex = item.lensIndex || null;
         doc.lensCoating = item.lensCoating || null;
-        // Simplified Prescription
+        // Simplified Prescription (legacy string format)
         doc.rightEyeNumber = item.rightEyeNumber || null;
         doc.leftEyeNumber = item.leftEyeNumber || null;
         doc.lensCompany = item.lensCompany || null;
         doc.lensType = item.lensType || null;
         doc.isSameNumber = item.isSameNumber || false;
+        // Structured prescription fields
+        doc.rightSpherical = (item as any).rightSpherical ?? null;
+        doc.rightCylinder = (item as any).rightCylinder ?? null;
+        doc.rightAxis = (item as any).rightAxis ?? null;
+        doc.rightAddition = (item as any).rightAddition ?? null;
+        doc.leftSpherical = (item as any).leftSpherical ?? null;
+        doc.leftCylinder = (item as any).leftCylinder ?? null;
+        doc.leftAxis = (item as any).leftAxis ?? null;
+        doc.leftAddition = (item as any).leftAddition ?? null;
       }
 
       const invoiceItem = await InvoiceItem.create(doc);

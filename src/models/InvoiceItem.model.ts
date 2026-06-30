@@ -20,12 +20,21 @@ export interface IInvoiceItem extends Document {
   lensCategory?: string;
   lensIndex?: string;
   lensCoating?: string;
-  // Simplified Prescription
+  // Simplified Prescription (legacy string format)
   rightEyeNumber?: string;
   leftEyeNumber?: string;
   lensCompany?: string;
   lensType?: string;
   isSameNumber?: boolean;
+  // Structured prescription fields
+  rightSpherical?: number | null;
+  rightCylinder?: number | null;
+  rightAxis?: number | null;
+  rightAddition?: number | null;
+  leftSpherical?: number | null;
+  leftCylinder?: number | null;
+  leftAxis?: number | null;
+  leftAddition?: number | null;
 }
 
 const InvoiceItemSchema = new Schema<IInvoiceItem>(
@@ -49,12 +58,21 @@ const InvoiceItemSchema = new Schema<IInvoiceItem>(
     lensCategory: { type: String, default: null },
     lensIndex: { type: String, default: null },
     lensCoating: { type: String, default: null },
-    // Simplified Prescription
+    // Simplified Prescription (legacy string format)
     rightEyeNumber: { type: String, default: null },
     leftEyeNumber: { type: String, default: null },
     lensCompany: { type: String, default: null },
     lensType: { type: String, default: null },
     isSameNumber: { type: Boolean, default: false },
+    // Structured prescription fields
+    rightSpherical: { type: Number, default: null },
+    rightCylinder: { type: Number, default: null },
+    rightAxis: { type: Number, default: null },
+    rightAddition: { type: Number, default: null },
+    leftSpherical: { type: Number, default: null },
+    leftCylinder: { type: Number, default: null },
+    leftAxis: { type: Number, default: null },
+    leftAddition: { type: Number, default: null },
   },
   { timestamps: true }
 );

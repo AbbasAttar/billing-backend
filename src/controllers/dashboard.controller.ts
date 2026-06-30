@@ -2,8 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import mongoose from 'mongoose';
 import { Invoice } from '../models/Invoice.model';
 import { Customer } from '../models/Customer.model';
-import { Expense } from '../models/Expense.model';
-import { VendorBill } from '../models/VendorBill.model';
+import { Cashflow } from '../models/Cashflow.model';
 import { buildDashboardCommandCenter } from '../services/dashboardIntelligence';
 
 // ── Helper: get today's date range ──────────────────────────────────────────
@@ -123,8 +122,8 @@ export const getDailyKPIs = async (req: Request, res: Response, next: NextFuncti
             // Bills cleared today
             Invoice.countDocuments({ billClearDate: { $gte: todayStart, $lte: todayEnd } }),
 
-            Expense.aggregate([
-                { $match: { date: { $gte: todayStart, $lte: todayEnd }, isVoid: false } },
+            Cashflow.aggregate([
+                { $match: { type: 'expense', date: { $gte: todayStart, $lte: todayEnd }, status: { $ne: 'void' } } },
                 { $group: { _id: null, total: { $sum: '$amount' } } },
             ]),
 
@@ -256,25 +255,27 @@ export const getCashFlowInsights = async (req: Request, res: Response, next: Nex
                 { $match: { 'payments.date': { $gte: previousStart, $lte: previousEnd } } },
                 { $group: { _id: null, total: { $sum: '$payments.amount' } } },
             ]),
-            Expense.aggregate([
-                { $match: { date: { $gte: historicalStart, $lte: now }, isVoid: false } },
+            Cashflow.aggregate([
+                { $match: { type: 'expense', date: { $gte: historicalStart, $lte: now }, status: { $ne: 'void' } } },
                 { $group: { _id: null, total: { $sum: '$amount' } } },
             ]),
-            Expense.aggregate([
-                { $match: { date: { $gte: previousStart, $lte: previousEnd }, isVoid: false } },
+            Cashflow.aggregate([
+                { $match: { type: 'expense', date: { $gte: previousStart, $lte: previousEnd }, status: { $ne: 'void' } } },
                 { $group: { _id: null, total: { $sum: '$amount' } } },
             ]),
-            VendorBill.aggregate([
+            Cashflow.aggregate([
+                { $match: { type: 'payable' } },
                 { $unwind: { path: '$payments', preserveNullAndEmptyArrays: false } },
                 { $match: { 'payments.date': { $gte: historicalStart, $lte: now } } },
                 { $group: { _id: null, total: { $sum: '$payments.amount' } } },
             ]),
-            VendorBill.aggregate([
+            Cashflow.aggregate([
+                { $match: { type: 'payable' } },
                 { $unwind: { path: '$payments', preserveNullAndEmptyArrays: false } },
                 { $match: { 'payments.date': { $gte: previousStart, $lte: previousEnd } } },
                 { $group: { _id: null, total: { $sum: '$payments.amount' } } },
             ]),
-            VendorBill.find({ status: { $ne: 'paid' } }).sort({ dueDate: 1 }).lean(),
+            Cashflow.find({ type: 'payable', status: { $ne: 'paid' } }).sort({ dueDate: 1 }).lean(),
             Invoice.aggregate([
                 { $match: { billClearDate: null } },
                 {
@@ -376,7 +377,7 @@ export const getCashFlowInsights = async (req: Request, res: Response, next: Nex
         const forecastReceivablePool = openReceivableForecast.reduce((sum, invoice) => sum + invoice.collectableAmount, 0);
         const baselineNewCollectionsPerDay = Math.min(avgDailyIncome * 0.4, avgDailySales * 0.3);
         const priorityBills = unpaidBills.map((bill) => {
-            const balance = Math.max(bill.totalAmount - bill.paidAmount, 0);
+            const balance = Math.max(bill.amount - bill.paidAmount, 0);
             const daysUntilDue = diffInDays(new Date(bill.dueDate), now);
             const dueUrgency = daysUntilDue < 0 ? 1 : clamp((horizonDays - daysUntilDue) / horizonDays, 0, 1);
             const vendorCriticality = vendorCriticalityByCategory[bill.category] ?? 0.5;
@@ -407,7 +408,7 @@ export const getCashFlowInsights = async (req: Request, res: Response, next: Nex
                 status: bill.status,
                 dueDate: bill.dueDate.toISOString(),
                 balance,
-                totalAmount: bill.totalAmount,
+                totalAmount: bill.amount,
                 paidAmount: bill.paidAmount,
                 daysUntilDue,
                 priorityScore,

@@ -13,13 +13,13 @@ import invoiceItemRoutes from './routes/invoiceItem.routes';
 import invoiceRoutes from './routes/invoice.routes';
 import analyticsRoutes from './routes/analytics.routes';
 import dashboardRoutes from './routes/dashboard.routes';
-import expenseRoutes from './routes/expense.routes';
+import cashflowRoutes from './routes/cashflow.routes';
 import paymentsRoutes from './routes/payments.routes';
-import vendorBillRoutes from './routes/vendorBill.routes';
 import salesRoutes from './routes/sales.routes';
 import inventoryIntelligenceRoutes from './routes/inventory.routes';
 import personalExpenseRoutes from './routes/personalExpense.routes';
 import monthlyTargetRoutes from './routes/monthlyTarget.routes';
+import coatingRoutes from './routes/coating.routes';
 
 const app = express();
 
@@ -44,13 +44,13 @@ app.use('/api/invoice-items', invoiceItemRoutes);
 app.use('/api/invoices', invoiceRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/dashboard', dashboardRoutes);
-app.use('/api/expenses', expenseRoutes);
+app.use('/api/cashflow', cashflowRoutes);
 app.use('/api/payments', paymentsRoutes);
-app.use('/api/vendor-bills', vendorBillRoutes);
 app.use('/api/sales', salesRoutes);
 app.use('/api/inventory', inventoryIntelligenceRoutes);
 app.use('/api/personal-expenses', personalExpenseRoutes);
 app.use('/api/monthly-targets', monthlyTargetRoutes);
+app.use('/api/coatings', coatingRoutes);
 
 // 404 handler
 app.use((_req, res) => {

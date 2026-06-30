@@ -1,10 +1,9 @@
 import { Customer } from '../models/Customer.model';
-import { Expense } from '../models/Expense.model';
+import { Cashflow } from '../models/Cashflow.model';
 import { Frame } from '../models/Frame.model';
 import { Fragrance } from '../models/Fragrance.model';
 import { Invoice } from '../models/Invoice.model';
 import { OpticalLens } from '../models/OpticalLens.model';
-import { VendorBill } from '../models/VendorBill.model';
 
 const DAY = 86400000;
 
@@ -198,8 +197,8 @@ export const buildDashboardCommandCenter = async (referenceDateInput?: Date) => 
     historicalInvoices,
     allInvoicesLite,
     openInvoices,
-    expenses,
-    vendorBills,
+    cashflowExpenses,
+    cashflowPayables,
     customersCount,
     frames,
     fragrances,
@@ -224,8 +223,8 @@ export const buildDashboardCommandCenter = async (referenceDateInput?: Date) => 
       .select({ customer: 1, total: 1, discount: 1, billDate: 1, payments: 1 })
       .populate('customer', 'name mobileNumber')
       .lean(),
-    Expense.find({ date: { $gte: historyStart, $lte: nowEnd }, isVoid: false }).lean(),
-    VendorBill.find().lean(),
+    Cashflow.find({ type: 'expense', date: { $gte: historyStart, $lte: nowEnd }, status: { $ne: 'void' } }).lean(),
+    Cashflow.find({ type: 'payable' }).lean(),
     Customer.countDocuments(),
     Frame.find().lean(),
     Fragrance.find().lean(),
@@ -242,17 +241,17 @@ export const buildDashboardCommandCenter = async (referenceDateInput?: Date) => 
     return billDate >= previousStart && billDate <= previousEnd;
   });
 
-  const currentExpenses = expenses.filter((expense: any) => {
+  const currentExpenses = cashflowExpenses.filter((expense: any) => {
     const date = new Date(String(expense.date));
     return date >= currentStart && date <= nowEnd;
   });
 
-  const previousExpenses = expenses.filter((expense: any) => {
+  const previousExpenses = cashflowExpenses.filter((expense: any) => {
     const date = new Date(String(expense.date));
     return date >= previousStart && date <= previousEnd;
   });
 
-  const currentVendorPayments = vendorBills.reduce((sum: number, bill: any) => {
+  const currentVendorPayments = cashflowPayables.reduce((sum: number, bill: any) => {
     const billPayments = Array.isArray(bill.payments) ? bill.payments : [];
     return (
       sum +
@@ -267,7 +266,7 @@ export const buildDashboardCommandCenter = async (referenceDateInput?: Date) => 
     );
   }, 0);
 
-  const previousVendorPayments = vendorBills.reduce((sum: number, bill: any) => {
+  const previousVendorPayments = cashflowPayables.reduce((sum: number, bill: any) => {
     const billPayments = Array.isArray(bill.payments) ? bill.payments : [];
     return (
       sum +
@@ -616,9 +615,9 @@ export const buildDashboardCommandCenter = async (referenceDateInput?: Date) => 
     .map(([category, amount]) => ({ category, amount: round(amount), share: round(safeDivide(amount, Math.max(currentExpenseTotal, 1)), 4) }))
     .sort((left, right) => right.amount - left.amount);
 
-  const payablesDue = vendorBills
+  const payablesDue = cashflowPayables
     .map((bill: any) => {
-      const balance = Math.max((Number(bill.totalAmount) || 0) - (Number(bill.paidAmount) || 0), 0);
+      const balance = Math.max((Number(bill.amount) || 0) - (Number(bill.paidAmount) || 0), 0);
       const dueDate = new Date(String(bill.dueDate));
       const daysUntilDue = diffInDays(dueDate, today);
       const priorityScore = clamp(Math.round((daysUntilDue < 0 ? 70 : Math.max(0, 30 - daysUntilDue) * 2) + safeDivide(balance, Math.max(currentRevenue, 1)) * 1000), 0, 100);

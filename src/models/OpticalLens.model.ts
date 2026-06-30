@@ -3,9 +3,9 @@ import mongoose, { Schema, Document } from 'mongoose';
 export interface IOpticalLens extends Document {
     brand: string;
     name: string;
-    category: "Single Vision" | "Bifocal" | "Progressive";
+    category: 'Single Vision' | 'Bifocal' | 'Progressive';
     index?: string;
-    coating?: string;
+    coating?: string | null;
     spherical?: number;
     cylinder?: number;
     addition?: number;
@@ -27,11 +27,7 @@ const OpticalLensSchema = new Schema<IOpticalLens>(
             required: false,
             enum: ["1.50", "1.56", "1.59", "1.60", "1.67", "1.74"]
         },
-        coating: {
-            type: String,
-            required: true,
-            enum: ["Hard Coat", "Anti-Reflective", "Blue Cut", "Blue Cut Blue", "Photochromic Hard Coat", "Photochromic Blue Cut", "Polycarbonate Blue Cut", "Polycarbonate Blue Cut Blue", "Polycarbonate Photochromic Blue Cut", "Tinted", "Other"]
-        },
+        coating: { type: String, required: false, default: null },
         spherical: { type: Number },
         cylinder: { type: Number },
         addition: { type: Number },
