@@ -8,6 +8,9 @@ import { OpticalNumber } from '../models/OpticalNumber.model';
 import { Customer } from '../models/Customer.model';
 import { Frame } from '../models/Frame.model';
 import { Fragrance } from '../models/Fragrance.model';
+import { deductLensStock } from './lensStock.controller';
+import { generateInvoiceNumber, financialYear, formatInvoiceNo } from '../utils/invoiceNumber';
+import { InvoiceCounter } from '../models/InvoiceCounter.model';
 import type { CreateInvoiceInput, CreateInvoiceItemInput } from '../types';
 
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -336,6 +339,9 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         doc.lensCategory = item.lensCategory || null;
         doc.lensIndex = item.lensIndex || null;
         doc.lensCoating = item.lensCoating || null;
+        doc.lensMaterial = (item as any).lensMaterial || null;
+        doc.lensColor = (item as any).lensColor || null;
+        doc.isCustomLens = (item as any).isCustomLens || false;
         // Simplified Prescription (legacy string format)
         doc.rightEyeNumber = item.rightEyeNumber || null;
         doc.leftEyeNumber = item.leftEyeNumber || null;
@@ -423,6 +429,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
     }
 
     // ── 9. Create Invoice ────────────────────────────────────────────────────
+    const invoiceNumber = await generateInvoiceNumber(billDate);
     const invoice = await Invoice.create({
       customer: customerId,
       items: invoiceItemIds,
@@ -431,8 +438,48 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       total,
       billDate,
       payments: initialPayments,
+      invoiceNumber,
       ...(billClearDate ? { billClearDate } : {}),
     });
+
+    // ── 10. Auto-deduct lens stock (best-effort) ─────────────────────────────
+    for (const item of resolvedItems) {
+      if (item.type !== 'opticalLens') continue;
+      if ((item as any).isCustomLens) continue;
+      const lensType   = item.lensType   ?? null;
+      const material   = (item as any).lensMaterial ?? null;
+      const coating    = item.lensCoating ?? null;
+      const color      = (item as any).lensColor ?? null;
+      const eye        = (item as any).eye ?? 'both';
+      if (!lensType || !material) continue;
+      const base = { lensType, material, coating, color };
+      try {
+        if (eye === 'right' || eye === 'both') {
+          const sph = (item as any).rightSpherical ?? null;
+          if (sph !== null) {
+            await deductLensStock({
+              ...base,
+              sph,
+              cyl: (item as any).rightCylinder ?? 0,
+              add: (item as any).rightAddition ?? null,
+            });
+          }
+        }
+        if (eye === 'left' || eye === 'both') {
+          const sph = (item as any).leftSpherical ?? null;
+          if (sph !== null) {
+            await deductLensStock({
+              ...base,
+              sph,
+              cyl: (item as any).leftCylinder ?? 0,
+              add: (item as any).leftAddition ?? null,
+            });
+          }
+        }
+      } catch (stockErr) {
+        console.warn('[createInvoice] Stock deduction warning:', stockErr);
+      }
+    }
 
     const populated = await populateInvoice(Invoice.findById(invoice._id));
     res.status(201).json(populated);
@@ -455,15 +502,47 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
 
 export const updateInvoice = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const invoice = await Invoice.findByIdAndUpdate(req.params.id, req.body, {
-      new: true,
-      runValidators: true,
-    });
+    const { discount, billDate } = req.body as { discount?: number; billDate?: string };
+
+    const invoice = await Invoice.findById(req.params.id);
     if (!invoice) {
       res.status(404).json({ message: 'Invoice not found' });
       return;
     }
-    res.json(invoice);
+
+    if (billDate !== undefined) {
+      const d = new Date(billDate);
+      if (isNaN(d.getTime())) {
+        res.status(400).json({ message: 'Invalid billDate.' });
+        return;
+      }
+      invoice.billDate = d;
+    }
+
+    if (discount !== undefined) {
+      if (typeof discount !== 'number' || discount < 0) {
+        res.status(400).json({ message: 'Discount must be a non-negative number.' });
+        return;
+      }
+      if (discount >= invoice.subtotal) {
+        res.status(400).json({ message: 'Discount cannot equal or exceed the subtotal.' });
+        return;
+      }
+      invoice.discount = discount;
+      invoice.total = invoice.subtotal - discount;
+
+      // Recalculate billClearDate after total changes
+      const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
+      if (totalPaid >= invoice.total) {
+        invoice.billClearDate = invoice.payments[invoice.payments.length - 1]?.date ?? new Date();
+      } else {
+        invoice.billClearDate = undefined;
+      }
+    }
+
+    await invoice.save();
+    const populated = await populateInvoice(Invoice.findById(invoice._id));
+    res.json(populated);
   } catch (error) {
     next(error);
   }
@@ -473,14 +552,24 @@ export const updateInvoice = async (req: Request, res: Response, next: NextFunct
 
 export const addPayment = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { amount, date, method } = req.body as { amount?: number; date?: string; method?: 'cash' | 'online' };
+    const { amount, date, method, writeoff } = req.body as {
+      amount?: number;
+      date?: string;
+      method?: 'cash' | 'online';
+      writeoff?: number;
+    };
 
-    if (typeof amount !== 'number' || amount <= 0) {
-      res.status(400).json({ message: 'amount must be a positive number.' });
+    if (typeof amount !== 'number' || amount < 0) {
+      res.status(400).json({ message: 'Amount must be a non-negative number.' });
       return;
     }
     if (!method || !['cash', 'online'].includes(method)) {
-      res.status(400).json({ message: "method is required and must be either 'cash' or 'online'." });
+      res.status(400).json({ message: "method is required and must be 'cash' or 'online'." });
+      return;
+    }
+    const discountAmount = writeoff ?? 0;
+    if (typeof discountAmount !== 'number' || discountAmount < 0) {
+      res.status(400).json({ message: 'Discount must be a non-negative number.' });
       return;
     }
 
@@ -490,12 +579,124 @@ export const addPayment = async (req: Request, res: Response, next: NextFunction
       return;
     }
 
-    const paymentDate = date ? new Date(date) : new Date();
-    invoice.payments.push({ date: paymentDate, amount, method });
+    // Apply discount to invoice (adds to existing invoice-level discount)
+    const newDiscount = invoice.discount + discountAmount;
+    if (amount + discountAmount <= 0) {
+      res.status(400).json({ message: 'Amount and discount cannot both be zero.' });
+      return;
+    }
+    if (discountAmount > 0 && newDiscount >= invoice.subtotal) {
+      res.status(400).json({ message: 'Discount cannot equal or exceed the invoice subtotal.' });
+      return;
+    }
+    const newTotal = invoice.subtotal - newDiscount;
 
-    const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount, 0);
+    // Validate payment against remaining balance after discount
+    const alreadyPaid = invoice.payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
+    const remainingBalance = newTotal - alreadyPaid;
+    if (amount + discountAmount > remainingBalance + 0.01) {
+      res.status(400).json({ message: 'Payment and discount exceed the outstanding balance.' });
+      return;
+    }
+
+    if (discountAmount > 0) {
+      invoice.discount = newDiscount;
+      invoice.total = newTotal;
+    }
+
+    const paymentDate = date ? new Date(date) : new Date();
+    if (amount > 0) {
+      invoice.payments.push({ date: paymentDate, amount, method });
+    }
+
+    const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
     if (totalPaid >= invoice.total) {
-      invoice.billClearDate = new Date();
+      invoice.billClearDate = paymentDate;
+    } else {
+      invoice.billClearDate = undefined;
+    }
+
+    await invoice.save();
+    const populated = await populateInvoice(Invoice.findById(invoice._id));
+    res.json(populated);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ── UPDATE payment ───────────────────────────────────────────────────────────
+
+export const updatePayment = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const index = parseInt(req.params.paymentIndex, 10);
+    const { amount, method } = req.body as { amount?: number; method?: 'cash' | 'online' };
+
+    const invoice = await Invoice.findById(req.params.id);
+    if (!invoice) {
+      res.status(404).json({ message: 'Invoice not found' });
+      return;
+    }
+    if (isNaN(index) || index < 0 || index >= invoice.payments.length) {
+      res.status(400).json({ message: 'Invalid payment index' });
+      return;
+    }
+
+    if (amount !== undefined) {
+      if (typeof amount !== 'number' || amount <= 0) {
+        res.status(400).json({ message: 'amount must be a positive number.' });
+        return;
+      }
+      invoice.payments[index].amount = amount;
+    }
+    if (method !== undefined) {
+      if (!['cash', 'online'].includes(method)) {
+        res.status(400).json({ message: "method must be 'cash' or 'online'." });
+        return;
+      }
+      invoice.payments[index].method = method;
+    }
+
+    const totalSettled = invoice.payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
+    if (totalSettled > invoice.total + 0.01) {
+      res.status(400).json({ message: 'Total payments exceed invoice total.' });
+      return;
+    }
+    if (totalSettled >= invoice.total) {
+      const last = invoice.payments[invoice.payments.length - 1];
+      invoice.billClearDate = last?.date ?? new Date();
+    } else {
+      invoice.billClearDate = undefined;
+    }
+
+    await invoice.save();
+    const populated = await populateInvoice(Invoice.findById(invoice._id));
+    res.json(populated);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ── DELETE payment ───────────────────────────────────────────────────────────
+
+export const deletePayment = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const index = parseInt(req.params.paymentIndex, 10);
+    const invoice = await Invoice.findById(req.params.id);
+    if (!invoice) {
+      res.status(404).json({ message: 'Invoice not found' });
+      return;
+    }
+    if (isNaN(index) || index < 0 || index >= invoice.payments.length) {
+      res.status(400).json({ message: 'Invalid payment index' });
+      return;
+    }
+
+    invoice.payments.splice(index, 1);
+
+    const totalSettled = invoice.payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
+    if (totalSettled >= invoice.total) {
+      const last = invoice.payments[invoice.payments.length - 1];
+      invoice.billClearDate = last?.date ?? new Date();
     } else {
       invoice.billClearDate = undefined;
     }
@@ -586,7 +787,7 @@ export const addItemToInvoice = async (req: Request, res: Response, next: NextFu
     invoice.subtotal = subtotal;
     invoice.total = total;
     
-    const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount, 0);
+    const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
     if (totalPaid >= total) {
       invoice.billClearDate = new Date();
     } else {
@@ -639,7 +840,7 @@ export const removeItemFromInvoice = async (req: Request, res: Response, next: N
     invoice.subtotal = subtotal;
     invoice.total = total;
     
-    const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount, 0);
+    const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
     if (totalPaid >= total) {
       invoice.billClearDate = new Date();
     } else {
@@ -650,6 +851,54 @@ export const removeItemFromInvoice = async (req: Request, res: Response, next: N
     
     const populated = await populateInvoice(Invoice.findById(invoice._id));
     res.json(populated);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ── RENUMBER all existing invoices ───────────────────────────────────────────
+// POST /api/invoices/renumber
+// Assigns INVxxxx/YY-YY numbers to all invoices ordered by billDate ASC.
+// Safe to call multiple times — re-assigns all numbers from scratch.
+
+export const renumberAllInvoices = async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    await InvoiceCounter.deleteMany({});
+
+    const invoices = await Invoice.find({}).sort({ billDate: 1, createdAt: 1 }).select('_id billDate').lean();
+
+    const byYear: Record<string, typeof invoices> = {};
+    for (const inv of invoices) {
+      const fy = financialYear(new Date(inv.billDate));
+      if (!byYear[fy]) byYear[fy] = [];
+      byYear[fy].push(inv);
+    }
+
+    let totalUpdated = 0;
+    const summary: Record<string, number> = {};
+
+    for (const [fy, fyInvoices] of Object.entries(byYear)) {
+      let seq = 0;
+      const bulkOps = fyInvoices.map((inv) => {
+        seq++;
+        return {
+          updateOne: {
+            filter: { _id: inv._id },
+            update: { $set: { invoiceNumber: formatInvoiceNo(seq, fy) } },
+          },
+        };
+      });
+      await Invoice.bulkWrite(bulkOps);
+      await InvoiceCounter.findOneAndUpdate(
+        { year: fy },
+        { lastSeq: seq },
+        { upsert: true }
+      );
+      totalUpdated += seq;
+      summary[fy] = seq;
+    }
+
+    res.json({ message: `Renumbered ${totalUpdated} invoice(s)`, summary });
   } catch (error) {
     next(error);
   }
@@ -692,7 +941,7 @@ export const updateItemInInvoice = async (req: Request, res: Response, next: Nex
     invoice.subtotal = subtotal;
     invoice.total = total;
     
-    const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount, 0);
+    const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
     if (totalPaid >= total) {
       invoice.billClearDate = new Date();
     } else {

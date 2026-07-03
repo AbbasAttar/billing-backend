@@ -4,6 +4,7 @@ export interface IPayment {
   date: Date;
   amount: number;
   method: 'cash' | 'online';
+  writeoff?: number;
 }
 
 export interface IInvoice extends Document {
@@ -15,12 +16,14 @@ export interface IInvoice extends Document {
   payments: IPayment[];
   billDate: Date;
   billClearDate?: Date;
+  invoiceNumber?: string;
 }
 
 const PaymentSchema = new Schema<IPayment>({
   date: { type: Date, required: true, default: Date.now },
   amount: { type: Number, required: true, min: 0 },
   method: { type: String, required: true, enum: ['cash', 'online'] },
+  writeoff: { type: Number, default: 0, min: 0 },
 });
 
 const InvoiceSchema = new Schema<IInvoice>(
@@ -33,6 +36,7 @@ const InvoiceSchema = new Schema<IInvoice>(
     payments: [PaymentSchema],
     billDate: { type: Date, required: true, default: Date.now },
     billClearDate: { type: Date },
+    invoiceNumber: { type: String, default: null },
   },
   { timestamps: true }
 );

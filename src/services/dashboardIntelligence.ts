@@ -375,14 +375,9 @@ export const buildDashboardCommandCenter = async (referenceDateInput?: Date) => 
     const invoiceDate = new Date(String(invoice.billDate));
     const dayKey = normalizeDateKey(invoiceDate);
     const trendEntry = trendMap.get(dayKey);
-    const payments = Array.isArray(invoice.payments) ? invoice.payments : [];
 
     if (trendEntry) {
       trendEntry.revenue += Number(invoice.total) || 0;
-      trendEntry.collections += payments.reduce((sum: number, payment: any) => {
-        const paymentDate = new Date(String(payment.date));
-        return paymentDate >= currentStart && paymentDate <= nowEnd ? sum + (Number(payment.amount) || 0) : sum;
-      }, 0);
     }
 
     const items = Array.isArray(invoice.items) ? invoice.items : [];
@@ -427,6 +422,19 @@ export const buildDashboardCommandCenter = async (referenceDateInput?: Date) => 
             invoicePairs.set(pairKey, { left, right, count: 1 });
           }
         }
+      }
+    }
+  }
+
+  // Accumulate collections by actual payment date (not by invoice bill date)
+  for (const invoice of allInvoicesLite as any[]) {
+    const payments = Array.isArray(invoice.payments) ? invoice.payments : [];
+    for (const payment of payments) {
+      const paymentDate = new Date(String(payment.date));
+      const paymentKey = normalizeDateKey(paymentDate);
+      const trendEntry = trendMap.get(paymentKey);
+      if (trendEntry) {
+        trendEntry.collections += Number(payment.amount) || 0;
       }
     }
   }
@@ -871,22 +879,44 @@ export const buildDashboardCommandCenter = async (referenceDateInput?: Date) => 
   const seasonalityMonths = Array.from({ length: 12 }, (_, index) => {
     const monthStart = new Date(today.getFullYear(), today.getMonth() - 11 + index, 1);
     const monthEnd = endOfDay(new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0));
-    const monthRevenue = (allInvoicesLite as any[]).reduce((sum: number, invoice: any) => {
+    let monthRevenue = 0;
+    let monthCollections = 0;
+    for (const invoice of allInvoicesLite as any[]) {
       const billDate = new Date(String(invoice.billDate));
-      return billDate >= monthStart && billDate <= monthEnd ? sum + (Number(invoice.total) || 0) : sum;
-    }, 0);
+      if (billDate >= monthStart && billDate <= monthEnd) {
+        monthRevenue += Number(invoice.total) || 0;
+      }
+      const payments = Array.isArray(invoice.payments) ? invoice.payments : [];
+      for (const payment of payments) {
+        const paymentDate = new Date(String(payment.date));
+        if (paymentDate >= monthStart && paymentDate <= monthEnd) {
+          monthCollections += Number(payment.amount) || 0;
+        }
+      }
+    }
     return {
       month: monthStart.toISOString(),
       revenue: round(monthRevenue),
+      collections: round(monthCollections),
     };
   });
 
   const weekdayHeatmap = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((label, dayIndex) => {
     const invoicesForDay = (historicalInvoices as any[]).filter((invoice: any) => new Date(String(invoice.billDate)).getDay() === dayIndex);
     const revenue = invoicesForDay.reduce((sum: number, invoice: any) => sum + (Number(invoice.total) || 0), 0);
+    let collections = 0;
+    for (const invoice of historicalInvoices as any[]) {
+      const payments = Array.isArray(invoice.payments) ? invoice.payments : [];
+      for (const payment of payments) {
+        if (new Date(String(payment.date)).getDay() === dayIndex) {
+          collections += Number(payment.amount) || 0;
+        }
+      }
+    }
     return {
       day: label,
       revenue: round(revenue),
+      collections: round(collections),
       invoices: invoicesForDay.length,
     };
   });

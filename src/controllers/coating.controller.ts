@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { Coating } from '../models/Coating.model';
+import { LensPricing } from '../models/LensPricing.model';
 import { ok, fail } from '../utils/response';
 
 const DEFAULT_COATINGS = [
@@ -51,8 +52,13 @@ export const updateCoating = async (req: Request, res: Response, next: NextFunct
 
 export const deleteCoating = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const coating = await Coating.findByIdAndDelete(req.params.id);
+    const coating = await Coating.findById(req.params.id);
     if (!coating) return fail(res, 'Coating not found', 404);
+
+    const inUse = await LensPricing.exists({ coating: coating.name });
+    if (inUse) return fail(res, `Cannot delete — "${coating.name}" is used in one or more lens pricing rules`, 409);
+
+    await coating.deleteOne();
     return ok(res, { _id: coating._id }, 'Coating deleted');
   } catch (e) { next(e); }
 };

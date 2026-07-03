@@ -21,6 +21,8 @@ export interface CreateOpticalLensItemInput {
   lensCategory?: string;
   lensIndex?: string;
   lensCoating?: string;
+  lensMaterial?: string;
+  lensColor?: string;
   // Existing fields
   opticalLens?: string;
   prescription?: string;

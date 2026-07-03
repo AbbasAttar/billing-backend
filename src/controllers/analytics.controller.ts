@@ -281,6 +281,18 @@ export const getMonthlySummary = async (req: Request, res: Response, next: NextF
             },
         ]);
 
+        // ── Per-month collections (by actual payment date) ───────────────────────
+        const collectionsAgg = await Invoice.aggregate([
+            { $unwind: '$payments' },
+            { $match: { 'payments.date': { $gte: yearStart, $lte: yearEnd } } },
+            {
+                $group: {
+                    _id:              { $month: '$payments.date' },
+                    totalCollections: { $sum: '$payments.amount' },
+                },
+            },
+        ]);
+
         // ── Category breakdown: join Invoice → InvoiceItem ───────────────────────
         const categoryAgg = await Invoice.aggregate([
             { $match: { billDate: { $gte: yearStart, $lte: yearEnd } } },
@@ -355,9 +367,11 @@ export const getMonthlySummary = async (req: Request, res: Response, next: NextF
         const months = Array.from({ length: 12 }, (_, i) => {
             const month = i + 1;
             const rev = revenueAgg.find((r: any) => r._id === month);
+            const coll = collectionsAgg.find((c: any) => c._id === month);
             return {
                 month,
                 totalRevenue: rev?.totalRevenue ?? 0,
+                totalCollections: coll?.totalCollections ?? 0,
                 invoiceCount: rev?.invoiceCount ?? 0,
                 categories: {
                     frame:       zeroStats(),

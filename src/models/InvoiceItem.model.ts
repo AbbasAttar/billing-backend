@@ -25,6 +25,9 @@ export interface IInvoiceItem extends Document {
   leftEyeNumber?: string;
   lensCompany?: string;
   lensType?: string;
+  lensMaterial?: string;
+  lensColor?: string;
+  isCustomLens?: boolean;
   isSameNumber?: boolean;
   // Structured prescription fields
   rightSpherical?: number | null;
@@ -63,6 +66,9 @@ const InvoiceItemSchema = new Schema<IInvoiceItem>(
     leftEyeNumber: { type: String, default: null },
     lensCompany: { type: String, default: null },
     lensType: { type: String, default: null },
+    lensMaterial: { type: String, default: null },
+    lensColor: { type: String, default: null },
+    isCustomLens: { type: Boolean, default: false },
     isSameNumber: { type: Boolean, default: false },
     // Structured prescription fields
     rightSpherical: { type: Number, default: null },
