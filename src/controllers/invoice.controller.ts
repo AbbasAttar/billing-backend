@@ -628,7 +628,7 @@ export const addPayment = async (req: Request, res: Response, next: NextFunction
 
 export const updatePayment = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const index = parseInt(req.params.paymentIndex, 10);
+    const index = parseInt(String(req.params.paymentIndex), 10);
     const { amount, method } = req.body as { amount?: number; method?: 'cash' | 'online' };
 
     const invoice = await Invoice.findById(req.params.id);
@@ -680,7 +680,7 @@ export const updatePayment = async (req: Request, res: Response, next: NextFunct
 
 export const deletePayment = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const index = parseInt(req.params.paymentIndex, 10);
+    const index = parseInt(String(req.params.paymentIndex), 10);
     const invoice = await Invoice.findById(req.params.id);
     if (!invoice) {
       res.status(404).json({ message: 'Invoice not found' });

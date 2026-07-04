@@ -7,7 +7,7 @@ const isValidMonth = (value: string): boolean => /^\d{4}-\d{2}$/.test(value);
 export const upsertMonthlyTarget = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { month } = req.params;
-    if (!isValidMonth(month)) return fail(res, 'month must be in YYYY-MM format', 400);
+    if (!isValidMonth(String(month))) return fail(res, 'month must be in YYYY-MM format', 400);
 
     const { revenueTarget, expenseBudget, personalBudget, notes } = req.body as {
       revenueTarget?: number;
@@ -57,7 +57,7 @@ export const getCurrentMonthTarget = async (req: Request, res: Response, next: N
 export const getMonthlyTargetByMonth = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { month } = req.params;
-    if (!isValidMonth(month)) return fail(res, 'month must be in YYYY-MM format', 400);
+    if (!isValidMonth(String(month))) return fail(res, 'month must be in YYYY-MM format', 400);
     const target = await MonthlyTarget.findOne({ month });
     if (!target) return fail(res, 'No target found for this month', 404);
     return ok(res, target);

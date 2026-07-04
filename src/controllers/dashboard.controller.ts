@@ -378,7 +378,7 @@ export const getCashFlowInsights = async (req: Request, res: Response, next: Nex
         const baselineNewCollectionsPerDay = Math.min(avgDailyIncome * 0.4, avgDailySales * 0.3);
         const priorityBills = unpaidBills.map((bill) => {
             const balance = Math.max(bill.amount - bill.paidAmount, 0);
-            const daysUntilDue = diffInDays(new Date(bill.dueDate), now);
+            const daysUntilDue = diffInDays(new Date(bill.dueDate!), now);
             const dueUrgency = daysUntilDue < 0 ? 1 : clamp((horizonDays - daysUntilDue) / horizonDays, 0, 1);
             const vendorCriticality = vendorCriticalityByCategory[bill.category] ?? 0.5;
             const lateFeeRisk = daysUntilDue < 0 ? 1 : daysUntilDue <= 3 ? 0.8 : daysUntilDue <= 7 ? 0.55 : 0.25;
@@ -406,7 +406,7 @@ export const getCashFlowInsights = async (req: Request, res: Response, next: Nex
                 vendorName: bill.vendorName,
                 category: bill.category,
                 status: bill.status,
-                dueDate: bill.dueDate.toISOString(),
+                dueDate: bill.dueDate!.toISOString(),
                 balance,
                 totalAmount: bill.amount,
                 paidAmount: bill.paidAmount,
