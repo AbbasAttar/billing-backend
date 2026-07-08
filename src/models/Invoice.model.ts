@@ -22,7 +22,7 @@ export interface IInvoice extends Document {
 const PaymentSchema = new Schema<IPayment>({
   date: { type: Date, required: true, default: Date.now },
   amount: { type: Number, required: true, min: 0 },
-  method: { type: String, required: true, enum: ['cash', 'online'] },
+  method: { type: String, required: true, enum: ['cash', 'online'], default: 'cash' },
   writeoff: { type: Number, default: 0, min: 0 },
 });
 

@@ -2,13 +2,23 @@ import { Request, Response, NextFunction } from 'express';
 import { Frame } from '../models/Frame.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
 
+function buildFrameQuery(q: string) {
+  if (!q) return {};
+  // Exact 10-digit code → search by frameCode first
+  if (/^\d{10}$/.test(q)) {
+    return { $or: [{ frameCode: q }, { name: { $regex: q, $options: 'i' } }] };
+  }
+  return { $or: [
+    { name: { $regex: q, $options: 'i' } },
+    { companyName: { $regex: q, $options: 'i' } },
+    { frameCode: { $regex: q, $options: 'i' } },
+  ]};
+}
+
 export const getAllFrames = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const q = (req.query.q as string) || '';
-    const query = q
-      ? { $or: [{ name: { $regex: q, $options: 'i' } }, { companyName: { $regex: q, $options: 'i' } }] }
-      : {};
-    const frames = await Frame.find(query).sort({ companyName: 1, name: 1 });
+    const frames = await Frame.find(buildFrameQuery(q)).sort({ companyName: 1, name: 1 });
     res.json(frames);
   } catch (error) {
     next(error);
@@ -18,12 +28,7 @@ export const getAllFrames = async (req: Request, res: Response, next: NextFuncti
 export const searchFrames = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const q = (req.query.q as string) || '';
-    const frames = await Frame.find({
-      $or: [
-        { name: { $regex: q, $options: 'i' } },
-        { companyName: { $regex: q, $options: 'i' } },
-      ],
-    }).limit(15);
+    const frames = await Frame.find(buildFrameQuery(q)).limit(15);
     res.json(frames);
   } catch (error) {
     next(error);
