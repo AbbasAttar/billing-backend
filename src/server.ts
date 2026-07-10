@@ -1,6 +1,7 @@
 import { connectDB } from './config/database';
 import { env } from './config/env';
 import app from './app';
+import { startCron } from './services/cron';
 
 const start = async () => {
   await connectDB();
@@ -9,6 +10,8 @@ const start = async () => {
     console.log(`🚀 Server running on http://localhost:${env.PORT}`);
     console.log(`   Environment: ${env.NODE_ENV}`);
   });
+
+  startCron();
 };
 
 start().catch((err) => {

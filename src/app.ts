@@ -24,6 +24,9 @@ import lensPricingRoutes from './routes/lensPricing.routes';
 import lensStockRoutes from './routes/lensStock.routes';
 import frameCompanyRoutes from './routes/frameCompany.routes';
 import frameStockRoutes from './routes/frameStock.routes';
+import marketingRoutes from './routes/marketing.routes';
+import campaignRoutes from './routes/campaign.routes';
+import automationRoutes from './routes/automation.routes';
 
 const app = express();
 
@@ -59,6 +62,9 @@ app.use('/api/lens-pricing', lensPricingRoutes);
 app.use('/api/lens-stock', lensStockRoutes);
 app.use('/api/frame-companies', frameCompanyRoutes);
 app.use('/api/frame-stock', frameStockRoutes);
+app.use('/api/marketing', marketingRoutes);
+app.use('/api/campaigns', campaignRoutes);
+app.use('/api/automation', automationRoutes);
 
 // 404 handler
 app.use((_req, res) => {
