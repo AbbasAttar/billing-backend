@@ -95,7 +95,7 @@ export const buildMarketingIntelligence = async () => {
   const today = startOfDay(new Date());
 
   const invoices = await Invoice.find()
-    .populate('customer', 'name mobileNumber email tags')
+    .populate('customer', 'name mobileNumber email tags dateOfBirth')
     .populate({
       path: 'items',
       populate: [
@@ -112,6 +112,7 @@ export const buildMarketingIntelligence = async () => {
     customerId: string;
     name: string;
     mobileNumber?: string;
+    dateOfBirth: Date | null;
     invoiceList: any[];
     totalRevenue: number;
     totalDiscount: number;
@@ -122,6 +123,8 @@ export const buildMarketingIntelligence = async () => {
     hasLens: boolean;
     lastFrameDate: Date | null;
     lastFrameRevenue: number;
+    allFramePrices: number[];
+    allFragrancePrices: number[];
   };
 
   const customerMap = new Map<string, Entry>();
@@ -135,6 +138,7 @@ export const buildMarketingIntelligence = async () => {
       customerId: id,
       name: customer.name || 'Customer',
       mobileNumber: customer.mobileNumber,
+      dateOfBirth: customer.dateOfBirth ? new Date(customer.dateOfBirth) : null,
       invoiceList: [],
       totalRevenue: 0,
       totalDiscount: 0,
@@ -145,6 +149,8 @@ export const buildMarketingIntelligence = async () => {
       hasLens: false,
       lastFrameDate: null,
       lastFrameRevenue: 0,
+      allFramePrices: [],
+      allFragrancePrices: [],
     };
 
     entry.invoiceList.push(invoice);
@@ -168,6 +174,10 @@ export const buildMarketingIntelligence = async () => {
           entry.lastFrameDate = invoiceDate;
           entry.lastFrameRevenue = Number(item.price || 0);
         }
+        if (Number(item.price) > 0) entry.allFramePrices.push(Number(item.price));
+      }
+      if (cat === 'fragrance') {
+        if (Number(item.price) > 0) entry.allFragrancePrices.push(Number(item.price));
       }
     }
 
@@ -262,6 +272,13 @@ export const buildMarketingIntelligence = async () => {
       lastFrameDate: entry.lastFrameDate ? entry.lastFrameDate.toISOString() : null,
       lastFrameRevenue: entry.lastFrameRevenue,
       frameReplacementDays,
+      avgFramePrice: entry.allFramePrices.length > 0
+        ? round(entry.allFramePrices.reduce((s, p) => s + p, 0) / entry.allFramePrices.length)
+        : null,
+      avgFragrancePrice: entry.allFragrancePrices.length > 0
+        ? round(entry.allFragrancePrices.reduce((s, p) => s + p, 0) / entry.allFragrancePrices.length)
+        : null,
+      dateOfBirth: entry.dateOfBirth ? entry.dateOfBirth.toISOString() : null,
     };
   });
 
@@ -340,6 +357,65 @@ export const buildMarketingIntelligence = async () => {
       };
     })
     .sort((a, b) => b.lifetimeValue - a.lifetimeValue);
+
+  // ── 3b. New business-action segments ────────────────────────────────────────
+
+  const CHEAP_FRAME_THRESHOLD = 1_500;
+  const CHEAP_FRAGRANCE_THRESHOLD = 700;
+  const EYE_TEST_DUE_DAYS = 540; // 18 months
+  const INACTIVE_MIN_DAYS = 120;
+  const INACTIVE_MAX_DAYS = 179;
+  const currentMonth = today.getMonth() + 1;
+
+  const fragranceNeverOptical = customers
+    .filter(c =>
+      c.categoriesBought.includes('fragrance') &&
+      !c.categoriesBought.includes('opticalLens') &&
+      !c.categoriesBought.includes('frame')
+    )
+    .sort((a, b) => b.lifetimeValue - a.lifetimeValue);
+
+  const eyeTestDue = customers
+    .filter(c => c.hasLens && c.recencyDays >= EYE_TEST_DUE_DAYS)
+    .map(c => ({ ...c, suggestedAction: 'Schedule eye test — prescription likely due for update' }))
+    .sort((a, b) => b.recencyDays - a.recencyDays);
+
+  const cheapFrameUpgrade = customers
+    .filter(c =>
+      c.categoriesBought.includes('frame') &&
+      (c as any).avgFramePrice !== null &&
+      (c as any).avgFramePrice < CHEAP_FRAME_THRESHOLD
+    )
+    .map(c => ({ ...c, suggestedAction: `Recommend premium frames — current avg ₹${Math.round((c as any).avgFramePrice ?? 0)}` }))
+    .sort((a, b) => b.lifetimeValue - a.lifetimeValue);
+
+  const blueCutUpgrade = customers
+    .filter(c => c.hasLens && !c.hasBlueCut && c.invoiceCount >= 2 && c.recencyDays < 730)
+    .map(c => ({ ...c, suggestedAction: 'Recommend Blue Cut lenses for screen time protection' }))
+    .sort((a, b) => b.lifetimeValue - a.lifetimeValue);
+
+  const premiumPerfumeUpgrade = customers
+    .filter(c =>
+      c.categoriesBought.includes('fragrance') &&
+      (c as any).avgFragrancePrice !== null &&
+      (c as any).avgFragrancePrice < CHEAP_FRAGRANCE_THRESHOLD
+    )
+    .map(c => ({ ...c, suggestedAction: `Introduce premium collection — current avg ₹${Math.round((c as any).avgFragrancePrice ?? 0)}` }))
+    .sort((a, b) => b.lifetimeValue - a.lifetimeValue);
+
+  const inactive120 = customers
+    .filter(c => c.recencyDays >= INACTIVE_MIN_DAYS && c.recencyDays <= INACTIVE_MAX_DAYS)
+    .map(c => ({ ...c, suggestedAction: 'Send personalised message before customer becomes fully inactive' }))
+    .sort((a, b) => b.lifetimeValue - a.lifetimeValue);
+
+  const birthdayThisMonth = customers
+    .filter(c => {
+      const dob = (c as any).dateOfBirth;
+      if (!dob) return false;
+      return new Date(dob).getMonth() + 1 === currentMonth;
+    })
+    .map(c => ({ ...c, suggestedAction: 'Send birthday wishes with a special offer' }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 
   // ── 4. Summary ────────────────────────────────────────────────────────────────
 
@@ -660,16 +736,34 @@ export const buildMarketingIntelligence = async () => {
 
   return {
     generatedAt: new Date().toISOString(),
-    summary,
+    summary: {
+      ...summary,
+      fragranceNeverOpticalCount: fragranceNeverOptical.length,
+      eyeTestDueCount: eyeTestDue.length,
+      cheapFrameUpgradeCount: cheapFrameUpgrade.length,
+      blueCutUpgradeCount: blueCutUpgrade.length,
+      premiumPerfumeUpgradeCount: premiumPerfumeUpgrade.length,
+      inactive120Count: inactive120.length,
+      birthdayThisMonthCount: birthdayThisMonth.length,
+    },
     suggestions,
     opportunities,
     segments: {
+      // Legacy segments — kept for automation rule compatibility
       new: newCustomers.slice(0, 100),
       vip: vipCustomers.slice(0, 100),
       lost: lostCustomers.slice(0, 100),
       atRisk: atRiskCustomers.slice(0, 100),
       highDiscount: highDiscountCustomers.slice(0, 100),
       crossSell: crossSellOpportunities.slice(0, 100),
+      // Business-action segments
+      fragranceNeverOptical: fragranceNeverOptical.slice(0, 100),
+      eyeTestDue: eyeTestDue.slice(0, 100),
+      cheapFrameUpgrade: cheapFrameUpgrade.slice(0, 100),
+      blueCutUpgrade: blueCutUpgrade.slice(0, 100),
+      premiumPerfumeUpgrade: premiumPerfumeUpgrade.slice(0, 100),
+      inactive120: inactive120.slice(0, 100),
+      birthdayThisMonth: birthdayThisMonth.slice(0, 100),
     },
   };
 };

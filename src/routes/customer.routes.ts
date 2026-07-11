@@ -6,12 +6,14 @@ import {
   createCustomer,
   updateCustomer,
   deleteCustomer,
+  getCustomerSummary,
 } from '../controllers/customer.controller';
 
 const router = Router();
 
 router.get('/search', searchCustomers);
 router.get('/', getAllCustomers);
+router.get('/:id/summary', getCustomerSummary);
 router.get('/:id', getCustomerById);
 router.post('/', createCustomer);
 router.put('/:id', updateCustomer);

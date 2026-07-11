@@ -49,10 +49,7 @@ export const createCashflow = async (req: Request, res: Response, next: NextFunc
     if (!vendorName?.trim()) {
       return fail(res, 'vendorName is required for payable entries', 400);
     }
-    const parsedDueDate = parseDate(dueDate);
-    if (!parsedDueDate) {
-      return fail(res, 'dueDate is required for payable entries', 400);
-    }
+    const parsedDueDate = parseDate(dueDate) ?? undefined;
 
     const sanitizedItems = Array.isArray(items)
       ? items
@@ -157,8 +154,7 @@ export const updateCashflow = async (req: Request, res: Response, next: NextFunc
       if (!vendorName?.trim()) {
         return fail(res, 'vendorName is required for payable entries', 400);
       }
-      const parsedDueDate = parseDate(dueDate);
-      if (!parsedDueDate) return fail(res, 'dueDate is required for payable entries', 400);
+      const parsedDueDate = parseDate(dueDate) ?? undefined;
       if (entry.paidAmount > amount) {
         return fail(res, 'amount cannot be lower than amount already paid', 400);
       }

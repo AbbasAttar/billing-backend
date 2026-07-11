@@ -3,6 +3,9 @@ import mongoose from 'mongoose';
 import { Invoice } from '../models/Invoice.model';
 import { Customer } from '../models/Customer.model';
 import { Cashflow } from '../models/Cashflow.model';
+import { PersonalExpense } from '../models/PersonalExpense.model';
+import { MonthlyTarget } from '../models/MonthlyTarget.model';
+import { SavingGoal } from '../models/SavingGoal.model';
 import { buildDashboardCommandCenter } from '../services/dashboardIntelligence';
 
 // ── Helper: get today's date range ──────────────────────────────────────────
@@ -683,6 +686,371 @@ export const getActionQueue = async (req: Request, res: Response, next: NextFunc
             generatedAt: payload.generatedAt,
             period: payload.period,
             actionQueue: payload.actionQueue,
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
+// ── GET /api/dashboard/daily-tasks ──────────────────────────────────────────
+export const getDailyTasks = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const payload = await buildDashboardCommandCenter(parseReferenceDate(req.query.date as string | undefined));
+        const { followUpInvoices, atRiskCustomers, payables, deadStock } = payload.actionQueue;
+
+        const collectPayments = {
+            count: followUpInvoices.length,
+            totalAmount: followUpInvoices.reduce((s: number, inv: any) => s + (inv.balance ?? 0), 0),
+            invoices: followUpInvoices.slice(0, 5).map((inv: any) => ({
+                id: inv.invoiceId,
+                customer: inv.customerName,
+                amount: inv.balance,
+                daysOverdue: inv.ageDays ?? 0,
+            })),
+        };
+
+        const restockLenses = {
+            count: deadStock.length,
+            potentialLostRevenue: deadStock.reduce((s: number, item: any) => s + (item.revenue ?? 0), 0),
+            items: deadStock.slice(0, 5).map((item: any) => ({
+                spec: item.productName ?? item.productId,
+                currentQty: item.stock ?? 0,
+                daysUntilStockout: null,
+            })),
+        };
+
+        const sendCampaign = {
+            inactiveCount: atRiskCustomers.length,
+            segment: 'inactive120',
+            recommendedMessage: `Send a personalised check-in to ${atRiskCustomers.length} customers who haven't visited in 4–6 months.`,
+        };
+
+        const vendorPayments = {
+            count: payables.length,
+            totalDue: payables.reduce((s: number, bill: any) => s + (bill.balance ?? 0), 0),
+            upcoming: payables.slice(0, 5).map((bill: any) => ({
+                vendor: bill.vendorName,
+                amount: bill.balance,
+                dueDate: bill.dueDate,
+            })),
+        };
+
+        res.json({
+            generatedAt: payload.generatedAt,
+            collectPayments,
+            restockLenses,
+            sendCampaign,
+            vendorPayments,
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
+// ── GET /api/dashboard/opportunity-score ────────────────────────────────────
+export const getOpportunityScore = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const { buildMarketingIntelligence } = await import('../services/marketingIntelligence');
+        const intel = await buildMarketingIntelligence();
+        const s = intel.summary as any;
+
+        const AVG_LENS_REVENUE = 3_500;
+        const AVG_FRAME_REVENUE = 2_000;
+        const AVG_FRAGRANCE_REVENUE = 900;
+        const AVG_OPTICAL_REVENUE = 4_500;
+
+        const inactiveCustomers = {
+            count: (s.lostCustomers ?? 0) + (s.inactive120Count ?? 0),
+            avgBill: AVG_OPTICAL_REVENUE,
+            potential: Math.round(((s.lostCustomers ?? 0) + (s.inactive120Count ?? 0)) * AVG_OPTICAL_REVENUE * 0.2),
+        };
+        const eyeTestsDue = {
+            count: s.eyeTestDueCount ?? 0,
+            avgLensRevenue: AVG_LENS_REVENUE,
+            potential: Math.round((s.eyeTestDueCount ?? 0) * AVG_LENS_REVENUE * 0.35),
+        };
+        const premiumUpgrades = {
+            count: (s.cheapFrameUpgradeCount ?? 0) + (s.premiumPerfumeUpgradeCount ?? 0) + (s.blueCutUpgradeCount ?? 0),
+            avgUpsell: AVG_FRAME_REVENUE,
+            potential: Math.round(((s.cheapFrameUpgradeCount ?? 0) * AVG_FRAME_REVENUE + (s.premiumPerfumeUpgradeCount ?? 0) * AVG_FRAGRANCE_REVENUE + (s.blueCutUpgradeCount ?? 0) * 800) * 0.25),
+        };
+        const crossSell = {
+            count: s.fragranceNeverOpticalCount ?? 0,
+            avgBill: AVG_OPTICAL_REVENUE,
+            potential: Math.round((s.fragranceNeverOpticalCount ?? 0) * AVG_OPTICAL_REVENUE * 0.15),
+        };
+
+        const totalPotential = inactiveCustomers.potential + eyeTestsDue.potential + premiumUpgrades.potential + crossSell.potential;
+
+        res.json({
+            generatedAt: new Date().toISOString(),
+            totalPotential,
+            inactiveCustomers,
+            eyeTestsDue,
+            premiumUpgrades,
+            crossSell,
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
+// ── GET /api/finance/overview ─────────────────────────────────────────────────
+export const getFinanceOverview = async (_req: Request, res: Response, next: NextFunction) => {
+    try {
+        const now = new Date();
+        const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+        const todayEnd   = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+        const mtdStart   = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+        const month      = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+
+        const [
+            todaySalesAgg, todayCollectionsAgg, todayExpensesAgg,
+            mtdRevenueAgg, mtdExpensesAgg, mtdPersonalAgg,
+            receivablesAgg, upcomingPayablesAgg,
+            allTimeInflows, allTimeExpenses, allTimePayables,
+            activeGoals, monthlyTarget, upcomingPayablesList,
+        ] = await Promise.all([
+            // Today sales
+            Invoice.aggregate([
+                { $match: { billDate: { $gte: todayStart, $lte: todayEnd }, isVoid: { $ne: true } } },
+                { $group: { _id: null, total: { $sum: '$total' } } },
+            ]),
+            // Today collections (payments received today)
+            Invoice.aggregate([
+                { $unwind: '$payments' },
+                { $match: { 'payments.date': { $gte: todayStart, $lte: todayEnd } } },
+                { $group: { _id: null, total: { $sum: '$payments.amount' } } },
+            ]),
+            // Today expenses
+            Cashflow.aggregate([
+                { $match: { type: 'expense', status: { $ne: 'void' }, date: { $gte: todayStart, $lte: todayEnd } } },
+                { $group: { _id: null, total: { $sum: '$amount' } } },
+            ]),
+            // MTD revenue
+            Invoice.aggregate([
+                { $match: { billDate: { $gte: mtdStart }, isVoid: { $ne: true } } },
+                { $group: { _id: null, total: { $sum: '$total' } } },
+            ]),
+            // MTD business expenses
+            Cashflow.aggregate([
+                { $match: { type: 'expense', status: { $ne: 'void' }, date: { $gte: mtdStart } } },
+                { $group: { _id: null, total: { $sum: '$amount' } } },
+            ]),
+            // MTD personal expenses
+            PersonalExpense.aggregate([
+                { $match: { date: { $gte: mtdStart } } },
+                { $group: { _id: null, total: { $sum: '$amount' } } },
+            ]),
+            // Receivables (unpaid invoice balance)
+            Invoice.aggregate([
+                { $match: { isVoid: { $ne: true } } },
+                { $addFields: { paidTotal: { $sum: '$payments.amount' } } },
+                { $addFields: { pending: { $max: [{ $subtract: ['$total', '$paidTotal'] }, 0] } } },
+                { $match: { pending: { $gt: 0 } } },
+                { $group: { _id: null, total: { $sum: '$pending' } } },
+            ]),
+            // Upcoming payables (due within 30 days OR no due date set, unpaid)
+            Cashflow.aggregate([
+                {
+                    $match: {
+                        type: 'payable',
+                        status: { $in: ['pending', 'partially_paid', 'overdue'] },
+                        $or: [
+                            { dueDate: { $exists: false } },
+                            { dueDate: null },
+                            { dueDate: { $lte: new Date(Date.now() + 30 * 86_400_000) } },
+                        ],
+                    },
+                },
+                { $group: { _id: null, total: { $sum: { $subtract: ['$amount', '$paidAmount'] } } } },
+            ]),
+            // All-time inflows (invoice payments)
+            Invoice.aggregate([
+                { $unwind: '$payments' },
+                { $group: { _id: null, total: { $sum: '$payments.amount' } } },
+            ]),
+            // All-time expense outflows
+            Cashflow.aggregate([
+                { $match: { type: 'expense', status: { $ne: 'void' } } },
+                { $group: { _id: null, total: { $sum: '$amount' } } },
+            ]),
+            // All-time payable outflows (paid amounts)
+            Cashflow.aggregate([
+                { $match: { type: 'payable' } },
+                { $group: { _id: null, total: { $sum: '$paidAmount' } } },
+            ]),
+            // Active saving goals
+            SavingGoal.find({ status: 'active' }).sort({ priority: 1 }).limit(6),
+            // Monthly target
+            MonthlyTarget.findOne({ month }),
+            // Upcoming payables list for suggested actions (include those with no due date)
+            Cashflow.find({
+                type: 'payable',
+                status: { $in: ['pending', 'partially_paid', 'overdue'] },
+                $or: [
+                    { dueDate: { $exists: false } },
+                    { dueDate: null },
+                    { dueDate: { $lte: new Date(Date.now() + 7 * 86_400_000) } },
+                ],
+            }).sort({ dueDate: 1 }).limit(5),
+        ]);
+
+        const availableCash = Math.max(0,
+            (allTimeInflows[0]?.total ?? 0) -
+            (allTimeExpenses[0]?.total ?? 0) -
+            (allTimePayables[0]?.total ?? 0)
+        );
+        const receivables      = receivablesAgg[0]?.total ?? 0;
+        const upcomingPayables = upcomingPayablesAgg[0]?.total ?? 0;
+        const mtdRevenue       = mtdRevenueAgg[0]?.total ?? 0;
+        const mtdExpenses      = mtdExpensesAgg[0]?.total ?? 0;
+        const businessProfit   = mtdRevenue - mtdExpenses;
+        const savingBalance    = activeGoals.reduce((s, g) => s + g.savedAmount, 0);
+        const workingCapital   = availableCash + receivables - upcomingPayables;
+
+        const todaySales       = todaySalesAgg[0]?.total ?? 0;
+        const todayCollections = todayCollectionsAgg[0]?.total ?? 0;
+        const todayExpenses    = todayExpensesAgg[0]?.total ?? 0;
+        const todayProfit      = todaySales - todayExpenses;
+
+        // Saving goals with computed progress
+        const savingGoalsProgress = activeGoals.map((g) => {
+            const pct = g.targetAmount > 0 ? Math.min(100, Math.round((g.savedAmount / g.targetAmount) * 100)) : 0;
+            const remaining = Math.max(0, g.targetAmount - g.savedAmount);
+            let daysLeft: number | null = null;
+            let dailyTarget: number | null = null;
+            if (g.targetDate) {
+                daysLeft = Math.max(0, Math.ceil((g.targetDate.getTime() - Date.now()) / 86_400_000));
+                dailyTarget = daysLeft > 0 ? Math.ceil(remaining / daysLeft) : null;
+            }
+            return {
+                _id: g._id,
+                name: g.name,
+                category: g.category,
+                priority: g.priority,
+                targetAmount: g.targetAmount,
+                savedAmount: g.savedAmount,
+                targetDate: g.targetDate,
+                status: g.status,
+                percentComplete: pct,
+                remaining,
+                daysLeft,
+                dailyTarget,
+            };
+        });
+
+        // Monthly budget status
+        const monthlyBudget = monthlyTarget ? {
+            month,
+            revenueTarget: monthlyTarget.revenueTarget,
+            revenueActual: Math.round(mtdRevenue),
+            expenseBudget: monthlyTarget.expenseBudget,
+            expenseActual: Math.round(mtdExpenses),
+            personalBudget: monthlyTarget.personalBudget,
+            personalActual: Math.round(mtdPersonalAgg[0]?.total ?? 0),
+        } : null;
+
+        // Simple 30-day cash forecast (10-day intervals)
+        const avgDailyInflow = mtdRevenue / (now.getDate() || 1) * 0.85; // 85% collection rate
+        const cashForecast = [];
+        let runningBalance = availableCash;
+        const payablesByDate: Record<string, number> = {};
+        for (const p of upcomingPayablesList) {
+            if (p.dueDate) {
+                const key = p.dueDate.toISOString().split('T')[0];
+                payablesByDate[key] = (payablesByDate[key] ?? 0) + (p.amount - p.paidAmount);
+            }
+        }
+        for (let day = 1; day <= 30; day += 5) {
+            const d = new Date(Date.now() + day * 86_400_000);
+            const dateKey = d.toISOString().split('T')[0];
+            const scheduledOutflow = payablesByDate[dateKey] ?? 0;
+            const expectedInflow = avgDailyInflow * 5;
+            const closing = runningBalance + expectedInflow - scheduledOutflow;
+            cashForecast.push({
+                date: dateKey,
+                opening: Math.round(runningBalance),
+                expectedInflow: Math.round(expectedInflow),
+                scheduledOutflow: Math.round(scheduledOutflow),
+                closing: Math.round(closing),
+            });
+            runningBalance = closing;
+        }
+
+        res.json({
+            availableCash: Math.round(availableCash),
+            receivables: Math.round(receivables),
+            upcomingPayables: Math.round(upcomingPayables),
+            businessProfit: Math.round(businessProfit),
+            savingBalance: Math.round(savingBalance),
+            workingCapital: Math.round(workingCapital),
+            todaySales: Math.round(todaySales),
+            todayCollections: Math.round(todayCollections),
+            todayExpenses: Math.round(todayExpenses),
+            todayProfit: Math.round(todayProfit),
+            mtdRevenue: Math.round(mtdRevenue),
+            mtdExpenses: Math.round(mtdExpenses),
+            savingGoals: savingGoalsProgress,
+            monthlyBudget,
+            cashForecast,
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
+// ── GET /api/dashboard/profit-leakage ───────────────────────────────────────
+export const getProfitLeakage = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const now = new Date();
+        const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+        const [discountAgg, overdueAgg, payload] = await Promise.all([
+            Invoice.aggregate([
+                { $match: { billDate: { $gte: monthStart, $lte: now } } },
+                { $group: { _id: null, totalDiscount: { $sum: '$discount' } } },
+            ]),
+            Invoice.aggregate([
+                { $match: { billClearDate: null, billDate: { $lt: new Date(Date.now() - 30 * 86_400_000) } } },
+                {
+                    $addFields: {
+                        paid: { $sum: '$payments.amount' },
+                        ageDays: { $divide: [{ $subtract: [now, '$billDate'] }, 86_400_000] },
+                    },
+                },
+                {
+                    $group: {
+                        _id: null,
+                        count: { $sum: 1 },
+                        totalAmount: { $sum: { $max: [{ $subtract: ['$total', '$paid'] }, 0] } },
+                        avgAgeDays: { $avg: '$ageDays' },
+                    },
+                },
+            ]),
+            buildDashboardCommandCenter(now),
+        ]);
+
+        const totalDiscountThisMonth = Math.round(discountAgg[0]?.totalDiscount ?? 0);
+        const overdue = overdueAgg[0] ?? { count: 0, totalAmount: 0, avgAgeDays: 0 };
+        const deadStock = payload.actionQueue.deadStock ?? [];
+        const deadStockValue = deadStock.reduce((s: number, item: any) => s + (item.revenue ?? 0), 0);
+
+        const lowMarginProducts = ((payload.productIntelligence as any)?.topSellers ?? [])
+            .filter((p: any) => p.grossMargin < 20)
+            .slice(0, 5)
+            .map((p: any) => ({ name: p.productName ?? p.name, margin: p.grossMargin, revenue: p.revenue }));
+
+        res.json({
+            generatedAt: new Date().toISOString(),
+            totalDiscountThisMonth,
+            overdueCollections: {
+                count: overdue.count,
+                totalAmount: Math.round(overdue.totalAmount),
+                avgDaysLate: Math.round(overdue.avgAgeDays ?? 0),
+            },
+            deadStockValue: Math.round(deadStockValue),
+            lowMarginProducts,
         });
     } catch (error) {
         next(error);

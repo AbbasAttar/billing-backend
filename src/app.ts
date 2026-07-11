@@ -27,6 +27,9 @@ import frameStockRoutes from './routes/frameStock.routes';
 import marketingRoutes from './routes/marketing.routes';
 import campaignRoutes from './routes/campaign.routes';
 import automationRoutes from './routes/automation.routes';
+import lostSaleRoutes from './routes/lostSale.routes';
+import savingGoalRoutes from './routes/savingGoal.routes';
+import recurringExpenseRoutes from './routes/recurringExpense.routes';
 
 const app = express();
 
@@ -65,6 +68,9 @@ app.use('/api/frame-stock', frameStockRoutes);
 app.use('/api/marketing', marketingRoutes);
 app.use('/api/campaigns', campaignRoutes);
 app.use('/api/automation', automationRoutes);
+app.use('/api/lost-sales', lostSaleRoutes);
+app.use('/api/saving-goals', savingGoalRoutes);
+app.use('/api/recurring-expenses', recurringExpenseRoutes);
 
 // 404 handler
 app.use((_req, res) => {
