@@ -591,10 +591,10 @@ export const addPayment = async (req: Request, res: Response, next: NextFunction
     }
     const newTotal = invoice.subtotal - newDiscount;
 
-    // Validate payment against remaining balance after discount
-    const alreadyPaid = invoice.payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
-    const remainingBalance = newTotal - alreadyPaid;
-    if (amount + discountAmount > remainingBalance + 0.01) {
+    // Validate payment against remaining balance (use original total before applying new writeoff)
+    const alreadyPaid = invoice.payments.reduce((sum, p) => sum + p.amount, 0);
+    const currentBalance = invoice.total - alreadyPaid;
+    if (amount + discountAmount > currentBalance + 0.01) {
       res.status(400).json({ message: 'Payment and discount exceed the outstanding balance.' });
       return;
     }
