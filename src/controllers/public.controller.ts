@@ -11,6 +11,7 @@ import {
 } from '../services/publicCatalog.service';
 import { fetchInstagramFeed } from '../services/instagram.service';
 import { SiteSetting } from '../models/SiteSetting.model';
+import { BlogPost } from '../models/BlogPost.model';
 
 function toInt(v: unknown, fallback?: number): number | undefined {
   if (v == null || v === '') return fallback;
@@ -122,13 +123,29 @@ export const getHomepage = async (_req: Request, res: Response, next: NextFuncti
   }
 };
 
-export const getBlogList = async (_req: Request, res: Response) => {
-  // Phase 1 stub — blog CMS lands in Phase 2
-  res.json({ success: true, data: [], meta: { page: 1, limit: 0, total: 0 } });
+export const getBlogList = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const filter: any = { isPublished: true };
+    const cat = req.query.category as string | undefined;
+    if (cat && ['optical', 'fragrance'].includes(cat)) filter.category = cat;
+    const posts = await BlogPost.find(filter)
+      .select('-content')
+      .sort({ publishedAt: -1 })
+      .lean();
+    res.json({ success: true, data: posts, meta: { total: posts.length } });
+  } catch (err) {
+    next(err);
+  }
 };
 
-export const getBlogBySlug = async (_req: Request, res: Response) => {
-  res.status(404).json({ success: false, message: 'Blog not found' });
+export const getBlogBySlug = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const post = await BlogPost.findOne({ slug: req.params.slug, isPublished: true }).lean();
+    if (!post) { res.status(404).json({ success: false, message: 'Blog post not found' }); return; }
+    res.json({ success: true, data: post });
+  } catch (err) {
+    next(err);
+  }
 };
 
 export const getStore = async (_req: Request, res: Response) => {

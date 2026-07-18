@@ -32,6 +32,7 @@ import savingGoalRoutes from './routes/savingGoal.routes';
 import recurringExpenseRoutes from './routes/recurringExpense.routes';
 import publicRoutes from './routes/public.routes';
 import siteSettingRoutes from './routes/siteSetting.routes';
+import blogRoutes from './routes/blog.routes';
 
 const app = express();
 
@@ -75,6 +76,7 @@ app.use('/api/saving-goals', savingGoalRoutes);
 app.use('/api/recurring-expenses', recurringExpenseRoutes);
 app.use('/api/public', publicRoutes);
 app.use('/api/settings', siteSettingRoutes);
+app.use('/api/blog', blogRoutes);
 
 // 404 handler
 app.use((_req, res) => {
