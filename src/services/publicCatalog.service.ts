@@ -19,6 +19,7 @@ export interface PublicProductQuery {
   shape?: string;
   material?: string;
   family?: string;
+  longevity?: string;
   priceMin?: number;
   priceMax?: number;
   sort?: 'newest' | 'popular' | 'price_asc' | 'price_desc' | 'alphabetical';
@@ -124,6 +125,7 @@ function baseFilter(query: PublicProductQuery, isFragrance = false) {
   if (query.shape) filter['web.shape'] = query.shape;
   if (query.material) filter['web.material'] = query.material;
   if (query.family && isFragrance) filter['web.fragranceFamily'] = query.family;
+  if (query.longevity && isFragrance) filter['web.longevity'] = query.longevity;
   if (query.priceMin != null || query.priceMax != null) {
     filter.sellPrice = {};
     if (query.priceMin != null) filter.sellPrice.$gte = query.priceMin;

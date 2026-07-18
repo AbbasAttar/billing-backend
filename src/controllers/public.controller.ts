@@ -28,6 +28,7 @@ export const getProducts = async (req: Request, res: Response, next: NextFunctio
       shape: (req.query.shape as string) || undefined,
       material: (req.query.material as string) || undefined,
       family: (req.query.family as string) || undefined,
+      longevity: (req.query.longevity as string) || undefined,
       priceMin: toInt(req.query.priceMin),
       priceMax: toInt(req.query.priceMax),
       sort: (req.query.sort as any) || undefined,
