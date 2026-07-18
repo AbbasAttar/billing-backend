@@ -30,6 +30,8 @@ import automationRoutes from './routes/automation.routes';
 import lostSaleRoutes from './routes/lostSale.routes';
 import savingGoalRoutes from './routes/savingGoal.routes';
 import recurringExpenseRoutes from './routes/recurringExpense.routes';
+import publicRoutes from './routes/public.routes';
+import siteSettingRoutes from './routes/siteSetting.routes';
 
 const app = express();
 
@@ -71,6 +73,8 @@ app.use('/api/automation', automationRoutes);
 app.use('/api/lost-sales', lostSaleRoutes);
 app.use('/api/saving-goals', savingGoalRoutes);
 app.use('/api/recurring-expenses', recurringExpenseRoutes);
+app.use('/api/public', publicRoutes);
+app.use('/api/settings', siteSettingRoutes);
 
 // 404 handler
 app.use((_req, res) => {

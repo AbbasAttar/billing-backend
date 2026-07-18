@@ -313,6 +313,8 @@ export const getMonthlySummary = async (req: Request, res: Response, next: NextF
                             branches: [
                                 { case: { $ifNull: ['$itemDocs.frame',       false] }, then: 'frame' },
                                 { case: { $ifNull: ['$itemDocs.opticalLens', false] }, then: 'opticalLens' },
+                                { case: { $eq:     ['$itemDocs.isCustomLens', true]  }, then: 'opticalLens' },
+                                { case: { $gt:     [{ $strLenCP: { $ifNull: ['$itemDocs.lensType', ''] } }, 0] }, then: 'opticalLens' },
                             ],
                             default: 'fragrance',
                         },
@@ -444,6 +446,8 @@ export const getTopItems = async (req: Request, res: Response, next: NextFunctio
                             branches: [
                                 { case: { $ifNull: ['$itemDocs.frame',       false] }, then: 'frame' },
                                 { case: { $ifNull: ['$itemDocs.opticalLens', false] }, then: 'opticalLens' },
+                                { case: { $eq:     ['$itemDocs.isCustomLens', true]  }, then: 'opticalLens' },
+                                { case: { $gt:     [{ $strLenCP: { $ifNull: ['$itemDocs.lensType', ''] } }, 0] }, then: 'opticalLens' },
                             ],
                             default: 'fragrance',
                         },
