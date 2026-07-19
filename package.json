@@ -8,7 +8,8 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "lint": "eslint src/",
-    "seed:blog": "ts-node --transpile-only src/scripts/seedBlog.ts"
+    "seed:blog": "ts-node --transpile-only src/scripts/seedBlog.ts",
+    "add:blog": "ts-node --transpile-only src/scripts/addBlog.ts"
   },
   "keywords": [],
   "author": "",
