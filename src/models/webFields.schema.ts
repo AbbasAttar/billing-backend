@@ -14,6 +14,22 @@ export interface IWebSeo {
   ogImage?: string;
 }
 
+export interface IAtarSize {
+  label: string; // "3ml" | "6ml" | "12ml"
+  price: number;
+}
+
+export interface IFrameSize {
+  lensWidth?: number;
+  bridgeWidth?: number;
+  templeLength?: number;
+}
+
+export interface IColorVariant {
+  color: string;
+  slug: string;
+}
+
 export interface IWebFields {
   isPublished: boolean;
   slug?: string;
@@ -28,6 +44,9 @@ export interface IWebFields {
   material?: string;
   fragranceFamily?: string[];
   longevity?: string;
+  atarSizes?: IAtarSize[];
+  frameSize?: IFrameSize;
+  colorVariants?: IColorVariant[];
   seo: IWebSeo;
   publishedAt?: Date;
   viewCount?: number;
@@ -68,6 +87,25 @@ export const WebFieldsSchema = new Schema<IWebFields>(
     material: { type: String, trim: true },
     fragranceFamily: { type: [String], default: [] },
     longevity: { type: String, trim: true },
+    atarSizes: {
+      type: [{ label: { type: String, trim: true }, price: { type: Number, min: 0 } }],
+      default: undefined,
+      _id: false,
+    },
+    frameSize: {
+      type: {
+        lensWidth:    { type: Number },
+        bridgeWidth:  { type: Number },
+        templeLength: { type: Number },
+      },
+      default: undefined,
+      _id: false,
+    },
+    colorVariants: {
+      type: [{ color: { type: String, trim: true }, slug: { type: String, trim: true, lowercase: true } }],
+      default: undefined,
+      _id: false,
+    },
     seo: { type: WebSeoSchema, default: () => ({}) },
     publishedAt: { type: Date },
     viewCount: { type: Number, default: 0 },

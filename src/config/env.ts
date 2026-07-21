@@ -10,4 +10,7 @@ export const env = {
   WABA_TOKEN: process.env.WABA_TOKEN ?? '',
   WABA_PHONE_NUMBER_ID: process.env.WABA_PHONE_NUMBER_ID ?? '',
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? '',
+  RAZORPAY_KEY_ID: process.env.RAZORPAY_KEY_ID ?? '',
+  RAZORPAY_KEY_SECRET: process.env.RAZORPAY_KEY_SECRET ?? '',
+  RAZORPAY_WEBHOOK_SECRET: process.env.RAZORPAY_WEBHOOK_SECRET ?? '',
 };

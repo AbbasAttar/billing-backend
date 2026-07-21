@@ -33,12 +33,18 @@ import recurringExpenseRoutes from './routes/recurringExpense.routes';
 import publicRoutes from './routes/public.routes';
 import siteSettingRoutes from './routes/siteSetting.routes';
 import blogRoutes from './routes/blog.routes';
+import razorpayRoutes from './routes/razorpay.routes';
+import { handleWebhook } from './controllers/razorpay.controller';
 
 const app = express();
 
 // Middleware
 const corsOrigin = env.CORS_ORIGIN.split(',');
 app.use(cors({ origin: corsOrigin, credentials: true }));
+
+// Razorpay webhook must receive raw body for signature verification
+app.post('/api/razorpay/webhook', express.raw({ type: 'application/json' }), handleWebhook);
+
 app.use(express.json());
 
 // Health check
@@ -77,6 +83,7 @@ app.use('/api/recurring-expenses', recurringExpenseRoutes);
 app.use('/api/public', publicRoutes);
 app.use('/api/settings', siteSettingRoutes);
 app.use('/api/blog', blogRoutes);
+app.use('/api/razorpay', razorpayRoutes);
 
 // 404 handler
 app.use((_req, res) => {

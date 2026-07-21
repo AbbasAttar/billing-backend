@@ -27,6 +27,17 @@ export interface PublicProductQuery {
   limit?: number;
 }
 
+export interface PublicProductVariant {
+  label: string;
+  sellPrice: number;
+  stock: number;
+}
+
+export interface PublicProductAtarSize {
+  label: string;
+  price: number;
+}
+
 export interface PublicProduct {
   id: string;
   category: 'frames' | 'lenses' | 'fragrances';
@@ -43,7 +54,12 @@ export interface PublicProduct {
   shape?: string;
   material?: string;
   color?: string;
+  longDescription?: string;
   fragranceFamily?: string[];
+  variants?: PublicProductVariant[];
+  atarSizes?: PublicProductAtarSize[];
+  frameSize?: { lensWidth?: number; bridgeWidth?: number; templeLength?: number };
+  colorVariants?: { color: string; slug: string }[];
   createdAt: Date;
   publishedAt?: Date;
 }
@@ -72,6 +88,9 @@ function frameToPublic(f: IFrame): PublicProduct {
     shape: web.shape,
     material: web.material,
     color: web.color,
+    longDescription: web.longDescription,
+    frameSize: web.frameSize,
+    colorVariants: web.colorVariants,
     createdAt: (f as any).createdAt,
     publishedAt: web.publishedAt,
   };
@@ -80,6 +99,10 @@ function frameToPublic(f: IFrame): PublicProduct {
 function fragranceToPublic(f: IFragrance): PublicProduct {
   const web = f.web ?? ({} as any);
   const primary = web.images?.find((i: any) => i.isPrimary) ?? web.images?.[0];
+  const variants: PublicProductVariant[] | undefined =
+    f.variants && f.variants.length > 0
+      ? f.variants.map((v) => ({ label: v.label, sellPrice: v.sellPrice, stock: v.stock }))
+      : undefined;
   return {
     id: (f._id as any).toString(),
     category: 'fragrances',
@@ -93,6 +116,8 @@ function fragranceToPublic(f: IFragrance): PublicProduct {
     shortDescription: web.shortDescription,
     tags: web.tags ?? [],
     fragranceFamily: web.fragranceFamily,
+    variants,
+    atarSizes: web.atarSizes?.length ? web.atarSizes.map((s: any) => ({ label: s.label, price: s.price })) : undefined,
     createdAt: (f as any).createdAt,
     publishedAt: web.publishedAt,
   };
@@ -132,15 +157,19 @@ function baseFilter(query: PublicProductQuery, isFragrance = false) {
     if (query.priceMax != null) filter.sellPrice.$lte = query.priceMax;
   }
   if (query.q) {
-    const rx = new RegExp(escapeRegex(query.q), 'i');
-    filter.$or = [
-      { name: rx },
-      { companyName: rx },
-      { brand: rx },
-      { 'web.displayName': rx },
-      { 'web.shortDescription': rx },
-      { 'web.tags': rx },
-    ];
+    const words = query.q.trim().split(/\s+/).filter(Boolean);
+    const fieldMatchers = (word: string) => {
+      const rx = new RegExp(escapeRegex(word), 'i');
+      return [
+        { name: rx },
+        { companyName: rx },
+        { brand: rx },
+        { 'web.displayName': rx },
+        { 'web.shortDescription': rx },
+        { 'web.tags': rx },
+      ];
+    };
+    filter.$or = words.flatMap(fieldMatchers);
   }
   return filter;
 }
