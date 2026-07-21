@@ -16,8 +16,8 @@ import { OpticalLens } from '../models/OpticalLens.model';
 import { LensPricing } from '../models/LensPricing.model';
 import { Coating } from '../models/Coating.model';
 import { Order } from '../models/Order.model';
-import { Fragrance } from '../models/fragrance.model';
-import { Frame } from '../models/frame.model';
+import { Fragrance } from '../models/Fragrance.model';
+import { Frame } from '../models/Frame.model';
 
 function toInt(v: unknown, fallback?: number): number | undefined {
   if (v == null || v === '') return fallback;
