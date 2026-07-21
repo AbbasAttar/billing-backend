@@ -75,7 +75,7 @@ const WebSeoSchema = new Schema<IWebSeo>(
 export const WebFieldsSchema = new Schema<IWebFields>(
   {
     isPublished: { type: Boolean, default: false, index: true },
-    slug: { type: String, trim: true, lowercase: true, sparse: true, index: true },
+    slug: { type: String, trim: true, lowercase: true },
     displayName: { type: String, trim: true },
     shortDescription: { type: String, trim: true },
     longDescription: { type: String, trim: true },

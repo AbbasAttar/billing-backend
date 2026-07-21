@@ -34,6 +34,7 @@ import publicRoutes from './routes/public.routes';
 import siteSettingRoutes from './routes/siteSetting.routes';
 import blogRoutes from './routes/blog.routes';
 import razorpayRoutes from './routes/razorpay.routes';
+import notificationRoutes from './routes/notification.routes';
 import { handleWebhook } from './controllers/razorpay.controller';
 
 const app = express();
@@ -84,6 +85,7 @@ app.use('/api/public', publicRoutes);
 app.use('/api/settings', siteSettingRoutes);
 app.use('/api/blog', blogRoutes);
 app.use('/api/razorpay', razorpayRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 // 404 handler
 app.use((_req, res) => {

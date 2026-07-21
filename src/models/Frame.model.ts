@@ -20,7 +20,7 @@ const FrameSchema = new Schema<IFrame>(
     costPrice: { type: Number, min: 0 },
     sellPrice: { type: Number, min: 0 },
     stock: { type: Number, min: 0, default: 0 },
-    frameCode: { type: String, trim: true, sparse: true },
+    frameCode: { type: String, trim: true },
     web: { type: WebFieldsSchema, default: () => ({ isPublished: false, images: [], tags: [], seo: {} }) },
   },
   { timestamps: true }
@@ -31,4 +31,4 @@ FrameSchema.index({ frameCode: 1 }, { sparse: true });
 FrameSchema.index({ 'web.slug': 1 }, { unique: true, sparse: true });
 FrameSchema.index({ 'web.isPublished': 1, 'web.publishedAt': -1 });
 
-export const Frame = mongoose.model<IFrame>('Frame', FrameSchema);
+export const Frame = (mongoose.models['Frame'] as mongoose.Model<IFrame>) || mongoose.model<IFrame>('Frame', FrameSchema);

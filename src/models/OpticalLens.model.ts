@@ -49,4 +49,4 @@ OpticalLensSchema.index({ name: 'text', brand: 'text', category: 'text' });
 OpticalLensSchema.index({ 'web.slug': 1 }, { unique: true, sparse: true });
 OpticalLensSchema.index({ 'web.isPublished': 1, 'web.publishedAt': -1 });
 
-export const OpticalLens = mongoose.model<IOpticalLens>('OpticalLens', OpticalLensSchema);
+export const OpticalLens = (mongoose.models['OpticalLens'] as mongoose.Model<IOpticalLens>) || mongoose.model<IOpticalLens>('OpticalLens', OpticalLensSchema);

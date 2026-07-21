@@ -9,6 +9,11 @@ import {
   getBlogBySlug,
   getStore,
   getInstagramPosts,
+  getLensCatalog,
+  getLensPricingLookup,
+  getPublicCoatings,
+  getMyOrders,
+  getOrderById,
 } from '../controllers/public.controller';
 
 const router = Router();
@@ -22,5 +27,10 @@ router.get('/blog', getBlogList);
 router.get('/blog/:slug', getBlogBySlug);
 router.get('/store', getStore);
 router.get('/instagram-posts', getInstagramPosts);
+router.get('/lens-catalog', getLensCatalog);
+router.get('/lens-pricing-lookup', getLensPricingLookup);
+router.get('/coatings', getPublicCoatings);
+router.get('/my-orders', getMyOrders);
+router.get('/orders/:id', getOrderById);
 
 export default router;

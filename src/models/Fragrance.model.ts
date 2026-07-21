@@ -53,4 +53,4 @@ FragranceSchema.index({ name: 'text', companyName: 'text' });
 FragranceSchema.index({ 'web.slug': 1 }, { unique: true, sparse: true });
 FragranceSchema.index({ 'web.isPublished': 1, 'web.publishedAt': -1 });
 
-export const Fragrance = mongoose.model<IFragrance>('Fragrance', FragranceSchema);
+export const Fragrance = (mongoose.models['Fragrance'] as mongoose.Model<IFragrance>) || mongoose.model<IFragrance>('Fragrance', FragranceSchema);
