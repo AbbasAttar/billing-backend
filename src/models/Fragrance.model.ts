@@ -17,6 +17,8 @@ export interface IFragrance extends Document {
   sellPrice?: number;
   stock?: number;
   variants: IFragranceVariant[];
+  isArchived?: boolean;
+  archivedAt?: Date;
   web?: IWebFields;
 }
 
@@ -44,6 +46,8 @@ const FragranceSchema = new Schema<IFragrance>(
     sellPrice: { type: Number, min: 0 },
     stock: { type: Number, min: 0, default: 0 },
     variants: { type: [FragranceVariantSchema], default: [] },
+    isArchived: { type: Boolean, default: false },
+    archivedAt: { type: Date },
     web: { type: WebFieldsSchema, default: () => ({ isPublished: false, images: [], tags: [], seo: {} }) },
   },
   { timestamps: true }

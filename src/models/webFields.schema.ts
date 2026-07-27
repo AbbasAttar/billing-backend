@@ -30,6 +30,17 @@ export interface IColorVariant {
   slug: string;
 }
 
+export interface IFrameColorSwatch {
+  name: string;
+  hex: string;
+}
+
+export interface IFrameVariant {
+  colors: IFrameColorSwatch[];
+  label?: string;
+  stock: number;
+}
+
 export interface IWebFields {
   isPublished: boolean;
   slug?: string;
@@ -47,6 +58,8 @@ export interface IWebFields {
   atarSizes?: IAtarSize[];
   frameSize?: IFrameSize;
   colorVariants?: IColorVariant[];
+  colors?: IFrameColorSwatch[];
+  frameVariants?: IFrameVariant[];
   seo: IWebSeo;
   publishedAt?: Date;
   viewCount?: number;
@@ -103,6 +116,20 @@ export const WebFieldsSchema = new Schema<IWebFields>(
     },
     colorVariants: {
       type: [{ color: { type: String, trim: true }, slug: { type: String, trim: true, lowercase: true } }],
+      default: undefined,
+      _id: false,
+    },
+    colors: {
+      type: [{ name: { type: String, trim: true }, hex: { type: String, trim: true } }],
+      default: undefined,
+      _id: false,
+    },
+    frameVariants: {
+      type: [{
+        colors: { type: [{ name: { type: String, trim: true }, hex: { type: String, trim: true } }], default: [] },
+        label:  { type: String, trim: true },
+        stock:  { type: Number, min: 0, default: 0 },
+      }],
       default: undefined,
       _id: false,
     },

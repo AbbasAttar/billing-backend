@@ -272,6 +272,23 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       } else if (item.type === 'frame') {
         if (item.frame && mongoose.isValidObjectId(item.frame)) {
           await Frame.findByIdAndUpdate(item.frame, { sellPrice: item.price });
+
+          // Deduct variant stock when a specific colour is selected
+          if (item.frameVariantLabel) {
+            const frameDoc = await Frame.findById(item.frame);
+            if (frameDoc?.web?.frameVariants?.length) {
+              const varIdx = frameDoc.web.frameVariants.findIndex((v: any) => {
+                const computed = v.label || v.colors.map((c: any) => c.name).join(' + ');
+                return computed === item.frameVariantLabel;
+              });
+              if (varIdx >= 0) {
+                await Frame.updateOne(
+                  { _id: item.frame },
+                  { $inc: { [`web.frameVariants.${varIdx}.stock`]: -item.quantity } },
+                );
+              }
+            }
+          }
         }
         resolvedItems.push({ ...(item as any) });
       } else if (item.type === 'fragrance') {
@@ -322,7 +339,10 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         quantity: item.quantity,
         price: item.price,
       };
-      if (item.type === 'frame' && item.frame) doc.frame = item.frame;
+      if (item.type === 'frame' && item.frame) {
+        doc.frame = item.frame;
+        if ((item as any).frameVariantLabel) doc.frameVariantLabel = (item as any).frameVariantLabel;
+      }
       if (item.type === 'fragrance' && item.fragrance) doc.fragrance = item.fragrance;
       if (item.type === 'opticalLens') {
         doc.opticalLens = item._resolvedOpticalLens || item.opticalLens;
@@ -713,11 +733,33 @@ export const deletePayment = async (req: Request, res: Response, next: NextFunct
 
 export const deleteInvoice = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const invoice = await Invoice.findByIdAndDelete(req.params.id);
+    const invoice = await Invoice.findById(req.params.id);
     if (!invoice) {
       res.status(404).json({ message: 'Invoice not found' });
       return;
     }
+
+    // Restore frame variant stock for each frame item that had a colour selected
+    const invoiceItems = await InvoiceItem.find({ _id: { $in: invoice.items } });
+    for (const invoiceItem of invoiceItems) {
+      if (invoiceItem.frame && invoiceItem.frameVariantLabel) {
+        const frameDoc = await Frame.findById(invoiceItem.frame);
+        if (frameDoc?.web?.frameVariants?.length) {
+          const varIdx = frameDoc.web.frameVariants.findIndex((v: any) => {
+            const computed = v.label || v.colors.map((c: any) => c.name).join(' + ');
+            return computed === invoiceItem.frameVariantLabel;
+          });
+          if (varIdx >= 0) {
+            await Frame.updateOne(
+              { _id: invoiceItem.frame },
+              { $inc: { [`web.frameVariants.${varIdx}.stock`]: invoiceItem.quantity } },
+            );
+          }
+        }
+      }
+    }
+
+    await Invoice.findByIdAndDelete(req.params.id);
     await InvoiceItem.deleteMany({ _id: { $in: invoice.items } });
     res.json({ message: 'Invoice deleted' });
   } catch (error) {

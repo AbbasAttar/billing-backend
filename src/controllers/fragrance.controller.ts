@@ -5,10 +5,12 @@ import { InvoiceItem } from '../models/InvoiceItem.model';
 export const getAllFragrances = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const q = (req.query.q as string) || '';
-    const query = q
+    const archivedOnly = req.query.archived === '1';
+    const baseFilter = archivedOnly ? { isArchived: true } : { isArchived: { $ne: true } };
+    const textFilter = q
       ? { $or: [{ name: { $regex: q, $options: 'i' } }, { companyName: { $regex: q, $options: 'i' } }] }
       : {};
-    const fragrances = await Fragrance.find(query).sort({ companyName: 1, name: 1 });
+    const fragrances = await Fragrance.find({ ...baseFilter, ...textFilter }).sort({ companyName: 1, name: 1 });
     res.json(fragrances);
   } catch (error) {
     next(error);
@@ -19,6 +21,7 @@ export const searchFragrances = async (req: Request, res: Response, next: NextFu
   try {
     const q = (req.query.q as string) || '';
     const fragrances = await Fragrance.find({
+      isArchived: { $ne: true },
       $or: [
         { name: { $regex: q, $options: 'i' } },
         { companyName: { $regex: q, $options: 'i' } },
@@ -63,6 +66,26 @@ export const updateFragrance = async (req: Request, res: Response, next: NextFun
       res.status(404).json({ message: 'Fragrance not found' });
       return;
     }
+    res.json(fragrance);
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const archiveFragrance = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const fragrance = await Fragrance.findById(req.params.id);
+    if (!fragrance) {
+      res.status(404).json({ message: 'Fragrance not found' });
+      return;
+    }
+    const nowArchived = !fragrance.isArchived;
+    fragrance.isArchived = nowArchived;
+    fragrance.archivedAt = nowArchived ? new Date() : undefined;
+    if (nowArchived && fragrance.web) {
+      fragrance.web.isPublished = false;
+    }
+    await fragrance.save();
     res.json(fragrance);
   } catch (error) {
     next(error);

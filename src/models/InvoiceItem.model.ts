@@ -20,6 +20,8 @@ export interface IInvoiceItem extends Document {
   lensCategory?: string;
   lensIndex?: string;
   lensCoating?: string;
+  // Frame variant (color) selection
+  frameVariantLabel?: string;
   // Simplified Prescription (legacy string format)
   rightEyeNumber?: string;
   leftEyeNumber?: string;
@@ -61,6 +63,8 @@ const InvoiceItemSchema = new Schema<IInvoiceItem>(
     lensCategory: { type: String, default: null },
     lensIndex: { type: String, default: null },
     lensCoating: { type: String, default: null },
+    // Frame variant colour
+    frameVariantLabel: { type: String, default: null },
     // Simplified Prescription (legacy string format)
     rightEyeNumber: { type: String, default: null },
     leftEyeNumber: { type: String, default: null },

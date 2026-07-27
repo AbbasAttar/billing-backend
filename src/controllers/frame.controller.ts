@@ -12,13 +12,17 @@ function buildFrameQuery(q: string) {
     { name: { $regex: q, $options: 'i' } },
     { companyName: { $regex: q, $options: 'i' } },
     { frameCode: { $regex: q, $options: 'i' } },
+    { houseName: { $regex: q, $options: 'i' } },
   ]};
 }
 
 export const getAllFrames = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const q = (req.query.q as string) || '';
-    const frames = await Frame.find(buildFrameQuery(q)).sort({ companyName: 1, name: 1 });
+    const archivedOnly = req.query.archived === '1';
+    const baseFilter = archivedOnly ? { isArchived: true } : { isArchived: { $ne: true } };
+    const query = q ? { ...baseFilter, ...buildFrameQuery(q) } : baseFilter;
+    const frames = await Frame.find(query).sort({ companyName: 1, name: 1 });
     res.json(frames);
   } catch (error) {
     next(error);
@@ -28,7 +32,7 @@ export const getAllFrames = async (req: Request, res: Response, next: NextFuncti
 export const searchFrames = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const q = (req.query.q as string) || '';
-    const frames = await Frame.find(buildFrameQuery(q)).limit(15);
+    const frames = await Frame.find({ isArchived: { $ne: true }, ...buildFrameQuery(q) }).limit(15);
     res.json(frames);
   } catch (error) {
     next(error);
@@ -68,6 +72,27 @@ export const updateFrame = async (req: Request, res: Response, next: NextFunctio
       res.status(404).json({ message: 'Frame not found' });
       return;
     }
+    res.json(frame);
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const archiveFrame = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const frame = await Frame.findById(req.params.id);
+    if (!frame) {
+      res.status(404).json({ message: 'Frame not found' });
+      return;
+    }
+    const nowArchived = !frame.isArchived;
+    frame.isArchived = nowArchived;
+    frame.archivedAt = nowArchived ? new Date() : undefined;
+    // Unpublish from website when archiving
+    if (nowArchived && frame.web) {
+      frame.web.isPublished = false;
+    }
+    await frame.save();
     res.json(frame);
   } catch (error) {
     next(error);

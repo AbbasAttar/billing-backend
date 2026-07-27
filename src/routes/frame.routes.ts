@@ -5,6 +5,7 @@ import {
   getFrameById,
   createFrame,
   updateFrame,
+  archiveFrame,
   deleteFrame,
 } from '../controllers/frame.controller';
 
@@ -15,6 +16,7 @@ router.get('/', getAllFrames);
 router.get('/:id', getFrameById);
 router.post('/', createFrame);
 router.put('/:id', updateFrame);
+router.patch('/:id/archive', archiveFrame);
 router.delete('/:id', deleteFrame);
 
 export default router;

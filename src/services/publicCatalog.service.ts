@@ -1,6 +1,7 @@
 import { Frame, IFrame } from '../models/Frame.model';
 import { Fragrance, IFragrance } from '../models/Fragrance.model';
 import { OpticalLens, IOpticalLens } from '../models/OpticalLens.model';
+import { ContactLens, IContactLens } from '../models/ContactLens.model';
 
 export type PublicCategory =
   | 'frames'
@@ -18,6 +19,7 @@ export interface PublicProductQuery {
   gender?: string;
   shape?: string;
   material?: string;
+  color?: string;
   family?: string;
   longevity?: string;
   priceMin?: number;
@@ -38,6 +40,17 @@ export interface PublicProductAtarSize {
   price: number;
 }
 
+export interface PublicFrameColor {
+  name: string;
+  hex: string;
+}
+
+export interface PublicFrameVariant {
+  colors: PublicFrameColor[];
+  label?: string;
+  stock: number;
+}
+
 export interface PublicProduct {
   id: string;
   category: 'frames' | 'lenses' | 'fragrances';
@@ -54,6 +67,8 @@ export interface PublicProduct {
   shape?: string;
   material?: string;
   color?: string;
+  colors?: PublicFrameColor[];
+  frameVariants?: PublicFrameVariant[];
   longDescription?: string;
   fragranceFamily?: string[];
   variants?: PublicProductVariant[];
@@ -91,6 +106,14 @@ function frameToPublic(f: IFrame): PublicProduct {
     longDescription: web.longDescription,
     frameSize: web.frameSize,
     colorVariants: web.colorVariants,
+    colors: web.colors?.length ? web.colors.map((c: any) => ({ name: c.name, hex: c.hex })) : undefined,
+    frameVariants: web.frameVariants?.length
+      ? web.frameVariants.map((v: any) => ({
+          colors: (v.colors ?? []).map((c: any) => ({ name: c.name, hex: c.hex })),
+          label: v.label,
+          stock: v.stock ?? 0,
+        }))
+      : undefined,
     createdAt: (f as any).createdAt,
     publishedAt: web.publishedAt,
   };
@@ -143,12 +166,40 @@ function lensToPublic(l: IOpticalLens): PublicProduct {
   };
 }
 
+function contactLensToPublic(l: IContactLens): PublicProduct {
+  const web = l.web ?? ({} as any);
+  const primary = web.images?.find((i: any) => i.isPrimary) ?? web.images?.[0];
+  return {
+    id: (l._id as any).toString(),
+    category: 'lenses',
+    subCategory: l.lensType,
+    slug: web.slug ?? '',
+    name: web.displayName || l.name,
+    brand: l.brand,
+    price: l.sellPrice ?? 0,
+    images: web.images ?? [],
+    primaryImage: primary?.url,
+    shortDescription: web.shortDescription,
+    longDescription: web.longDescription,
+    tags: web.tags ?? [],
+    color: web.color,
+    colorVariants: web.colorVariants?.length ? web.colorVariants : undefined,
+    createdAt: (l as any).createdAt,
+    publishedAt: web.publishedAt,
+  };
+}
+
 function baseFilter(query: PublicProductQuery, isFragrance = false) {
-  const filter: any = { 'web.isPublished': true };
+  const filter: any = { 'web.isPublished': true, isArchived: { $ne: true } };
   if (query.tag) filter['web.tags'] = query.tag;
   if (query.gender) filter['web.gender'] = query.gender;
   if (query.shape) filter['web.shape'] = query.shape;
   if (query.material) filter['web.material'] = query.material;
+  if (query.color) {
+    const colorRx = new RegExp(escapeRegex(query.color), 'i');
+    if (!filter.$and) filter.$and = [];
+    filter.$and.push({ $or: [{ 'web.color': colorRx }, { 'web.colors.name': colorRx }] });
+  }
   if (query.family && isFragrance) filter['web.fragranceFamily'] = query.family;
   if (query.longevity && isFragrance) filter['web.longevity'] = query.longevity;
   if (query.priceMin != null || query.priceMax != null) {
@@ -222,12 +273,15 @@ export async function listPublicProducts(query: PublicProductQuery) {
 
   if (wantLenses) {
     const filter = baseFilter(query);
-    const [items, count] = await Promise.all([
+    const [olItems, olCount, clItems, clCount] = await Promise.all([
       OpticalLens.find(filter, PUBLIC_FIELDS).sort(sort).skip(skip).limit(limit).lean<IOpticalLens[]>(),
       OpticalLens.countDocuments(filter),
+      ContactLens.find(filter, PUBLIC_FIELDS).sort(sort).skip(skip).limit(limit).lean<IContactLens[]>(),
+      ContactLens.countDocuments(filter),
     ]);
-    results.push(...items.map(lensToPublic));
-    total += count;
+    results.push(...olItems.map(lensToPublic));
+    results.push(...clItems.map(contactLensToPublic));
+    total += olCount + clCount;
   }
 
   if (wantFragrances) {
@@ -250,7 +304,7 @@ export async function listPublicProducts(query: PublicProductQuery) {
 }
 
 export async function findPublicProductBySlug(category: string, slug: string) {
-  const filter = { 'web.slug': slug, 'web.isPublished': true };
+  const filter = { 'web.slug': slug, 'web.isPublished': true, isArchived: { $ne: true } };
   const opticalCats = ['frames', 'sunglasses', 'optical'];
   const lensCats = ['lenses', 'contact-lenses'];
   const fragranceCats = ['fragrances', 'attars', 'perfumes', 'bakhoor'];
@@ -260,8 +314,12 @@ export async function findPublicProductBySlug(category: string, slug: string) {
     if (item) return { product: frameToPublic(item), raw: item, kind: 'frame' as const };
   }
   if (lensCats.includes(category)) {
-    const item = await OpticalLens.findOne(filter, PUBLIC_FIELDS).lean<IOpticalLens>();
-    if (item) return { product: lensToPublic(item), raw: item, kind: 'lens' as const };
+    const [olItem, clItem] = await Promise.all([
+      OpticalLens.findOne(filter, PUBLIC_FIELDS).lean<IOpticalLens>(),
+      ContactLens.findOne(filter, PUBLIC_FIELDS).lean<IContactLens>(),
+    ]);
+    if (clItem) return { product: contactLensToPublic(clItem), raw: clItem, kind: 'lens' as const };
+    if (olItem) return { product: lensToPublic(olItem), raw: olItem, kind: 'lens' as const };
   }
   if (fragranceCats.includes(category)) {
     const item = await Fragrance.findOne(filter, PUBLIC_FIELDS).lean<IFragrance>();
@@ -286,12 +344,12 @@ export async function getCategoryTree() {
     perfumesCount,
     bakhoorCount,
   ] = await Promise.all([
-    Frame.countDocuments({ 'web.isPublished': true, type: { $not: /sunglass/i } }),
-    Frame.countDocuments({ 'web.isPublished': true, type: /sunglass/i }),
+    Frame.countDocuments({ 'web.isPublished': true, isArchived: { $ne: true }, type: { $not: /sunglass/i } }),
+    Frame.countDocuments({ 'web.isPublished': true, isArchived: { $ne: true }, type: /sunglass/i }),
     OpticalLens.countDocuments({ 'web.isPublished': true }),
-    Fragrance.countDocuments({ 'web.isPublished': true, type: 'attar' }),
-    Fragrance.countDocuments({ 'web.isPublished': true, type: 'perfume' }),
-    Fragrance.countDocuments({ 'web.isPublished': true, type: 'bakhoor' }),
+    Fragrance.countDocuments({ 'web.isPublished': true, isArchived: { $ne: true }, type: 'attar' }),
+    Fragrance.countDocuments({ 'web.isPublished': true, isArchived: { $ne: true }, type: 'perfume' }),
+    Fragrance.countDocuments({ 'web.isPublished': true, isArchived: { $ne: true }, type: 'bakhoor' }),
   ]);
   return {
     optical: {

@@ -8,11 +8,13 @@ import {
     updateOpticalLens,
     deleteOpticalLens,
 } from '../controllers/opticalLens.controller';
+import { getLensAnalytics } from '../controllers/lensAnalytics.controller';
 
 const router = Router();
 
 router.get('/brands', getBrands);
 router.get('/search', searchOpticalLenses);
+router.get('/analytics', getLensAnalytics);
 router.get('/', getAllOpticalLenses);
 router.get('/:id', getOpticalLensById);
 router.post('/', createOpticalLens);

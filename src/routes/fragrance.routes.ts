@@ -5,6 +5,7 @@ import {
   getFragranceById,
   createFragrance,
   updateFragrance,
+  archiveFragrance,
   deleteFragrance,
 } from '../controllers/fragrance.controller';
 
@@ -15,6 +16,7 @@ router.get('/', getAllFragrances);
 router.get('/:id', getFragranceById);
 router.post('/', createFragrance);
 router.put('/:id', updateFragrance);
+router.patch('/:id/archive', archiveFragrance);
 router.delete('/:id', deleteFragrance);
 
 export default router;

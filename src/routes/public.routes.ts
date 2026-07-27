@@ -12,6 +12,7 @@ import {
   getLensCatalog,
   getLensPricingLookup,
   getPublicCoatings,
+  getPublicColors,
   getMyOrders,
   getOrderById,
 } from '../controllers/public.controller';
@@ -30,6 +31,7 @@ router.get('/instagram-posts', getInstagramPosts);
 router.get('/lens-catalog', getLensCatalog);
 router.get('/lens-pricing-lookup', getLensPricingLookup);
 router.get('/coatings', getPublicCoatings);
+router.get('/colors', getPublicColors);
 router.get('/my-orders', getMyOrders);
 router.get('/orders/:id', getOrderById);
 

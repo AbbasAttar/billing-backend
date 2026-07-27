@@ -269,6 +269,89 @@ export const trends = async (_req: Request, res: Response, next: NextFunction) =
   } catch (e) { next(e); }
 };
 
+// ── SOLD NUMBERS ─────────────────────────────────────────────────────────────
+
+export const sold = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const days = Math.min(parseInt(req.query.days as string) || 90, 730);
+    const from = new Date();
+    from.setDate(from.getDate() - days);
+
+    const baseMatch: Record<string, any> = {
+      createdAt: { $gte: from },
+      lensType: { $exists: true, $ne: null },
+      lensMaterial: { $exists: true, $ne: null },
+    };
+
+    // Project right-eye rows
+    const reProject = {
+      sph:      '$rightSpherical',
+      cyl:      { $ifNull: ['$rightCylinder', 0] },
+      add:      { $ifNull: ['$rightAddition', null] },
+      lensType: '$lensType',
+      material: '$lensMaterial',
+      coating:  '$lensCoating',
+      price:    '$price',
+      quantity: '$quantity',
+    };
+
+    // Project left-eye rows
+    const leProject = {
+      sph:      '$leftSpherical',
+      cyl:      { $ifNull: ['$leftCylinder', 0] },
+      add:      { $ifNull: ['$leftAddition', null] },
+      lensType: '$lensType',
+      material: '$lensMaterial',
+      coating:  '$lensCoating',
+      price:    '$price',
+      quantity: '$quantity',
+    };
+
+    const records = await InvoiceItem.aggregate([
+      { $match: { ...baseMatch, rightSpherical: { $ne: null } } },
+      { $project: reProject },
+      {
+        $unionWith: {
+          coll: 'invoiceitems',
+          pipeline: [
+            { $match: { ...baseMatch, leftSpherical: { $ne: null } } },
+            { $project: leProject },
+          ],
+        },
+      },
+      {
+        $group: {
+          _id:          { sph: '$sph', cyl: '$cyl', add: '$add', lensType: '$lensType', material: '$material' },
+          timesSold:    { $sum: '$quantity' },
+          avgPrice:     { $avg: '$price' },
+          minPrice:     { $min: '$price' },
+          maxPrice:     { $max: '$price' },
+          totalRevenue: { $sum: { $multiply: ['$price', '$quantity'] } },
+        },
+      },
+      { $sort: { timesSold: -1 } },
+      { $limit: 500 },
+      {
+        $project: {
+          _id:          0,
+          sph:          '$_id.sph',
+          cyl:          '$_id.cyl',
+          add:          '$_id.add',
+          lensType:     '$_id.lensType',
+          material:     '$_id.material',
+          timesSold:    1,
+          avgPrice:     { $round: ['$avgPrice', 0] },
+          minPrice:     1,
+          maxPrice:     1,
+          totalRevenue: { $round: ['$totalRevenue', 0] },
+        },
+      },
+    ]);
+
+    return ok(res, { days, from, records });
+  } catch (e) { next(e); }
+};
+
 // ── DEDUCT stock (called internally from invoice creation) ────────────────────
 
 export async function deductLensStock(opts: {

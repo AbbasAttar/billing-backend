@@ -3,6 +3,7 @@ export interface CreateFrameItemInput {
   frame: string;
   quantity: number;
   price: number;
+  frameVariantLabel?: string;
 }
 
 export interface CreateFragranceItemInput {

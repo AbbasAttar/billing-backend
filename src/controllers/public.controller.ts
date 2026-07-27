@@ -18,6 +18,7 @@ import { Coating } from '../models/Coating.model';
 import { Order } from '../models/Order.model';
 import { Fragrance } from '../models/Fragrance.model';
 import { Frame } from '../models/Frame.model';
+import { FrameColor } from '../models/FrameColor.model';
 
 function toInt(v: unknown, fallback?: number): number | undefined {
   if (v == null || v === '') return fallback;
@@ -34,6 +35,7 @@ export const getProducts = async (req: Request, res: Response, next: NextFunctio
       gender: (req.query.gender as string) || undefined,
       shape: (req.query.shape as string) || undefined,
       material: (req.query.material as string) || undefined,
+      color: (req.query.color as string) || undefined,
       family: (req.query.family as string) || undefined,
       longevity: (req.query.longevity as string) || undefined,
       priceMin: toInt(req.query.priceMin),
@@ -67,6 +69,8 @@ export const getProductBySlug = async (req: Request, res: Response, next: NextFu
       longDescription: (raw as any).web?.longDescription,
       seo: (raw as any).web?.seo,
       specs: buildSpecs(raw, result.kind),
+      colors: result.product.colors,
+      frameVariants: result.product.frameVariants,
     };
     res.json({ success: true, data: detail });
   } catch (err) {
@@ -86,6 +90,17 @@ function buildSpecs(raw: any, kind: 'frame' | 'lens' | 'fragrance') {
     };
   }
   if (kind === 'lens') {
+    // contact lens (has lensType) vs optical lens (has category/index)
+    if (raw.lensType) {
+      return {
+        brand: raw.brand,
+        lensType: raw.lensType,
+        packSize: raw.packSize,
+        baseCurve: raw.baseCurve,
+        diameter: raw.diameter,
+        color: raw.web?.color,
+      };
+    }
     return {
       brand: raw.brand,
       category: raw.category,
@@ -250,6 +265,15 @@ export const getPublicCoatings = async (_req: Request, res: Response, next: Next
   try {
     const coatings = await Coating.find({}, { name: 1, _id: 0 }).sort({ name: 1 }).lean();
     res.json({ success: true, data: coatings.map((c) => c.name) });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const getPublicColors = async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const colors = await FrameColor.find({}, { name: 1, hex: 1 }).sort({ name: 1 }).lean();
+    res.json({ success: true, data: colors });
   } catch (err) {
     next(err);
   }
