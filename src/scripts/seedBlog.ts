@@ -578,6 +578,124 @@ const posts = [
 </ul>`,
   },
   {
+    slug: 'oud-vs-musk-which-attar-should-you-choose',
+    title: 'Oud vs Musk — Which Attar Should You Choose?',
+    excerpt: 'Oud and musk are two of the most beloved fragrance families in Indian and Arab perfumery. They smell very different and suit very different moods. Here\'s how to decide.',
+    category: 'fragrance' as const,
+    publishedAt: new Date('2026-07-16'),
+    readTime: 5,
+    tags: ['oud vs musk', 'attar guide', 'choosing fragrance', 'musk attar', 'oud attar'],
+    seo: {
+      title: 'Oud vs Musk — Which Attar Should You Choose? | Attarwala Optical House',
+      description: 'Oud is deep and smoky; musk is soft and skin-close. Learn the difference and which attar suits you — from the fragrance experts at Attarwala Optical House, Dahod.',
+      keywords: ['oud vs musk', 'oud or musk attar', 'best attar for men', 'which attar to buy', 'musk or oud'],
+    },
+    content: `<h2>Two Icons of Eastern Perfumery</h2>
+<p>If you walk into any traditional attar shop in India or the Gulf, two fragrance families dominate the conversation: <strong>oud</strong> and <strong>musk</strong>. Both are classics. Both are beloved. But they occupy completely opposite ends of the fragrance spectrum — and understanding that difference will help you choose the right one for the right moment.</p>
+<h2>Oud: Bold, Deep, Unforgettable</h2>
+<p>Oud (agarwood) is the richest, most complex material in the attar tradition. It is resinous, warm, slightly smoky — sometimes animalic, sometimes sweet, always distinctive. An oud attar announces its presence. It projects from the skin, lingers for hours, and leaves an impression long after you have left the room.</p>
+<ul>
+  <li><strong>Mood:</strong> Confident, bold, special-occasion</li>
+  <li><strong>Best for:</strong> Evenings, winter, formal events, Eid, weddings</li>
+  <li><strong>How much:</strong> One small drop is genuinely enough</li>
+  <li><strong>Who wears it:</strong> Equally loved by men and women; traditionally associated with men's wear in India</li>
+</ul>
+<h2>Musk: Soft, Skin-Close, Universally Wearable</h2>
+<p>Musk is the opposite of oud in almost every way. It is subtle, clean, and intimate — it smells like warm skin rather than a distinct ingredient. A good musk attar barely announces itself; you have to lean in to catch it. That is precisely its appeal.</p>
+<ul>
+  <li><strong>Mood:</strong> Effortless, gentle, approachable</li>
+  <li><strong>Best for:</strong> Daily wear, office, summer, after a shower</li>
+  <li><strong>How much:</strong> Apply generously to pulse points — musk needs skin contact to bloom</li>
+  <li><strong>Who wears it:</strong> Completely universal; arguably the most gender-neutral fragrance family</li>
+</ul>
+<h2>Can You Wear Both?</h2>
+<p>Yes — and the combination is legendary. Rose-musk-oud is arguably the most popular layered attar combination in South Asian and Arabic perfumery. Apply a white musk as your base, let it settle for a minute, then add a small drop of oud on top. The musk softens oud's intensity while oud gives musk a depth it would otherwise lack.</p>
+<h2>Which Should You Buy First?</h2>
+<p>If you are new to attars, start with musk. It is low-risk, universally pleasant, and teaches you what oil-based fragrance feels like on skin. Once you are comfortable, try oud — but start with a mukhallat (blended oud) rather than pure agarwood oil, which can be overwhelming at first.</p>
+<p>At <a href="/attar-dahod">Attarwala Optical House in Dahod</a>, we carry both pure musk and oud attars in small trial sizes so you can explore before committing. <a href="/fragrance/attars">Browse our attar collection →</a></p>`,
+  },
+  {
+    slug: 'computer-eye-testing-dahod-first-since-2002',
+    title: 'Computer Eye Testing in Dahod: How We Brought It First in 2002',
+    excerpt: 'In 2002, Attarwala Optical House became the first optical shop in Dahod to offer computerised eye testing. Here\'s what it means for you and why it matters for your vision care.',
+    category: 'optical' as const,
+    publishedAt: new Date('2026-07-18'),
+    readTime: 5,
+    tags: ['computer eye testing', 'eye test dahod', 'optical shop dahod', 'vision care'],
+    seo: {
+      title: 'Computer Eye Testing in Dahod — First Since 2002 | Attarwala Optical House',
+      description: 'Attarwala Optical House was the first optical shop in Dahod to introduce computerised eye testing in 2002. Learn what a computer eye test involves and book yours free.',
+      keywords: ['computer eye testing dahod', 'eye test dahod', 'computerised eye test', 'optical shop dahod', 'free eye test dahod'],
+    },
+    content: `<h2>A Milestone for Dahod's Vision Care</h2>
+<p>In 2002, when most optical shops in smaller cities still relied entirely on manual trial lens sets, <strong>Attarwala Optical House became the first optical shop in Dahod to introduce computerised eye testing</strong>. It was a significant step — not just for our store, but for the thousands of families in Dahod and the surrounding areas who deserved access to precision vision care.</p>
+<p>More than twenty years later, our commitment to bringing the best technology and care to Dahod hasn't changed. We still offer <strong>free eye tests</strong> for all age groups, every day.</p>
+<h2>What Is a Computer Eye Test?</h2>
+<p>A computerised eye test (also called an autorefraction) uses a device called an <strong>autorefractor</strong> to measure how your eye focuses light. You simply look into the machine at a small image, and within seconds it produces an objective reading of your prescription — including sphere, cylinder, and axis values for both eyes.</p>
+<p>This reading is used as a <em>starting point</em> for your optician, who then refines it using a phoropter (the traditional lens flip device) until the prescription is precisely matched to your vision.</p>
+<h2>Why It Matters</h2>
+<ul>
+  <li><strong>Faster and more consistent:</strong> Autorefraction reduces subjective guesswork and gives the optician a reliable baseline in under 60 seconds.</li>
+  <li><strong>Better for children:</strong> Children often struggle to give accurate responses in a traditional eye test. The autorefractor provides a reading without relying on the child's answers.</li>
+  <li><strong>Detects hidden prescriptions:</strong> Some refractive errors are not obvious to the patient but are clearly measured by the machine.</li>
+  <li><strong>Repeatable:</strong> Results can be compared accurately across visits to track any changes in prescription over time.</li>
+</ul>
+<h2>What to Expect at Your Eye Test</h2>
+<ol>
+  <li>Walk in — no appointment needed for a basic eye test.</li>
+  <li>Our optician will seat you at the autorefractor and take the computer reading (takes under 2 minutes).</li>
+  <li>The reading is refined with a manual refraction to dial in your exact prescription.</li>
+  <li>You receive your full prescription on a card — suitable for any optical shop.</li>
+  <li>If you would like glasses, our optician will guide you through frame selection and lens options on the spot.</li>
+</ol>
+<h2>Book Your Free Eye Test in Dahod</h2>
+<p>Our <strong>free eye test in Dahod</strong> is available six days a week at our store in Nagar Palika Complex, Dahod. Walk in any time, or <a href="/contact">WhatsApp us</a> to book a specific slot. We test all ages — children, adults, and seniors.</p>
+<p><a href="/eye-test-dahod">Learn more about our eye testing service →</a> | <a href="/optical">Browse our optical collection →</a></p>`,
+  },
+  {
+    slug: 'naseem-fragrances-guide-candlelight-pink-eclat',
+    title: 'Naseem Fragrances at Attarwala: Candlelight in December, Pink Eclat & More',
+    excerpt: 'Naseem is one of the most popular fragrance brands we carry. Here\'s a guide to their bestselling scents — including Candlelight in December and Pink Eclat — and how to choose between them.',
+    category: 'fragrance' as const,
+    publishedAt: new Date('2026-07-20'),
+    readTime: 5,
+    tags: ['naseem', 'naseem fragrance', 'candlelight in december', 'pink eclat', 'perfume guide'],
+    seo: {
+      title: 'Naseem Fragrances Guide: Candlelight in December, Pink Eclat & More | Attarwala',
+      description: 'Explore Naseem\'s bestselling fragrances including Candlelight in December and Pink Eclat. Available at Attarwala Optical House, Dahod. Order on WhatsApp or online.',
+      keywords: ['naseem candlelight in december', 'naseem pink eclat', 'naseem fragrance', 'naseem perfume india', 'sweet treats in bed naseem'],
+    },
+    content: `<h2>Why Naseem Has Become a Favourite</h2>
+<p>Naseem fragrances have quietly built a devoted following in India over the past few years. The brand sits at the sweet spot between traditional Eastern fragrance values — longevity, richness, depth — and modern Western gourmand and floral trends. Their bottles are beautiful, the prices are honest, and the quality consistently exceeds expectations for the price point.</p>
+<p>At Attarwala Optical House, Naseem has become one of our most requested brands. Here is a guide to their most popular scents we carry.</p>
+<h2>Candlelight in December</h2>
+<p><strong>Candlelight in December</strong> is Naseem's most talked-about release — a warm, cosy, gourmand fragrance that smells exactly like its name suggests. Think vanilla, amber, and a hint of soft musk with a slightly sweet woody dry-down. It is an evening fragrance, ideal for cooler months, and has remarkable longevity on skin.</p>
+<ul>
+  <li><strong>Character:</strong> Warm, sweet, intimate</li>
+  <li><strong>Season:</strong> Autumn and winter; perfect from October to February</li>
+  <li><strong>Best for:</strong> Evenings, date nights, cosy home settings</li>
+  <li><strong>Who will love it:</strong> Anyone drawn to vanilla or amber-heavy fragrances</li>
+</ul>
+<h2>Pink Eclat</h2>
+<p><strong>Pink Eclat</strong> is the lighter, more feminine-leaning counterpart — a fresh floral built around rose, peony, and a powdery musky finish. It is brighter and more versatile than Candlelight in December, making it suitable for year-round wear.</p>
+<ul>
+  <li><strong>Character:</strong> Fresh, floral, powdery</li>
+  <li><strong>Season:</strong> Spring and summer; works year-round</li>
+  <li><strong>Best for:</strong> Daytime, office, casual outings</li>
+  <li><strong>Who will love it:</strong> Fans of fresh florals and clean musks</li>
+</ul>
+<h2>Sweet Treats in Bed</h2>
+<p>Another popular Naseem scent, <strong>Sweet Treats in Bed</strong> leans fully into the gourmand direction — think soft dessert notes, caramelised warmth, and a comforting musky base. It is the most playful of the three and works beautifully as a layering fragrance under a lighter floral.</p>
+<h2>How to Choose Between Them</h2>
+<ul>
+  <li>Want something rich and romantic for evenings? → <strong>Candlelight in December</strong></li>
+  <li>Want something fresh and versatile for every day? → <strong>Pink Eclat</strong></li>
+  <li>Want something fun and sweet for casual wear? → <strong>Sweet Treats in Bed</strong></li>
+</ul>
+<h2>Where to Buy Naseem in Dahod</h2>
+<p>All Naseem fragrances are available at our store in Nagar Palika Complex, Dahod. You can also <a href="/contact">WhatsApp us</a> to check availability or place an order for delivery anywhere in India. <a href="/fragrance/perfumes">Browse all perfumes online →</a></p>`,
+  },
+  {
     slug: 'anti-reflective-coating-is-it-worth-it',
     title: 'Anti-Reflective Lens Coating: Is It Worth It?',
     excerpt: 'Anti-reflective (AR) coating is one of the most recommended lens upgrades — but is it actually necessary? Here\'s an honest look at what it does and when it matters.',
