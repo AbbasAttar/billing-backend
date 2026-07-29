@@ -19,6 +19,8 @@ import { Order } from '../models/Order.model';
 import { Fragrance } from '../models/Fragrance.model';
 import { Frame } from '../models/Frame.model';
 import { FrameColor } from '../models/FrameColor.model';
+import { Customer } from '../models/Customer.model';
+import { Invoice } from '../models/Invoice.model';
 
 function toInt(v: unknown, fallback?: number): number | undefined {
   if (v == null || v === '') return fallback;
@@ -289,9 +291,11 @@ export const getMyOrders = async (req: Request, res: Response, next: NextFunctio
       return;
     }
 
-    const filter: Record<string, unknown> = {};
-    if (email) filter.customerEmail = { $regex: new RegExp(`^${email}$`, 'i') };
-    else if (phone) filter.customerPhone = phone;
+    // OR query so orders placed by either email or phone are always found
+    const orClauses: Record<string, unknown>[] = [];
+    if (email) orClauses.push({ customerEmail: { $regex: new RegExp(`^${email}$`, 'i') } });
+    if (phone) orClauses.push({ customerPhone: phone });
+    const filter: Record<string, unknown> = orClauses.length === 1 ? orClauses[0] : { $or: orClauses };
 
     const orders = await Order.find(filter).sort({ createdAt: -1 }).limit(50).lean();
 
@@ -382,6 +386,76 @@ export const getOrderById = async (req: Request, res: Response, next: NextFuncti
     const order = await Order.findById(id).lean();
     if (!order) { res.status(404).json({ success: false, message: 'Order not found' }); return; }
     res.json({ success: true, data: order });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// GET /api/public/my-invoices?phone=9876543210
+// Returns in-store billing invoices for a customer looked up by mobile number.
+export const getMyInvoices = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const phone = (req.query.phone as string | undefined)?.replace(/\D/g, '').trim();
+    if (!phone || phone.length < 7) {
+      res.status(400).json({ success: false, message: 'phone required' });
+      return;
+    }
+
+    // Match last 10 digits to be lenient about country prefix
+    const last10 = phone.slice(-10);
+    const customer = await Customer.findOne({
+      mobileNumber: { $regex: last10, $options: 'i' },
+    }).lean();
+
+    if (!customer) {
+      res.json({ success: true, data: [] });
+      return;
+    }
+
+    const invoices = await Invoice.find({ customer: customer._id })
+      .populate({
+        path: 'items',
+        populate: [
+          { path: 'frame',       select: 'web.displayName name' },
+          { path: 'opticalLens', select: 'web.displayName name' },
+          { path: 'fragrance',   select: 'web.displayName name' },
+        ],
+      })
+      .sort({ billDate: -1 })
+      .limit(50)
+      .lean();
+
+    const data = invoices.map((inv: any) => {
+      const amountPaid = (inv.payments ?? []).reduce(
+        (s: number, p: any) => s + (p.amount ?? 0) + (p.writeoff ?? 0), 0
+      );
+      const balance = Math.max(0, inv.total - amountPaid);
+
+      const itemSummaries = (inv.items ?? []).map((it: any) => {
+        const name =
+          it.frame?.web?.displayName || it.frame?.name ||
+          it.opticalLens?.web?.displayName || it.opticalLens?.name ||
+          it.fragrance?.web?.displayName || it.fragrance?.name ||
+          it.lensName || it.lensBrand ||
+          'Item';
+        return { name, quantity: it.quantity ?? 1, price: it.price ?? 0 };
+      });
+
+      return {
+        _id:           inv._id.toString(),
+        invoiceNumber: inv.invoiceNumber ?? null,
+        billDate:      inv.billDate,
+        subtotal:      inv.subtotal,
+        discount:      inv.discount,
+        total:         inv.total,
+        amountPaid,
+        balance,
+        cleared:       balance <= 0,
+        items:         itemSummaries,
+      };
+    });
+
+    res.json({ success: true, data, customer: { name: customer.name } });
   } catch (err) {
     next(err);
   }

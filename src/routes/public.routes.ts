@@ -15,6 +15,7 @@ import {
   getPublicColors,
   getMyOrders,
   getOrderById,
+  getMyInvoices,
 } from '../controllers/public.controller';
 
 const router = Router();
@@ -33,6 +34,7 @@ router.get('/lens-pricing-lookup', getLensPricingLookup);
 router.get('/coatings', getPublicCoatings);
 router.get('/colors', getPublicColors);
 router.get('/my-orders', getMyOrders);
+router.get('/my-invoices', getMyInvoices);
 router.get('/orders/:id', getOrderById);
 
 export default router;

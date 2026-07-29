@@ -1,6 +1,7 @@
 import { initializeApp, getApps, type App } from 'firebase-admin/app';
 import { cert } from 'firebase-admin/app';
 import { getMessaging, type Messaging } from 'firebase-admin/messaging';
+import { getAuth, type Auth } from 'firebase-admin/auth';
 import { env } from '../config/env';
 
 let adminApp: App | null = null;
@@ -26,4 +27,10 @@ export function getAdminMessaging(): Messaging | null {
   const app = getAdminApp();
   if (!app) return null;
   try { return getMessaging(app); } catch { return null; }
+}
+
+export function getAdminAuth(): Auth | null {
+  const app = getAdminApp();
+  if (!app) return null;
+  try { return getAuth(app); } catch { return null; }
 }
