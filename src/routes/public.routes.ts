@@ -16,6 +16,7 @@ import {
   getMyOrders,
   getOrderById,
   getMyInvoices,
+  getInvoiceById,
 } from '../controllers/public.controller';
 
 const router = Router();
@@ -36,5 +37,6 @@ router.get('/colors', getPublicColors);
 router.get('/my-orders', getMyOrders);
 router.get('/my-invoices', getMyInvoices);
 router.get('/orders/:id', getOrderById);
+router.get('/invoices/:id', getInvoiceById);
 
 export default router;

@@ -12,6 +12,7 @@ export interface ILensStock extends Document {
   quantity:    number;
   reorderLevel: number;
   costPrice:   number;
+  lastCost?:   number | null;
 }
 
 const LensStockSchema = new Schema<ILensStock>(
@@ -26,6 +27,7 @@ const LensStockSchema = new Schema<ILensStock>(
     quantity:     { type: Number, required: true, min: 0, default: 0 },
     reorderLevel: { type: Number, required: true, min: 0, default: 2 },
     costPrice:    { type: Number, required: true, min: 0, default: 0 },
+    lastCost:     { type: Number, default: null },
   },
   { timestamps: true }
 );

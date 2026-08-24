@@ -47,6 +47,10 @@ export interface CreateOpticalLensItemInput {
   leftCylinder?: number | null;
   leftAxis?: number | null;
   leftAddition?: number | null;
+  // Fulfillment tracking
+  fulfillmentSource?: 'stock' | 'ordered' | 'unfulfilled';
+  requestedQty?: number | null;
+  fulfilledQty?: number | null;
   quantity: number;
   price: number;
 }
@@ -124,4 +128,23 @@ export interface IGivenPaymentDto {
   invoiceTotal: number;
   isClearing: boolean;
   method: 'cash' | 'online';
+}
+
+export interface DemandLogInput {
+  requestedQty: number;
+  lensType?: string | null;
+  lensMaterial?: string | null;
+  lensCoating?: string | null;
+  lensColor?: string | null;
+  lensCompany?: string | null;
+  lensLabel?: string | null;
+  customerName?: string | null;
+  rightSpherical?: number | null;
+  rightCylinder?: number | null;
+  rightAxis?: number | null;
+  rightAddition?: number | null;
+  leftSpherical?: number | null;
+  leftCylinder?: number | null;
+  leftAxis?: number | null;
+  leftAddition?: number | null;
 }

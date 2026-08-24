@@ -1,5 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import mongoose from 'mongoose';
+import * as XLSX from 'xlsx';
+import { Coating } from '../models/Coating.model';
 import { Invoice } from '../models/Invoice.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
 import { OpticalLens } from '../models/OpticalLens.model';
@@ -8,10 +10,11 @@ import { OpticalNumber } from '../models/OpticalNumber.model';
 import { Customer } from '../models/Customer.model';
 import { Frame } from '../models/Frame.model';
 import { Fragrance } from '../models/Fragrance.model';
+import { Order } from '../models/Order.model';
 import { deductLensStock } from './lensStock.controller';
 import { generateInvoiceNumber, financialYear, formatInvoiceNo } from '../utils/invoiceNumber';
 import { InvoiceCounter } from '../models/InvoiceCounter.model';
-import type { CreateInvoiceInput, CreateInvoiceItemInput } from '../types';
+import type { CreateInvoiceInput, CreateInvoiceItemInput, DemandLogInput } from '../types';
 
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -75,7 +78,7 @@ function validateItems(items: CreateInvoiceItemInput[]): string | null {
 
 export const getAllInvoices = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const invoices = await populateInvoice(Invoice.find().sort({ billDate: -1 }));
+    const invoices = await populateInvoice(Invoice.find().sort({ billDate: -1, _id: -1 }));
     res.json(invoices);
   } catch (error) {
     next(error);
@@ -102,7 +105,7 @@ export const getInvoiceById = async (req: Request, res: Response, next: NextFunc
 export const getInvoicesByCustomer = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const invoices = await populateInvoice(
-      Invoice.find({ customer: req.params.customerId }).sort({ billDate: -1 })
+      Invoice.find({ customer: req.params.customerId }).sort({ billDate: -1, _id: -1 })
     );
     res.json(invoices);
   } catch (error) {
@@ -377,6 +380,10 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         doc.leftCylinder = (item as any).leftCylinder ?? null;
         doc.leftAxis = (item as any).leftAxis ?? null;
         doc.leftAddition = (item as any).leftAddition ?? null;
+        // Fulfillment tracking
+        doc.fulfillmentSource = (item as any).fulfillmentSource || 'stock';
+        doc.requestedQty = (item as any).requestedQty ?? item.quantity;
+        doc.fulfilledQty = (item as any).fulfilledQty ?? item.quantity;
       }
 
       const invoiceItem = await InvoiceItem.create(doc);
@@ -994,6 +1001,266 @@ export const updateItemInInvoice = async (req: Request, res: Response, next: Nex
     
     const populated = await populateInvoice(Invoice.findById(invoice._id));
     res.json(populated);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ── GET merged in-store + online invoices ─────────────────────────────────────
+
+const PAID_STATUSES = ['paid', 'preparing', 'ready', 'dispatched', 'fulfilled'] as const;
+
+export const getAllMerged = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const [invoices, orders] = await Promise.all([
+      Invoice.find().sort({ billDate: -1 }).populate('customer', 'name mobile').lean(),
+      Order.find({ status: { $in: PAID_STATUSES } }).sort({ createdAt: 1 }).lean(),
+    ]);
+
+    // Auto-assign INV numbers to paid orders that don't have one yet (oldest first)
+    for (const ord of orders) {
+      if (!ord.invoiceNumber) {
+        const invNo = await generateInvoiceNumber(new Date(ord.createdAt as Date));
+        await Order.updateOne({ _id: ord._id, invoiceNumber: null }, { invoiceNumber: invNo });
+        ord.invoiceNumber = invNo;
+      }
+    }
+
+    const merged = [
+      ...invoices.map(inv => ({
+        _id:           inv._id,
+        source:        'in-store' as const,
+        invoiceNumber: inv.invoiceNumber,
+        customer:      inv.customer,
+        total:         inv.total,
+        subtotal:      inv.subtotal,
+        discount:      inv.discount,
+        payments:      inv.payments ?? [],
+        billDate:      inv.billDate,
+        createdAt:     (inv as any).createdAt ?? inv.billDate,
+      })),
+      ...orders.map(ord => {
+        const paid =
+          ord.status === 'paid' || ord.status === 'fulfilled'
+            ? ord.total
+            : (ord.tokenAmount ?? 0);
+        return {
+          _id:           ord._id,
+          source:        'online' as const,
+          invoiceNumber: ord.invoiceNumber,
+          customer:      { name: ord.customerName, mobile: ord.customerPhone },
+          total:         ord.total,
+          subtotal:      ord.subtotal,
+          discount:      0,
+          payments:      [{ amount: paid, method: 'online' as const, date: (ord.updatedAt as Date).toISOString() }],
+          billDate:      (ord.createdAt as Date).toISOString(),
+          createdAt:     ord.createdAt,
+          orderStatus:   ord.status,
+        };
+      }),
+    ].sort((a, b) =>
+      new Date(b.billDate as string).getTime() - new Date(a.billDate as string).getTime()
+    );
+
+    res.json(merged);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ── DOWNLOAD today's invoices as Excel ───────────────────────────────────────
+
+export const downloadTodayExcel = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const now = new Date();
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+    const endOfDay   = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+
+    const [invoices, coatingMap] = await Promise.all([
+      populateInvoice(Invoice.find({ billDate: { $gte: startOfDay, $lte: endOfDay } }).sort({ billDate: 1 })),
+      getCoatingShortNames(),
+    ]);
+
+    const rows: Record<string, unknown>[] = [];
+
+    for (const inv of invoices as any[]) {
+      const customer = inv.customer as any;
+      const lensItems = (inv.items as any[]).filter((item: any) => !item.frame && !item.fragrance);
+      for (const lensItem of lensItems) {
+        rows.push({
+          SHOP:    'AOH',
+          INVOICE: inv.invoiceNumber ?? '',
+          NAME:    customer?.name ?? '',
+          DATE:    toExcelDate(new Date(inv.billDate)),
+          LENS:    buildLensName(lensItem, coatingMap),
+          RESPH:   lensItem.rightSpherical  ?? '',
+          RECYL:   lensItem.rightCylinder   ?? '',
+          REAXIS:  lensItem.rightAxis       ?? '',
+          READD:   lensItem.rightAddition   ?? '',
+          LESPH:   lensItem.leftSpherical   ?? '',
+          LECYL:   lensItem.leftCylinder    ?? '',
+          LEAXIS:  lensItem.leftAxis        ?? '',
+          LEADD:   lensItem.leftAddition    ?? '',
+        });
+      }
+    }
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(rows, {
+      header: ['SHOP','INVOICE','NAME','DATE','LENS','RESPH','RECYL','REAXIS','READD','LESPH','LECYL','LEAXIS','LEADD'],
+    });
+    applyDateFormat(ws);
+    XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const dateStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="lens-${dateStr}.xlsx"`);
+    res.send(buf);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ── PUSH Invoice row to lensPrint.xlsx ───────────────────────────────────────
+
+const LENS_PRINT_PATH = 'C:\\Users\\abbas\\Downloads\\lensPrint.xlsx';
+
+const DATE_FMT = 'DD-MMM-YY';
+const DATE_COL = 3; // 0-indexed: SHOP=0,INVOICE=1,NAME=2,DATE=3
+
+function toExcelDate(d: Date): number {
+  return Math.round((d.getTime() - new Date(Date.UTC(1899, 11, 30)).getTime()) / 86400000);
+}
+
+function applyDateFormat(ws: XLSX.WorkSheet) {
+  const ref = ws['!ref'];
+  if (!ref) return;
+  const range = XLSX.utils.decode_range(ref);
+  for (let r = range.s.r + 1; r <= range.e.r; r++) {
+    const cellRef = XLSX.utils.encode_cell({ r, c: DATE_COL });
+    if (ws[cellRef] && ws[cellRef].t === 'n') {
+      ws[cellRef].z = DATE_FMT;
+    }
+  }
+}
+
+async function getCoatingShortNames(): Promise<Map<string, string>> {
+  const coatings = await Coating.find({ shortName: { $ne: null, $exists: true } }).lean();
+  const map = new Map<string, string>();
+  for (const c of coatings) {
+    if (c.shortName) map.set(c.name, c.shortName);
+  }
+  return map;
+}
+
+function buildLensName(item: any, coatingShortNames: Map<string, string> = new Map()): string {
+  const parts: string[] = [];
+
+  const color = (item.lensColor ?? '').trim();
+  if (color === 'Photo Chromatic') parts.push('PG');
+  else if (color === 'Polarized') parts.push('Polarize');
+  else if (/gradal/i.test(color)) parts.push('GRD');
+  // White or empty → nothing
+
+  const material = (item.lensMaterial ?? '').trim();
+  if (material === 'Fiber') parts.push('CR');
+  else if (material === 'Glass') parts.push('Glass');
+  else if (material === 'Polycarbonate') parts.push('PC');
+
+  const coatingName = (item.lensCoating ?? '').trim();
+  if (coatingName) {
+    parts.push(coatingShortNames.get(coatingName) || coatingName);
+  }
+
+  const lensType = (item.lensType ?? '').trim();
+  if (lensType === 'Bifocal') parts.push('KT');
+  else if (lensType === 'Progressive') parts.push('Progressive');
+  // Single Vision → nothing
+
+  return parts.join(' ') || (item.lensLabel ?? '').trim() || 'Lens';
+}
+
+export const pushToExcel = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const invoice = await populateInvoice(Invoice.findById(req.params.id));
+    if (!invoice) {
+      res.status(404).json({ message: 'Invoice not found' });
+      return;
+    }
+
+    const customer = invoice.customer as any;
+    const lensItem = (invoice.items as any[]).find((item: any) => !item.frame && !item.fragrance);
+    if (!lensItem) {
+      res.status(400).json({ message: 'No optical lens item on this invoice' });
+      return;
+    }
+
+    const coatingMap = await getCoatingShortNames();
+    const lensName = buildLensName(lensItem, coatingMap);
+
+    const row = {
+      SHOP: 'AOH',
+      INVOICE: invoice.invoiceNumber ?? '',
+      NAME: customer?.name ?? '',
+      DATE: toExcelDate(new Date(invoice.billDate)),
+      LENS: lensName,
+      RESPH: lensItem.rightSpherical ?? '',
+      RECYL: lensItem.rightCylinder ?? '',
+      REAXIS: lensItem.rightAxis ?? '',
+      READD: lensItem.rightAddition ?? '',
+      LESPH: lensItem.leftSpherical ?? '',
+      LECYL: lensItem.leftCylinder ?? '',
+      LEAXIS: lensItem.leftAxis ?? '',
+      LEADD: lensItem.leftAddition ?? '',
+    };
+
+    const wb = XLSX.readFile(LENS_PRINT_PATH);
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    XLSX.utils.sheet_add_json(ws, [row], { skipHeader: true, origin: -1 });
+    applyDateFormat(ws);
+    XLSX.writeFile(wb, LENS_PRINT_PATH);
+
+    res.json({ message: 'Row added to lensPrint.xlsx', row });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ── LOG unfulfilled demand (no invoice created) ───────────────────────────────
+
+export const logDemand = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = req.body as DemandLogInput;
+    if (typeof body.requestedQty !== 'number' || body.requestedQty <= 0) {
+      res.status(400).json({ message: 'requestedQty must be a positive number.' });
+      return;
+    }
+    const doc: any = {
+      quantity: body.requestedQty,
+      price: 0,
+      fulfillmentSource: 'unfulfilled',
+      requestedQty: body.requestedQty,
+      fulfilledQty: 0,
+      lensType: body.lensType || null,
+      lensMaterial: body.lensMaterial || null,
+      lensCoating: body.lensCoating || null,
+      lensColor: body.lensColor || null,
+      lensCompany: body.lensCompany || null,
+      lensLabel: body.lensLabel || null,
+      userName: body.customerName || null,
+      rightSpherical: body.rightSpherical ?? null,
+      rightCylinder: body.rightCylinder ?? null,
+      rightAxis: body.rightAxis ?? null,
+      rightAddition: body.rightAddition ?? null,
+      leftSpherical: body.leftSpherical ?? null,
+      leftCylinder: body.leftCylinder ?? null,
+      leftAxis: body.leftAxis ?? null,
+      leftAddition: body.leftAddition ?? null,
+    };
+    const item = await InvoiceItem.create(doc);
+    res.status(201).json(item);
   } catch (error) {
     next(error);
   }

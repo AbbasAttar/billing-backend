@@ -11,6 +11,9 @@ export interface IUser extends Document {
   reauthToken?:     string;
   reauthExpiry?:    Date;
   address?:         string;
+  city?:            string;
+  state?:           string;
+  pincode?:         string;
   avatarB64?:       string;
   createdAt:        Date;
   updatedAt:        Date;
@@ -28,6 +31,9 @@ const userSchema = new Schema<IUser>(
     reauthToken:     { type: String },
     reauthExpiry:    { type: Date },
     address:         { type: String, trim: true },
+    city:            { type: String, trim: true },
+    state:           { type: String, trim: true },
+    pincode:         { type: String, trim: true },
     avatarB64:       { type: String },
   },
   { timestamps: true },

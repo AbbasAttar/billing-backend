@@ -1,6 +1,56 @@
 import { Request, Response, NextFunction } from 'express';
+import mongoose from 'mongoose';
 import { Fragrance } from '../models/Fragrance.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
+import { Invoice } from '../models/Invoice.model';
+
+export const getFragranceRevenueSummary = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { from, to, customerId } = req.query as Record<string, string | undefined>;
+
+    const invoiceMatch: Record<string, unknown> = {};
+    if (from || to) {
+      invoiceMatch.billDate = {
+        ...(from ? { $gte: new Date(from) } : {}),
+        ...(to   ? { $lte: new Date(new Date(to).setHours(23, 59, 59, 999)) } : {}),
+      };
+    }
+    if (customerId) {
+      invoiceMatch.customer = new mongoose.Types.ObjectId(customerId);
+    }
+
+    const rows = await Invoice.aggregate([
+      { $match: invoiceMatch },
+      { $unwind: '$items' },
+      {
+        $lookup: {
+          from: 'invoiceitems',
+          localField: 'items',
+          foreignField: '_id',
+          as: 'item',
+        },
+      },
+      { $unwind: '$item' },
+      { $match: { 'item.fragrance': { $exists: true, $ne: null } } },
+      {
+        $group: {
+          _id: '$item.fragrance',
+          totalRevenue: { $sum: { $multiply: ['$item.price', '$item.quantity'] } },
+          unitsSold: { $sum: '$item.quantity' },
+          invoiceCount: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const map: Record<string, { totalRevenue: number; unitsSold: number; invoiceCount: number }> = {};
+    for (const r of rows) {
+      map[r._id.toString()] = { totalRevenue: r.totalRevenue, unitsSold: r.unitsSold, invoiceCount: r.invoiceCount };
+    }
+    res.json(map);
+  } catch (error) {
+    next(error);
+  }
+};
 
 export const getAllFragrances = async (req: Request, res: Response, next: NextFunction) => {
   try {

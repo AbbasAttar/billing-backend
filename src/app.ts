@@ -38,6 +38,16 @@ import siteSettingRoutes from './routes/siteSetting.routes';
 import blogRoutes from './routes/blog.routes';
 import razorpayRoutes from './routes/razorpay.routes';
 import notificationRoutes from './routes/notification.routes';
+import debtRoutes from './routes/debt.routes';
+import commitmentRoutes from './routes/commitment.routes';
+import debtConfigRoutes from './routes/debtConfig.routes';
+import debtPaymentRoutes from './routes/debtPayment.routes';
+import obligationRoutes from './routes/obligation.routes';
+import obligationPaymentRoutes from './routes/obligationPayment.routes';
+import financeOverviewRoutes from './routes/financeOverview.routes';
+import lensReorderRoutes from './routes/lensReorder.routes';
+import purchaseEntryRoutes from './routes/purchaseEntry.routes';
+import wholesalerQueueRoutes from './routes/wholesalerQueue.routes';
 import { handleWebhook } from './controllers/razorpay.controller';
 
 const app = express();
@@ -92,6 +102,16 @@ app.use('/api/settings', siteSettingRoutes);
 app.use('/api/blog', blogRoutes);
 app.use('/api/razorpay', razorpayRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/debts', debtRoutes);
+app.use('/api/commitments', commitmentRoutes);
+app.use('/api/debt-config', debtConfigRoutes);
+app.use('/api/debt-payments', debtPaymentRoutes);
+app.use('/api/obligations', obligationRoutes);
+app.use('/api/obligation-payments', obligationPaymentRoutes);
+app.use('/api/finance', financeOverviewRoutes);
+app.use('/api/reports', lensReorderRoutes);
+app.use('/api/purchases', purchaseEntryRoutes);
+app.use('/api/wholesaler-queue', wholesalerQueueRoutes);
 
 // 404 handler
 app.use((_req, res) => {

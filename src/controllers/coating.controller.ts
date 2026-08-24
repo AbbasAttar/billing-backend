@@ -23,9 +23,9 @@ export const getCoatings = async (_req: Request, res: Response, next: NextFuncti
 
 export const createCoating = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { name } = req.body as { name?: string };
+    const { name, shortName } = req.body as { name?: string; shortName?: string };
     if (!name?.trim()) return fail(res, 'name is required', 400);
-    const coating = await Coating.create({ name: name.trim() });
+    const coating = await Coating.create({ name: name.trim(), shortName: shortName?.trim() || undefined });
     return ok(res, coating, 'Coating created', 201);
   } catch (e: any) {
     if (e.code === 11000) return fail(res, 'A coating with this name already exists', 409);
@@ -35,11 +35,11 @@ export const createCoating = async (req: Request, res: Response, next: NextFunct
 
 export const updateCoating = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { name } = req.body as { name?: string };
+    const { name, shortName } = req.body as { name?: string; shortName?: string };
     if (!name?.trim()) return fail(res, 'name is required', 400);
     const coating = await Coating.findByIdAndUpdate(
       req.params.id,
-      { name: name.trim() },
+      { name: name.trim(), shortName: shortName?.trim() || undefined },
       { new: true, runValidators: true }
     );
     if (!coating) return fail(res, 'Coating not found', 404);

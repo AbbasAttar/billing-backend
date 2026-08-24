@@ -524,3 +524,158 @@ export const getTopItems = async (req: Request, res: Response, next: NextFunctio
         next(error);
     }
 };
+
+export const getFragranceTypeMix = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        // Totals by type
+        const byTypeRaw = await InvoiceItem.aggregate([
+            { $match: { fragrance: { $exists: true, $ne: null } } },
+            { $lookup: { from: 'fragrances', localField: 'fragrance', foreignField: '_id', as: 'frag' } },
+            { $unwind: '$frag' },
+            { $group: { _id: '$frag.type', units: { $sum: '$quantity' }, revenue: { $sum: { $multiply: ['$price', '$quantity'] } } } },
+            { $sort: { revenue: -1 } },
+        ]);
+        const byType = byTypeRaw
+            .filter((r) => r._id != null && r._id !== '')
+            .map((r) => ({ type: r._id as string, units: r.units, revenue: r.revenue }));
+
+        // Monthly breakdown for last 12 months
+        const twelveMonthsAgo = new Date();
+        twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 11);
+        twelveMonthsAgo.setDate(1);
+        twelveMonthsAgo.setHours(0, 0, 0, 0);
+
+        const monthly = await Invoice.aggregate([
+            { $match: { billDate: { $gte: twelveMonthsAgo } } },
+            { $unwind: '$items' },
+            { $lookup: { from: 'invoiceitems', localField: 'items', foreignField: '_id', as: 'item' } },
+            { $unwind: '$item' },
+            { $match: { 'item.fragrance': { $exists: true, $ne: null } } },
+            { $lookup: { from: 'fragrances', localField: 'item.fragrance', foreignField: '_id', as: 'frag' } },
+            { $unwind: '$frag' },
+            {
+                $group: {
+                    _id: { month: { $dateToString: { format: '%Y-%m', date: '$billDate' } }, type: { $ifNull: ['$frag.type', 'other'] } },
+                    revenue: { $sum: { $multiply: ['$item.price', '$item.quantity'] } },
+                    units: { $sum: '$item.quantity' },
+                },
+            },
+            { $sort: { '_id.month': 1 } },
+        ]);
+
+        // Pivot monthly into { month, perfume, attar, bakhoor } rows
+        const allTypes = byType.map((r) => r.type).filter(Boolean);
+        const monthMap = new Map<string, Record<string, number | string>>();
+        for (const r of monthly) {
+            const t = r._id.type as string;
+            if (!t || t === 'other') continue;
+            const m = r._id.month as string;
+            if (!monthMap.has(m)) {
+                const entry: Record<string, number | string> = { month: m };
+                for (const type of allTypes) entry[type] = 0;
+                monthMap.set(m, entry);
+            }
+            monthMap.get(m)![t] = r.revenue;
+        }
+        const monthlyPivot = Array.from(monthMap.values()).sort((a, b) =>
+            (a.month as string).localeCompare(b.month as string)
+        );
+
+        res.json({ byType, monthly: monthlyPivot });
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const getLensTypeDemand = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const [typeRows, coatingRows] = await Promise.all([
+            InvoiceItem.aggregate([
+                { $match: { lensType: { $exists: true, $ne: null, $type: 'string' } } },
+                { $match: { lensType: { $ne: '' } } },
+                { $group: { _id: '$lensType', units: { $sum: '$quantity' }, revenue: { $sum: { $multiply: ['$price', '$quantity'] } } } },
+                { $sort: { units: -1 } },
+                { $limit: 10 },
+            ]),
+            InvoiceItem.aggregate([
+                { $match: { lensCoating: { $exists: true, $ne: null, $type: 'string' } } },
+                { $match: { lensCoating: { $ne: '' } } },
+                { $group: { _id: '$lensCoating', units: { $sum: '$quantity' }, revenue: { $sum: { $multiply: ['$price', '$quantity'] } } } },
+                { $sort: { units: -1 } },
+                { $limit: 10 },
+            ]),
+        ]);
+        res.json({
+            byType:    typeRows.map((r) => ({ type: r._id, units: r.units, revenue: r.revenue })),
+            byCoating: coatingRows.map((r) => ({ type: r._id, units: r.units, revenue: r.revenue })),
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const getCategorySales = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const now = new Date();
+        const fyStartYear = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+        const fyStart = new Date(fyStartYear, 3, 1);
+        const fyEnd   = new Date(fyStartYear + 1, 2, 31, 23, 59, 59, 999);
+        const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+        const monthEnd   = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+
+        const [rows] = await Invoice.aggregate([
+            { $unwind: '$items' },
+            {
+                $lookup: {
+                    from: 'invoiceitems',
+                    localField: 'items',
+                    foreignField: '_id',
+                    as: 'item',
+                },
+            },
+            { $unwind: '$item' },
+            {
+                $addFields: {
+                    category: {
+                        $cond: [
+                            { $ifNull: ['$item.frame', false] },
+                            'frame',
+                            { $cond: [{ $ifNull: ['$item.fragrance', false] }, 'fragrance', 'lens'] },
+                        ],
+                    },
+                    itemRevenue: { $multiply: ['$item.price', '$item.quantity'] },
+                },
+            },
+            {
+                $facet: {
+                    lifetime: [
+                        { $group: { _id: '$category', revenue: { $sum: '$itemRevenue' } } },
+                    ],
+                    thisFY: [
+                        { $match: { billDate: { $gte: fyStart, $lte: fyEnd } } },
+                        { $group: { _id: '$category', revenue: { $sum: '$itemRevenue' } } },
+                    ],
+                    thisMonth: [
+                        { $match: { billDate: { $gte: monthStart, $lte: monthEnd } } },
+                        { $group: { _id: '$category', revenue: { $sum: '$itemRevenue' } } },
+                    ],
+                },
+            },
+        ]);
+
+        function toMap(arr: { _id: string; revenue: number }[]) {
+            const m: Record<string, number> = { frame: 0, lens: 0, fragrance: 0 };
+            for (const r of arr) if (r._id in m) m[r._id] = r.revenue;
+            return m;
+        }
+
+        res.json({
+            lifetime:  toMap(rows.lifetime),
+            thisFY:    toMap(rows.thisFY),
+            thisMonth: toMap(rows.thisMonth),
+            fyLabel:   `FY ${fyStartYear}-${String(fyStartYear + 1).slice(-2)}`,
+        });
+    } catch (error) {
+        next(error);
+    }
+};

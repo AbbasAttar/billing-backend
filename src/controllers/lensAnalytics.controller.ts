@@ -180,6 +180,67 @@ export const getLensAnalytics = async (req: Request, res: Response, next: NextFu
       };
     });
 
+    // ── Prescription Number Demand ───────────────────────────────────────────
+    // Combines rightEye/leftEye structured fields + legacy flat field per invoice item.
+    // Legacy field only used when both structured fields are absent (avoids double-count).
+    const buildRxAgg = (right: string, left: string, legacy: string, limit: number) => [
+      {
+        $match: {
+          createdAt: { $gte: from },
+          $or: [{ [right]: { $ne: null } }, { [left]: { $ne: null } }, { [legacy]: { $ne: null } }],
+        },
+      },
+      {
+        $project: {
+          quantity: 1,
+          rxVals: {
+            $filter: {
+              input: {
+                $concatArrays: [
+                  [{ $ifNull: [`$${right}`, null] }],
+                  [{ $ifNull: [`$${left}`, null] }],
+                  [{
+                    $cond: {
+                      if: { $and: [{ $eq: [`$${right}`, null] }, { $eq: [`$${left}`, null] }] },
+                      then: { $ifNull: [`$${legacy}`, null] },
+                      else: null,
+                    },
+                  }],
+                ],
+              },
+              as: 'v',
+              cond: { $ne: ['$$v', null] },
+            },
+          },
+        },
+      },
+      { $unwind: '$rxVals' },
+      { $group: { _id: '$rxVals', count: { $sum: '$quantity' } } },
+      { $sort: { count: -1 } },
+      { $limit: limit },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ] as any[];
+
+    const [sphericalRaw, cylinderRaw, additionRaw] = await Promise.all([
+      InvoiceItem.aggregate(buildRxAgg('rightSpherical', 'leftSpherical', 'spherical', 20)),
+      InvoiceItem.aggregate(buildRxAgg('rightCylinder', 'leftCylinder', 'cylinder', 15)),
+      InvoiceItem.aggregate(buildRxAgg('rightAddition', 'leftAddition', 'addition', 10)),
+    ]);
+
+    const toRxDemand = (raw: { _id: number; count: number }[]) => {
+      const total = raw.reduce((s, r) => s + r.count, 0);
+      return raw.map((r) => ({
+        value: r._id,
+        label: (r._id >= 0 ? '+' : '') + r._id.toFixed(2),
+        count: r.count,
+        percent: total > 0 ? Math.round((r.count / total) * 100) : 0,
+      }));
+    };
+
+    const sphericalDemand = toRxDemand(sphericalRaw);
+    const cylinderDemand  = toRxDemand(cylinderRaw);
+    const additionDemand  = toRxDemand(additionRaw);
+
     // ── Monthly Trend (last 6 months) ────────────────────────────────────────
     const sixMonthsAgo = new Date();
     sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
@@ -234,6 +295,9 @@ export const getLensAnalytics = async (req: Request, res: Response, next: NextFu
       brandBreakdown,
       stockRecommendations,
       monthlyTrend,
+      sphericalDemand,
+      cylinderDemand,
+      additionDemand,
     });
   } catch (error) {
     next(error);

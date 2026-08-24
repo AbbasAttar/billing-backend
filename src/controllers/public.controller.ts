@@ -391,6 +391,92 @@ export const getOrderById = async (req: Request, res: Response, next: NextFuncti
   }
 };
 
+// GET /api/public/invoices/:id?phone=xxx
+// Returns full in-store invoice detail with prescription info, verified by phone ownership.
+export const getInvoiceById = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+    const phone = (req.query.phone as string | undefined)?.replace(/\D/g, '').trim();
+
+    const invoice = await Invoice.findById(id)
+      .populate({
+        path: 'items',
+        populate: [
+          { path: 'frame',       select: 'web.displayName name' },
+          { path: 'opticalLens', select: 'web.displayName name' },
+          { path: 'fragrance',   select: 'web.displayName name' },
+        ],
+      })
+      .populate('customer', 'name mobileNumber address')
+      .lean() as any;
+
+    if (!invoice) { res.status(404).json({ success: false, message: 'Invoice not found' }); return; }
+
+    // Verify phone ownership
+    if (phone) {
+      const last10 = phone.slice(-10);
+      const custPhone = (invoice.customer?.mobileNumber ?? '').replace(/\D/g, '').slice(-10);
+      if (custPhone !== last10) {
+        res.status(403).json({ success: false, message: 'Access denied' });
+        return;
+      }
+    }
+
+    const amountPaid = (invoice.payments ?? []).reduce(
+      (s: number, p: any) => s + (p.amount ?? 0) + (p.writeoff ?? 0), 0
+    );
+    const balance = Math.max(0, invoice.total - amountPaid);
+
+    const items = (invoice.items ?? []).map((it: any) => {
+      const name =
+        it.frame?.web?.displayName || it.frame?.name ||
+        it.opticalLens?.web?.displayName || it.opticalLens?.name ||
+        it.fragrance?.web?.displayName || it.fragrance?.name ||
+        it.lensName || it.lensBrand || 'Item';
+
+      const hasRx = it.rightSpherical != null || it.leftSpherical != null ||
+                    it.rightEyeNumber || it.leftEyeNumber;
+
+      return {
+        name,
+        quantity: it.quantity ?? 1,
+        price:    it.price ?? 0,
+        type:     it.frame ? 'frame' : it.opticalLens ? 'lens' : it.fragrance ? 'fragrance' : 'other',
+        lensDetails: it.lensName
+          ? [it.lensBrand, it.lensName, it.lensIndex, it.lensCoating].filter(Boolean).join(' ')
+          : null,
+        frameColor: it.frameVariantLabel ?? null,
+        rx: hasRx ? {
+          right: { sph: it.rightSpherical, cyl: it.rightCylinder, axis: it.rightAxis, add: it.rightAddition, legacy: it.rightEyeNumber },
+          left:  { sph: it.leftSpherical,  cyl: it.leftCylinder,  axis: it.leftAxis,  add: it.leftAddition,  legacy: it.leftEyeNumber  },
+        } : null,
+      };
+    });
+
+    res.json({
+      success: true,
+      data: {
+        _id:           invoice._id.toString(),
+        invoiceNumber: invoice.invoiceNumber ?? null,
+        billDate:      invoice.billDate,
+        subtotal:      invoice.subtotal,
+        discount:      invoice.discount,
+        total:         invoice.total,
+        amountPaid,
+        balance,
+        cleared:       balance <= 0,
+        payments:      (invoice.payments ?? []).map((p: any) => ({
+          date: p.date, amount: p.amount, method: p.method, writeoff: p.writeoff ?? 0,
+        })),
+        items,
+        customer: { name: invoice.customer?.name ?? '', phone: invoice.customer?.mobileNumber ?? '' },
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // GET /api/public/my-invoices?phone=9876543210
 // Returns in-store billing invoices for a customer looked up by mobile number.
 export const getMyInvoices = async (req: Request, res: Response, next: NextFunction) => {

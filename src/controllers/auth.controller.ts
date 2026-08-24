@@ -77,6 +77,9 @@ export async function getProfile(req: Request, res: Response) {
       email:         user.email ?? '',
       emailVerified: user.emailVerified ?? false,
       address:       user.address ?? '',
+      city:          user.city    ?? '',
+      state:         user.state   ?? '',
+      pincode:       user.pincode ?? '',
       avatarB64:     user.avatarB64 ?? '',
       phoneVerified: user.phoneVerified,
     });
@@ -87,12 +90,13 @@ export async function getProfile(req: Request, res: Response) {
 }
 
 // PUT /api/auth/profile
-// Body: { phone, name?, email?, address?, avatarB64? }
+// Body: { phone, name?, email?, address?, city?, pincode?, avatarB64? }
 // Changing the email clears emailVerified until re-verified.
 export async function updateProfile(req: Request, res: Response) {
   try {
-    const { phone, name, email, address, avatarB64 } = req.body as {
-      phone: string; name?: string; email?: string; address?: string; avatarB64?: string;
+    const { phone, name, email, address, city, state, pincode, avatarB64 } = req.body as {
+      phone: string; name?: string; email?: string;
+      address?: string; city?: string; state?: string; pincode?: string; avatarB64?: string;
     };
     if (!phone) return res.status(400).json({ message: 'phone required' });
     const user = await User.findOne({ phone: phone.replace(/\D/g, '') });
@@ -106,7 +110,10 @@ export async function updateProfile(req: Request, res: Response) {
         user.emailVerified = false;
       }
     }
-    if (address !== undefined) user.address   = address.trim() || undefined;
+    if (address  !== undefined) user.address  = address.trim()  || undefined;
+    if (city     !== undefined) user.city     = city.trim()     || undefined;
+    if (state    !== undefined) user.state    = state.trim()    || undefined;
+    if (pincode  !== undefined) user.pincode  = pincode.trim()  || undefined;
     if (avatarB64 !== undefined) user.avatarB64 = avatarB64 || undefined;
 
     await user.save();
@@ -117,6 +124,9 @@ export async function updateProfile(req: Request, res: Response) {
       email:         user.email ?? '',
       emailVerified: user.emailVerified ?? false,
       address:       user.address ?? '',
+      city:          user.city    ?? '',
+      state:         user.state   ?? '',
+      pincode:       user.pincode ?? '',
       avatarB64:     user.avatarB64 ?? '',
     });
   } catch (err) {

@@ -31,6 +31,12 @@ export interface IInvoiceItem extends Document {
   lensColor?: string;
   isCustomLens?: boolean;
   isSameNumber?: boolean;
+  // Fulfillment tracking
+  fulfillmentSource: 'stock' | 'ordered' | 'unfulfilled';
+  requestedQty?: number | null;
+  fulfilledQty?: number | null;
+  sentToWholesaler?: boolean;
+  wholesalerOrderDate?: Date | null;
   // Structured prescription fields
   rightSpherical?: number | null;
   rightCylinder?: number | null;
@@ -74,6 +80,12 @@ const InvoiceItemSchema = new Schema<IInvoiceItem>(
     lensColor: { type: String, default: null },
     isCustomLens: { type: Boolean, default: false },
     isSameNumber: { type: Boolean, default: false },
+    // Fulfillment tracking
+    fulfillmentSource: { type: String, enum: ['stock', 'ordered', 'unfulfilled'], required: true, default: 'stock' },
+    requestedQty: { type: Number, default: null },
+    fulfilledQty: { type: Number, default: null },
+    sentToWholesaler: { type: Boolean, default: false },
+    wholesalerOrderDate: { type: Date, default: null },
     // Structured prescription fields
     rightSpherical: { type: Number, default: null },
     rightCylinder: { type: Number, default: null },
@@ -89,6 +101,7 @@ const InvoiceItemSchema = new Schema<IInvoiceItem>(
 
 InvoiceItemSchema.path('frame').validate(function (this: IInvoiceItem) {
   const refs = [this.frame, this.opticalLens, this.fragrance].filter(Boolean);
+  if (this.fulfillmentSource === 'unfulfilled') return refs.length <= 1;
   return refs.length === 1;
 }, 'Each invoice item must reference exactly one of: frame, opticalLens, fragrance');
 

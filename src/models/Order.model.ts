@@ -16,6 +16,7 @@ export type OrderStatus = 'pending' | 'paid' | 'preparing' | 'ready' | 'dispatch
 export interface IOrder extends Document {
   razorpayOrderId: string;
   razorpayPaymentId?: string;
+  invoiceNumber?: string | null;
   status: OrderStatus;
   customerName: string;
   customerPhone: string;
@@ -58,6 +59,7 @@ const OrderSchema = new Schema<IOrder>(
   {
     razorpayOrderId:   { type: String, required: true, unique: true },
     razorpayPaymentId: { type: String },
+    invoiceNumber:     { type: String, default: null },
     status:            { type: String, enum: ['pending', 'paid', 'preparing', 'ready', 'dispatched', 'fulfilled', 'cancelled'], default: 'pending' },
     customerName:      { type: String, required: true, trim: true },
     customerPhone:     { type: String, required: true, trim: true },

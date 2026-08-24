@@ -3,6 +3,7 @@ import * as crypto from 'crypto';
 import { env } from '../config/env';
 import { Order } from '../models/Order.model';
 import { sendNewOrderNotification } from '../services/fcm';
+import { generateInvoiceNumber } from '../utils/invoiceNumber';
 
 const RAZORPAY_API = 'https://api.razorpay.com/v1';
 
@@ -133,6 +134,10 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
     ).lean();
 
     if (paidOrder) {
+      if (!paidOrder.invoiceNumber) {
+        const invNo = await generateInvoiceNumber(new Date(paidOrder.createdAt));
+        await Order.updateOne({ _id: paidOrder._id }, { invoiceNumber: invNo });
+      }
       fireOrderNotifications(paidOrder as any).catch(() => {});
     }
 
@@ -187,6 +192,10 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
         { new: true }
       ).lean();
       if (webhookOrder) {
+        if (!webhookOrder.invoiceNumber) {
+          const invNo = await generateInvoiceNumber(new Date(webhookOrder.createdAt));
+          await Order.updateOne({ _id: webhookOrder._id }, { invoiceNumber: invNo });
+        }
         fireOrderNotifications(webhookOrder as any).catch(() => {});
       }
     }
@@ -294,6 +303,16 @@ export const verifyBalancePayment = async (req: Request, res: Response, next: Ne
 
     if (!order) { res.status(404).json({ message: 'Order not found' }); return; }
     res.json({ success: true, data: order });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const deleteOrder = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const order = await Order.findByIdAndDelete(req.params.id);
+    if (!order) { res.status(404).json({ message: 'Order not found' }); return; }
+    res.json({ success: true });
   } catch (error) {
     next(error);
   }
