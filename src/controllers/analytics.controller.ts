@@ -589,18 +589,70 @@ export const getFragranceTypeMix = async (req: Request, res: Response, next: Nex
 
 export const getLensTypeDemand = async (req: Request, res: Response, next: NextFunction) => {
     try {
+        // Lens items exist in two forms:
+        // 1. Inventory-linked: opticalLens ObjectId set, category denormalized into lensCategory
+        // 2. Custom: isCustomLens=true, type written into lensType string directly
+        // We look up OpticalLens.category as fallback when lensCategory is not denormalized.
+        const lensItemMatch = {
+            $or: [
+                { opticalLens: { $exists: true, $ne: null } },
+                { isCustomLens: true },
+                { lensType: { $exists: true, $ne: null, $gt: '' } },
+                { lensCategory: { $exists: true, $ne: null, $gt: '' } },
+            ],
+        };
+
         const [typeRows, coatingRows] = await Promise.all([
             InvoiceItem.aggregate([
-                { $match: { lensType: { $exists: true, $ne: null, $type: 'string' } } },
-                { $match: { lensType: { $ne: '' } } },
-                { $group: { _id: '$lensType', units: { $sum: '$quantity' }, revenue: { $sum: { $multiply: ['$price', '$quantity'] } } } },
+                { $match: lensItemMatch },
+                {
+                    $lookup: {
+                        from: 'opticallenses',
+                        localField: 'opticalLens',
+                        foreignField: '_id',
+                        as: 'lensDoc',
+                    },
+                },
+                {
+                    $addFields: {
+                        resolvedType: {
+                            $ifNull: [
+                                { $cond: [{ $gt: [{ $strLenCP: { $ifNull: ['$lensCategory', ''] } }, 0] }, '$lensCategory', null] },
+                                { $ifNull: [
+                                    { $arrayElemAt: ['$lensDoc.category', 0] },
+                                    { $cond: [{ $gt: [{ $strLenCP: { $ifNull: ['$lensType', ''] } }, 0] }, '$lensType', null] },
+                                ]},
+                            ],
+                        },
+                    },
+                },
+                { $match: { resolvedType: { $ne: null } } },
+                { $group: { _id: '$resolvedType', units: { $sum: '$quantity' }, revenue: { $sum: { $multiply: ['$price', '$quantity'] } } } },
                 { $sort: { units: -1 } },
                 { $limit: 10 },
             ]),
             InvoiceItem.aggregate([
-                { $match: { lensCoating: { $exists: true, $ne: null, $type: 'string' } } },
-                { $match: { lensCoating: { $ne: '' } } },
-                { $group: { _id: '$lensCoating', units: { $sum: '$quantity' }, revenue: { $sum: { $multiply: ['$price', '$quantity'] } } } },
+                { $match: lensItemMatch },
+                {
+                    $lookup: {
+                        from: 'opticallenses',
+                        localField: 'opticalLens',
+                        foreignField: '_id',
+                        as: 'lensDoc',
+                    },
+                },
+                {
+                    $addFields: {
+                        resolvedCoating: {
+                            $ifNull: [
+                                { $cond: [{ $gt: [{ $strLenCP: { $ifNull: ['$lensCoating', ''] } }, 0] }, '$lensCoating', null] },
+                                { $arrayElemAt: ['$lensDoc.coating', 0] },
+                            ],
+                        },
+                    },
+                },
+                { $match: { resolvedCoating: { $ne: null } } },
+                { $group: { _id: '$resolvedCoating', units: { $sum: '$quantity' }, revenue: { $sum: { $multiply: ['$price', '$quantity'] } } } },
                 { $sort: { units: -1 } },
                 { $limit: 10 },
             ]),
