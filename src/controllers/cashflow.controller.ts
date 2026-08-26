@@ -1,6 +1,8 @@
 import { NextFunction, Request, Response } from 'express';
 import { Cashflow, CASHFLOW_PAYMENT_METHODS, CASHFLOW_STATUSES } from '../models/Cashflow.model';
 import { Invoice } from '../models/Invoice.model';
+import { Obligation } from '../models/Obligation.model';
+import { ObligationPayment } from '../models/ObligationPayment.model';
 import { fail, ok } from '../utils/response';
 
 const parseDate = (value?: string): Date | null => {
@@ -182,6 +184,21 @@ export const deleteCashflow = async (req: Request, res: Response, next: NextFunc
   try {
     const entry = await Cashflow.findByIdAndDelete(req.params.id);
     if (!entry) return fail(res, 'Entry not found', 404);
+
+    if (entry.obligationPaymentId) {
+      await ObligationPayment.findByIdAndDelete(entry.obligationPaymentId);
+    }
+    if (entry.obligationId) {
+      const obl = await Obligation.findById(entry.obligationId);
+      if (obl) {
+        obl.alreadyPaid = Math.max(0, obl.alreadyPaid - entry.amount);
+        if (obl.status === 'paid' && obl.alreadyPaid < obl.originalAmount) {
+          obl.status = 'open';
+        }
+        await obl.save();
+      }
+    }
+
     return ok(res, { _id: entry._id }, 'Entry deleted');
   } catch (error) {
     next(error);

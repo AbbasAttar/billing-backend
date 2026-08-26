@@ -2,7 +2,15 @@ import { Request, Response, NextFunction } from 'express';
 import mongoose from 'mongoose';
 import { Obligation, OBLIGATION_CATEGORIES, OBLIGATION_PRIORITIES, IObligation } from '../models/Obligation.model';
 import { ObligationPayment } from '../models/ObligationPayment.model';
+import { Cashflow, normalizePaymentMethod } from '../models/Cashflow.model';
 import { fail, ok } from '../utils/response';
+
+function getExpenseCategory(obl: { category?: string; subcategory?: string }): string {
+  if (obl.subcategory?.trim()) return obl.subcategory.trim();
+  if (obl.category === 'vendor') return 'stock';
+  if (obl.category) return obl.category;
+  return 'miscellaneous';
+}
 
 // ── Computed fields (never stored) ─────────────────────────────────────────────
 export function computeObligation(o: IObligation, dailySurplus = 0) {
@@ -95,9 +103,46 @@ export const createObligation = async (req: Request, res: Response, next: NextFu
       isRecurring: isRecurring ?? false,
       dueDay: dueDay ?? undefined,
       notes: notes?.trim(),
-      status: status ?? 'open',
+      status: status ?? (alreadyPaid >= originalAmount && originalAmount > 0 ? 'paid' : 'open'),
       items: Array.isArray(items) ? items : [],
     });
+
+    if (alreadyPaid && alreadyPaid > 0) {
+      const paymentDate = billDate ? new Date(billDate) : new Date();
+      const paymentNotes = notes?.trim() ? `Initial payment: ${notes.trim()}` : `Initial payment`;
+      const payment = await ObligationPayment.create({
+        obligationId: obl._id,
+        creditor: obl.creditor,
+        amountPaid: alreadyPaid,
+        date: paymentDate,
+        method: 'cash',
+        notes: paymentNotes,
+      });
+
+      const expenseCategory = getExpenseCategory(obl);
+      await Cashflow.create({
+        type: 'expense',
+        date: paymentDate,
+        amount: alreadyPaid,
+        paidAmount: alreadyPaid,
+        status: 'logged',
+        category: expenseCategory,
+        vendorName: obl.creditor,
+        note: `${paymentNotes} (${obl.creditor})`,
+        paymentMethod: 'cash',
+        items: [],
+        payments: [
+          {
+            amount: alreadyPaid,
+            date: paymentDate,
+            method: 'cash',
+            note: paymentNotes,
+          },
+        ],
+        obligationId: obl._id,
+        obligationPaymentId: payment._id,
+      });
+    }
 
     return ok(res, computeObligation(obl), 'Created', 201);
   } catch (err) { next(err); }
@@ -116,6 +161,14 @@ export const updateObligation = async (req: Request, res: Response, next: NextFu
 
     const obl = await Obligation.findByIdAndUpdate(req.params.id, update, { new: true });
     if (!obl) return fail(res, 'Not found', 404);
+
+    // Sync updated creditor name or category to linked Cashflow entries
+    const category = getExpenseCategory(obl);
+    await Cashflow.updateMany(
+      { obligationId: obl._id, status: { $ne: 'void' } },
+      { $set: { vendorName: obl.creditor, category } }
+    );
+
     return ok(res, computeObligation(obl), 'Updated');
   } catch (err) { next(err); }
 };
@@ -126,6 +179,7 @@ export const deleteObligation = async (req: Request, res: Response, next: NextFu
     const obl = await Obligation.findByIdAndDelete(req.params.id);
     if (!obl) return fail(res, 'Not found', 404);
     await ObligationPayment.deleteMany({ obligationId: new mongoose.Types.ObjectId(req.params.id as string) });
+    await Cashflow.deleteMany({ obligationId: new mongoose.Types.ObjectId(req.params.id as string) });
     return ok(res, { _id: req.params.id }, 'Deleted');
   } catch (err) { next(err); }
 };
@@ -140,13 +194,17 @@ export const recordPayment = async (req: Request, res: Response, next: NextFunct
     const { amountPaid, date, method, notes } = req.body;
     if (typeof amountPaid !== 'number' || amountPaid <= 0) return fail(res, 'amountPaid must be > 0', 400);
 
+    const paymentDate = date ? new Date(date) : new Date();
+    const paymentMethod = normalizePaymentMethod(method);
+    const paymentNotes = notes?.trim();
+
     const payment = await ObligationPayment.create({
       obligationId: obl._id,
       creditor: obl.creditor,
       amountPaid,
-      date: date ? new Date(date) : new Date(),
-      method: method?.trim(),
-      notes: notes?.trim(),
+      date: paymentDate,
+      method: paymentMethod,
+      notes: paymentNotes,
     });
 
     obl.alreadyPaid = Math.min(obl.alreadyPaid + amountPaid, obl.originalAmount);
@@ -167,6 +225,36 @@ export const recordPayment = async (req: Request, res: Response, next: NextFunct
       }
     }
     await obl.save();
+
+    // Determine expense category and note
+    const expenseCategory = getExpenseCategory(obl);
+    const note = paymentNotes
+      ? `${paymentNotes} (${obl.creditor})`
+      : `Payment for ${obl.category}: ${obl.creditor}`;
+
+    // Create corresponding Cashflow expense entry
+    await Cashflow.create({
+      type: 'expense',
+      date: paymentDate,
+      amount: amountPaid,
+      paidAmount: amountPaid,
+      status: 'logged',
+      category: expenseCategory,
+      vendorName: obl.creditor,
+      note,
+      paymentMethod,
+      items: [],
+      payments: [
+        {
+          amount: amountPaid,
+          date: paymentDate,
+          method: paymentMethod,
+          note: paymentNotes,
+        },
+      ],
+      obligationId: obl._id,
+      obligationPaymentId: payment._id,
+    });
 
     return ok(res, { obligation: computeObligation(obl), payment }, 'Payment recorded', 201);
   } catch (err) { next(err); }

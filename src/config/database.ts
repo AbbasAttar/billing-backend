@@ -5,6 +5,10 @@ const RETRY_INTERVAL_MS = 5000;
 const MAX_RETRIES = 5;
 
 export const connectDB = async (): Promise<void> => {
+  if (mongoose.connection.readyState === 1) {
+    return;
+  }
+
   let retries = 0;
   while (retries < MAX_RETRIES) {
     try {
@@ -23,3 +27,4 @@ export const connectDB = async (): Promise<void> => {
     }
   }
 };
+

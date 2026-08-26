@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import mongoose from 'mongoose';
 import { ObligationPayment } from '../models/ObligationPayment.model';
 import { Obligation } from '../models/Obligation.model';
+import { Cashflow } from '../models/Cashflow.model';
 import { computeObligation } from './obligation.controller';
 import { fail, ok } from '../utils/response';
 
@@ -19,6 +20,9 @@ export const deletePayment = async (req: Request, res: Response, next: NextFunct
   try {
     const payment = await ObligationPayment.findByIdAndDelete(req.params.id);
     if (!payment) return fail(res, 'Payment not found', 404);
+
+    // Delete corresponding Cashflow entry
+    await Cashflow.deleteMany({ obligationPaymentId: payment._id });
 
     const obl = await Obligation.findById(payment.obligationId);
     if (obl) {
