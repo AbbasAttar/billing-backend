@@ -6,6 +6,7 @@ import { Cashflow } from '../models/Cashflow.model';
 import { PersonalExpense } from '../models/PersonalExpense.model';
 import { MonthlyTarget } from '../models/MonthlyTarget.model';
 import { SavingGoal } from '../models/SavingGoal.model';
+import { Obligation } from '../models/Obligation.model';
 import { buildDashboardCommandCenter } from '../services/dashboardIntelligence';
 
 // ── Helper: get today's date range ──────────────────────────────────────────
@@ -850,21 +851,8 @@ export const getFinanceOverview = async (_req: Request, res: Response, next: Nex
                 { $match: { pending: { $gt: 0 } } },
                 { $group: { _id: null, total: { $sum: '$pending' } } },
             ]),
-            // Upcoming payables (due within 30 days OR no due date set, unpaid)
-            Cashflow.aggregate([
-                {
-                    $match: {
-                        type: 'payable',
-                        status: { $in: ['pending', 'partially_paid', 'overdue'] },
-                        $or: [
-                            { dueDate: { $exists: false } },
-                            { dueDate: null },
-                            { dueDate: { $lte: new Date(Date.now() + 30 * 86_400_000) } },
-                        ],
-                    },
-                },
-                { $group: { _id: null, total: { $sum: { $subtract: ['$amount', '$paidAmount'] } } } },
-            ]),
+            // Open obligations for accurate 30-day upcoming payables
+            Obligation.find({ status: 'open' }),
             // All-time inflows (invoice payments)
             Invoice.aggregate([
                 { $unwind: '$payments' },
@@ -901,8 +889,36 @@ export const getFinanceOverview = async (_req: Request, res: Response, next: Nex
             (allTimeExpenses[0]?.total ?? 0) -
             (allTimePayables[0]?.total ?? 0)
         );
-        const receivables      = receivablesAgg[0]?.total ?? 0;
-        const upcomingPayables = upcomingPayablesAgg[0]?.total ?? 0;
+        const receivables = receivablesAgg[0]?.total ?? 0;
+        
+        // Calculate true 30-day upcoming payables liability (monthly EMIs for loans, bills due within 30 days for vendors)
+        const openObligations = upcomingPayablesAgg as unknown as Array<{
+            category: string;
+            originalAmount: number;
+            alreadyPaid: number;
+            minPayment: number;
+            isRecurring: boolean;
+            dueDate?: Date;
+        }>;
+        const upcomingPayables = openObligations.reduce((sum, o) => {
+            const remaining = Math.max(0, o.originalAmount - (o.alreadyPaid || 0));
+            if (remaining <= 0) return sum;
+            if (o.category === 'loan') {
+                return sum + (o.minPayment > 0 ? o.minPayment : (o.isRecurring ? o.originalAmount : remaining));
+            }
+            if (o.minPayment > 0) {
+                return sum + o.minPayment;
+            }
+            if (o.isRecurring) {
+                return sum + (o.minPayment > 0 ? o.minPayment : o.originalAmount);
+            }
+            if (o.dueDate && new Date(o.dueDate).getTime() > Date.now() + 30 * 86_400_000) {
+                // Distant due date (> 30 days) and no monthly installment: not due in next 30 days
+                return sum;
+            }
+            return sum + remaining;
+        }, 0);
+
         const mtdRevenue       = mtdRevenueAgg[0]?.total ?? 0;
         const mtdExpenses      = mtdExpensesAgg[0]?.total ?? 0;
         const businessProfit   = mtdRevenue - mtdExpenses;

@@ -51,15 +51,26 @@ export const getFinanceDashboard = async (req: Request, res: Response, next: Nex
 
     const manualCommitments = commitments.reduce((s, c) => s + c.amount, 0);
     const recurringFixed = recurringMonthlyTotal(activeRecurring);
-    const recurringObligationMonthly = obligations
-      .filter((o) => o.isRecurring)
-      .reduce((s, o) => s + o.originalAmount, 0);
-    const combinedCommitments = manualCommitments + recurringFixed + recurringObligationMonthly;
+    // Recurring operational obligations (Rent, Salaries, utilities - excluding loans)
+    const recurringNonLoanObligations = obligations
+      .filter((o) => o.isRecurring && o.category !== 'loan')
+      .reduce((s, o) => s + (o.minPayment > 0 ? o.minPayment : o.originalAmount), 0);
+    const combinedCommitments = manualCommitments + recurringFixed + recurringNonLoanObligations;
     const monthlyFixedCommitments = combinedCommitments > 0 ? combinedCommitments : (cashflowFixedRaw[0]?.total ?? 0);
 
+    // Monthly Loan EMIs and recurring debt installments due this month
     const recurringMin = obligations
-      .filter((o) => o.minPayment > 0 && !o.isRecurring)
-      .reduce((s, o) => s + o.minPayment, 0);
+      .reduce((s, o) => {
+        if (o.category === 'loan') {
+          // Monthly loan EMI
+          return s + (o.minPayment > 0 ? o.minPayment : (o.isRecurring ? o.originalAmount : 0));
+        }
+        if (o.minPayment > 0 && !o.isRecurring) {
+          // Installment-based vendor/personal debt
+          return s + o.minPayment;
+        }
+        return s;
+      }, 0);
 
     const monthlyBaselineNeed = monthlyFixedCommitments + recurringMin + cfg.safetyBuffer;
     const monthlyShortfall = totalIncome - monthlyBaselineNeed;
@@ -213,12 +224,21 @@ export const getAttentionNeeded = async (_req: Request, res: Response, next: Nex
     const totalIncome = manualIncome > 0 ? manualIncome : (invoiceIncomeRaw[0]?.total ?? 0);
     const manualCommitments = commitments.reduce((s, c) => s + c.amount, 0);
     const recurringFixed = recurringMonthlyTotal(activeRecurring);
-    const recurringObligationMonthly = obligations
-      .filter((o) => o.isRecurring)
-      .reduce((s, o) => s + o.originalAmount, 0);
-    const combinedCommitments = manualCommitments + recurringFixed + recurringObligationMonthly;
+    const recurringNonLoanObligations = obligations
+      .filter((o) => o.isRecurring && o.category !== 'loan')
+      .reduce((s, o) => s + (o.minPayment > 0 ? o.minPayment : o.originalAmount), 0);
+    const combinedCommitments = manualCommitments + recurringFixed + recurringNonLoanObligations;
     const monthlyFixedCommitments = combinedCommitments > 0 ? combinedCommitments : (cashflowFixedRaw[0]?.total ?? 0);
-    const recurringMin = obligations.filter((o) => o.minPayment > 0 && !o.isRecurring).reduce((s, o) => s + o.minPayment, 0);
+    const recurringMin = obligations
+      .reduce((s, o) => {
+        if (o.category === 'loan') {
+          return s + (o.minPayment > 0 ? o.minPayment : (o.isRecurring ? o.originalAmount : 0));
+        }
+        if (o.minPayment > 0 && !o.isRecurring) {
+          return s + o.minPayment;
+        }
+        return s;
+      }, 0);
     const monthlyBaselineNeed = monthlyFixedCommitments + recurringMin + cfg.safetyBuffer;
 
     const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();

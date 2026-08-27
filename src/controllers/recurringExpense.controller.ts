@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { RecurringExpense, RECURRING_FREQUENCIES } from '../models/RecurringExpense.model';
 import { Cashflow } from '../models/Cashflow.model';
+import { Expense } from '../models/Expense.model';
 import { fail, ok } from '../utils/response';
 
 const computeNextDueDate = (frequency: string, fromDate: Date, dayOfMonth?: number): Date => {
@@ -100,6 +101,48 @@ export const deleteRecurring = async (req: Request, res: Response, next: NextFun
     const item = await RecurringExpense.findByIdAndDelete(req.params.id);
     if (!item) return fail(res, 'Recurring expense not found', 404);
     return ok(res, { _id: req.params.id }, 'Deleted');
+  } catch (err) { next(err); }
+};
+
+// POST /api/recurring-expenses/:id/mark-paid
+// 1-Click marks recurring expense as paid for the current cycle and records store expense
+export const markPaidForCurrentMonth = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { paymentMethod, amount, note } = req.body as {
+      paymentMethod?: string;
+      amount?: number;
+      note?: string;
+    };
+
+    const item = await RecurringExpense.findById(req.params.id);
+    if (!item) return fail(res, 'Recurring expense not found', 404);
+
+    const paidAmount = typeof amount === 'number' && amount > 0 ? amount : item.amount;
+    const method = paymentMethod === 'upi' || paymentMethod === 'card' || paymentMethod === 'bank_transfer' ? paymentMethod : 'cash';
+
+    // Map recurring category to valid Expense category
+    let expCategory: string = item.category.toLowerCase();
+    if (expCategory.includes('rent')) expCategory = 'rent';
+    else if (expCategory.includes('elect') || expCategory.includes('util') || expCategory.includes('internet')) expCategory = 'utilities';
+    else if (expCategory.includes('sal')) expCategory = 'salary';
+    else if (expCategory.includes('maint')) expCategory = 'maintenance';
+    else expCategory = 'miscellaneous';
+
+    // 1. Create store expense entry
+    const createdExpense = await Expense.create({
+      date: new Date(),
+      amount: paidAmount,
+      category: expCategory,
+      paymentMethod: method,
+      vendorName: item.vendorName || item.name,
+      note: note || `Paid recurring: ${item.name}`,
+    });
+
+    // 2. Advance nextDueDate to next schedule
+    item.nextDueDate = computeNextDueDate(item.frequency, item.nextDueDate, item.dayOfMonth);
+    await item.save();
+
+    return ok(res, { item, expense: createdExpense }, 'Recurring bill marked as paid');
   } catch (err) { next(err); }
 };
 

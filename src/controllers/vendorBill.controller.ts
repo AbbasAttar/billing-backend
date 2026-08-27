@@ -1,8 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import { VendorBill } from '../models/VendorBill.model';
+import { Expense } from '../models/Expense.model';
 import { Invoice } from '../models/Invoice.model';
 import { ok, created, fail } from '../utils/response';
-import mongoose from 'mongoose';
 
 const parseDate = (value?: string) => {
   if (!value) return null;
@@ -90,15 +90,35 @@ export const getBillById = async (req: Request, res: Response, next: NextFunctio
 
 export const addPayment = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { amount, method, date, note } = req.body;
+    const { amount, method, date, note, recordExpense } = req.body;
+    if (typeof amount !== 'number' || amount <= 0) {
+      return fail(res, 'amount must be greater than 0', 400);
+    }
+
     const bill = await VendorBill.findById(req.params.id);
     if (!bill) return res.status(404).json({ message: 'Bill not found' });
 
-    bill.payments.push({ amount, method, date: date || new Date(), note });
+    const paymentDate = date ? new Date(date) : new Date();
+    const paymentMethod = method === 'upi' || method === 'card' || method === 'bank_transfer' ? method : 'cash';
+
+    bill.payments.push({ amount, method: paymentMethod, date: paymentDate, note });
     bill.paidAmount += amount;
     await bill.save();
 
-    return ok(res, bill);
+    // Optionally record in Store Expenses ledger for counter outflow tracking
+    let createdExpense = null;
+    if (recordExpense !== false) {
+      createdExpense = await Expense.create({
+        date: paymentDate,
+        amount,
+        category: 'stock',
+        paymentMethod: paymentMethod,
+        vendorName: bill.vendorName,
+        note: note || `Vendor payout to ${bill.vendorName}`,
+      });
+    }
+
+    return ok(res, { bill, expense: createdExpense }, 'Payment recorded successfully');
   } catch (error) {
     next(error);
   }
@@ -141,12 +161,10 @@ export const getAISuggestion = async (_req: Request, res: Response, next: NextFu
 
     const totalPendingAmount = pendingBills.reduce((sum, b) => sum + (b.totalAmount - b.paidAmount), 0);
 
-    // 3. AI Logic: Payment Plan
-    // Prioritize by duedate and amount.
-    // Allocate 30% of average daily revenue for debt clearance.
-    const dailyAllocation = avgDailyRevenue * 0.4; // 40% of revenue for bills
+    // 3. Payout suggestion allocation
+    const dailyAllocation = avgDailyRevenue * 0.4;
     
-    let remainingAllocation = dailyAllocation * 7; // Weekly budget
+    let remainingAllocation = dailyAllocation * 7;
     const suggestions = [];
     
     for (const bill of pendingBills) {

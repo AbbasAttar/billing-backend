@@ -1,14 +1,16 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export const EXPENSE_CATEGORIES = [
+  'staff_tea',
+  'maintenance',
+  'delivery',
+  'miscellaneous',
   'rent',
   'salary',
   'utilities',
   'stock',
-  'maintenance',
   'transport',
   'marketing',
-  'miscellaneous',
 ] as const;
 
 export const EXPENSE_PAYMENT_METHODS = ['cash', 'upi', 'card', 'bank_transfer'] as const;

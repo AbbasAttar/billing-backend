@@ -22,20 +22,31 @@ export function computeObligation(o: IObligation, dailySurplus = 0) {
 
   let daysLeft: number | null = null;
   let dailyAmountNeeded: number | null = null;
+
+  // For loans and obligations with a monthly EMI/minPayment, the target amount due in the current period is the monthly installment, not the entire multi-year principal!
+  const isInstallmentBased = o.category === 'loan' || (o.minPayment ?? 0) > 0 || o.isRecurring;
+  const targetPeriodAmount = isInstallmentBased
+    ? Math.min((o.minPayment && o.minPayment > 0 ? o.minPayment : (o.isRecurring ? o.originalAmount : remaining)), remaining)
+    : remaining;
+
   if (o.dueDate) {
     daysLeft = Math.max(0, Math.ceil((new Date(o.dueDate).getTime() - now.getTime()) / 86_400_000));
-    dailyAmountNeeded = daysLeft > 0 ? remaining / daysLeft : remaining;
+    const effectiveDays = Math.max(1, Math.min(daysLeft > 0 ? daysLeft : 1, 30));
+    dailyAmountNeeded = targetPeriodAmount / effectiveDays;
+  } else if (isInstallmentBased && targetPeriodAmount > 0) {
+    // If recurring / loan without explicit single dueDate, divide monthly installment over 30 days
+    dailyAmountNeeded = targetPeriodAmount / 30;
   }
 
   const paymentType: 'deadline-full' | 'recurring-minimum' =
-    o.dueDate && remaining > 0 && (o.minPayment ?? 0) >= remaining ? 'deadline-full' : 'recurring-minimum';
+    isInstallmentBased ? 'recurring-minimum' : 'deadline-full';
 
   let riskFlag: 'URGENT' | 'AT_RISK' | 'MANAGEABLE' = 'MANAGEABLE';
-  if (daysLeft === 0 && remaining > 0) {
+  if (daysLeft === 0 && targetPeriodAmount > 0) {
     riskFlag = 'URGENT';
   } else if (dailyAmountNeeded !== null && dailySurplus > 0 && dailyAmountNeeded > dailySurplus * 2) {
     riskFlag = 'AT_RISK';
-  } else if (dailyAmountNeeded !== null && dailySurplus === 0 && remaining > 0) {
+  } else if (dailyAmountNeeded !== null && dailySurplus === 0 && targetPeriodAmount > 0 && remaining > 0) {
     riskFlag = 'AT_RISK';
   }
 
