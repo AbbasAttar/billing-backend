@@ -36,10 +36,8 @@ export const updateBill = async (req: Request, res: Response, next: NextFunction
     if (typeof totalAmount !== 'number' || totalAmount <= 0) return fail(res, 'totalAmount must be greater than 0', 400);
     if (!category?.trim()) return fail(res, 'category is required', 400);
 
-    const parsedBillDate = parseDate(billDate);
+    const parsedBillDate = parseDate(billDate) || new Date();
     const parsedDueDate = parseDate(dueDate);
-    if (!parsedBillDate) return fail(res, 'Invalid billDate', 400);
-    if (!parsedDueDate) return fail(res, 'Invalid dueDate', 400);
 
     const bill = await VendorBill.findById(req.params.id);
     if (!bill) return fail(res, 'Bill not found', 404);
@@ -49,7 +47,9 @@ export const updateBill = async (req: Request, res: Response, next: NextFunction
 
     bill.vendorName = vendorName.trim();
     bill.billDate = parsedBillDate;
-    bill.dueDate = parsedDueDate;
+    if (parsedDueDate) {
+      bill.dueDate = parsedDueDate;
+    }
     bill.totalAmount = totalAmount;
     bill.category = category.trim();
     bill.note = note;
@@ -71,7 +71,7 @@ export const getBills = async (req: Request, res: Response, next: NextFunction) 
     if (status) filter.status = status;
     if (vendorName) filter.vendorName = { $regex: vendorName, $options: 'i' };
 
-    const bills = await VendorBill.find(filter).sort({ dueDate: 1 });
+    const bills = await VendorBill.find(filter).sort({ billDate: -1, createdAt: -1 });
     return ok(res, bills);
   } catch (error) {
     next(error);
@@ -180,7 +180,7 @@ export const getAISuggestion = async (_req: Request, res: Response, next: NextFu
           totalAmount: bill.totalAmount,
           balance,
           suggestedPayment: payment,
-          priority: bill.dueDate < new Date() ? 'CRITICAL (Overdue)' : (bill.dueDate.getTime() - Date.now() < 86400000 * 3 ? 'HIGH' : 'MEDIUM'),
+          priority: (bill.dueDate && bill.dueDate < new Date()) ? 'CRITICAL (Overdue)' : (bill.dueDate && (bill.dueDate.getTime() - Date.now() < 86400000 * 3) ? 'HIGH' : 'MEDIUM'),
         });
         remainingAllocation -= payment;
       }

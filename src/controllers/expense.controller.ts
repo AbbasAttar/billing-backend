@@ -368,8 +368,9 @@ export const getExpenseHubSummary = async (_req: Request, res: Response, next: N
         const isLabA = a.vendorName.toLowerCase().includes('lab') || a.vendorName.toLowerCase().includes('lens');
         const isLabB = b.vendorName.toLowerCase().includes('lab') || b.vendorName.toLowerCase().includes('lens');
         if (isLabA && !isLabB) return -1;
-        if (!isLabA && isLabB) return 1;
-        return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
+        const timeA = a.dueDate ? new Date(a.dueDate).getTime() : 0;
+        const timeB = b.dueDate ? new Date(b.dueDate).getTime() : 0;
+        return timeA - timeB;
       });
 
       const topBill = sortedCandidates[0];

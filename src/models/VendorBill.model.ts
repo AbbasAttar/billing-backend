@@ -6,7 +6,7 @@ export type BillStatus = typeof BILL_STATUSES[number];
 export interface IVendorBill extends Document {
   vendorName: string;
   billDate: Date;
-  dueDate: Date;
+  dueDate?: Date;
   totalAmount: number;
   paidAmount: number;
   status: BillStatus;
@@ -30,7 +30,7 @@ const VendorBillSchema = new Schema<IVendorBill>(
   {
     vendorName: { type: String, required: true, trim: true },
     billDate: { type: Date, required: true, default: Date.now },
-    dueDate: { type: Date, required: true },
+    dueDate: { type: Date, required: false },
     totalAmount: { type: Number, required: true, min: 0 },
     paidAmount: { type: Number, default: 0, min: 0 },
     status: { type: String, enum: BILL_STATUSES, default: 'pending' },
@@ -59,7 +59,7 @@ VendorBillSchema.pre('save', function () {
     this.status = 'paid';
   } else if (this.paidAmount > 0) {
     this.status = 'partially_paid';
-  } else if (this.dueDate < new Date() && this.status !== 'paid') {
+  } else if (this.dueDate && this.dueDate < new Date() && this.status !== 'paid') {
     this.status = 'overdue';
   } else {
     this.status = 'pending';
