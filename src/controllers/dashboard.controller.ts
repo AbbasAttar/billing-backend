@@ -6,7 +6,9 @@ import { Cashflow } from '../models/Cashflow.model';
 import { PersonalExpense } from '../models/PersonalExpense.model';
 import { MonthlyTarget } from '../models/MonthlyTarget.model';
 import { SavingGoal } from '../models/SavingGoal.model';
-import { Obligation } from '../models/Obligation.model';
+import { Expense } from '../models/Expense.model';
+import { VendorBill } from '../models/VendorBill.model';
+import { RecurringExpense } from '../models/RecurringExpense.model';
 import { buildDashboardCommandCenter } from '../services/dashboardIntelligence';
 
 // ── Helper: get today's date range ──────────────────────────────────────────
@@ -126,8 +128,8 @@ export const getDailyKPIs = async (req: Request, res: Response, next: NextFuncti
             // Bills cleared today
             Invoice.countDocuments({ billClearDate: { $gte: todayStart, $lte: todayEnd } }),
 
-            Cashflow.aggregate([
-                { $match: { type: 'expense', date: { $gte: todayStart, $lte: todayEnd }, status: { $ne: 'void' } } },
+            Expense.aggregate([
+                { $match: { date: { $gte: todayStart, $lte: todayEnd }, isVoid: false } },
                 { $group: { _id: null, total: { $sum: '$amount' } } },
             ]),
 
@@ -806,11 +808,22 @@ export const getFinanceOverview = async (_req: Request, res: Response, next: Nex
         const month      = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 
         const [
-            todaySalesAgg, todayCollectionsAgg, todayExpensesAgg,
-            mtdRevenueAgg, mtdExpensesAgg, mtdPersonalAgg,
-            receivablesAgg, upcomingPayablesAgg,
-            allTimeInflows, allTimeExpenses, allTimePayables,
-            activeGoals, monthlyTarget, upcomingPayablesList,
+            todaySalesAgg,
+            todayCollectionsAgg,
+            todayStoreExpensesAgg,
+            todayVendorPaymentsAgg,
+            mtdRevenueAgg,
+            mtdStoreExpensesAgg,
+            mtdVendorPaymentsAgg,
+            mtdPersonalAgg,
+            receivablesAgg,
+            pendingVendorBills,
+            recurringBills,
+            allTimeInflows,
+            allTimeStoreExpenses,
+            allTimeVendorPayments,
+            activeGoals,
+            monthlyTarget,
         ] = await Promise.all([
             // Today sales
             Invoice.aggregate([
@@ -823,20 +836,32 @@ export const getFinanceOverview = async (_req: Request, res: Response, next: Nex
                 { $match: { 'payments.date': { $gte: todayStart, $lte: todayEnd } } },
                 { $group: { _id: null, total: { $sum: '$payments.amount' } } },
             ]),
-            // Today expenses
-            Cashflow.aggregate([
-                { $match: { type: 'expense', status: { $ne: 'void' }, date: { $gte: todayStart, $lte: todayEnd } } },
+            // Today store expenses
+            Expense.aggregate([
+                { $match: { date: { $gte: todayStart, $lte: todayEnd }, isVoid: false } },
                 { $group: { _id: null, total: { $sum: '$amount' } } },
+            ]),
+            // Today vendor bill payments
+            VendorBill.aggregate([
+                { $unwind: '$payments' },
+                { $match: { 'payments.date': { $gte: todayStart, $lte: todayEnd } } },
+                { $group: { _id: null, total: { $sum: '$payments.amount' } } },
             ]),
             // MTD revenue
             Invoice.aggregate([
                 { $match: { billDate: { $gte: mtdStart }, isVoid: { $ne: true } } },
                 { $group: { _id: null, total: { $sum: '$total' } } },
             ]),
-            // MTD business expenses
-            Cashflow.aggregate([
-                { $match: { type: 'expense', status: { $ne: 'void' }, date: { $gte: mtdStart } } },
+            // MTD store expenses
+            Expense.aggregate([
+                { $match: { date: { $gte: mtdStart }, isVoid: false } },
                 { $group: { _id: null, total: { $sum: '$amount' } } },
+            ]),
+            // MTD vendor bill payments
+            VendorBill.aggregate([
+                { $unwind: '$payments' },
+                { $match: { 'payments.date': { $gte: mtdStart } } },
+                { $group: { _id: null, total: { $sum: '$payments.amount' } } },
             ]),
             // MTD personal expenses
             PersonalExpense.aggregate([
@@ -851,83 +876,52 @@ export const getFinanceOverview = async (_req: Request, res: Response, next: Nex
                 { $match: { pending: { $gt: 0 } } },
                 { $group: { _id: null, total: { $sum: '$pending' } } },
             ]),
-            // Open obligations for accurate 30-day upcoming payables
-            Obligation.find({ status: 'open' }),
+            // Pending vendor bills
+            VendorBill.find({ status: { $ne: 'paid' } }).sort({ dueDate: 1 }),
+            // Active recurring expenses
+            RecurringExpense.find({ isActive: true }),
             // All-time inflows (invoice payments)
             Invoice.aggregate([
                 { $unwind: '$payments' },
                 { $group: { _id: null, total: { $sum: '$payments.amount' } } },
             ]),
-            // All-time expense outflows
-            Cashflow.aggregate([
-                { $match: { type: 'expense', status: { $ne: 'void' } } },
+            // All-time store expense outflows
+            Expense.aggregate([
+                { $match: { isVoid: false } },
                 { $group: { _id: null, total: { $sum: '$amount' } } },
             ]),
-            // All-time payable outflows (paid amounts)
-            Cashflow.aggregate([
-                { $match: { type: 'payable' } },
-                { $group: { _id: null, total: { $sum: '$paidAmount' } } },
+            // All-time vendor bill payments
+            VendorBill.aggregate([
+                { $unwind: '$payments' },
+                { $group: { _id: null, total: { $sum: '$payments.amount' } } },
             ]),
             // Active saving goals
             SavingGoal.find({ status: 'active' }).sort({ priority: 1 }).limit(6),
             // Monthly target
             MonthlyTarget.findOne({ month }),
-            // Upcoming payables list for suggested actions (include those with no due date)
-            Cashflow.find({
-                type: 'payable',
-                status: { $in: ['pending', 'partially_paid', 'overdue'] },
-                $or: [
-                    { dueDate: { $exists: false } },
-                    { dueDate: null },
-                    { dueDate: { $lte: new Date(Date.now() + 7 * 86_400_000) } },
-                ],
-            }).sort({ dueDate: 1 }).limit(5),
         ]);
 
-        const availableCash = Math.max(0,
-            (allTimeInflows[0]?.total ?? 0) -
-            (allTimeExpenses[0]?.total ?? 0) -
-            (allTimePayables[0]?.total ?? 0)
-        );
-        const receivables = receivablesAgg[0]?.total ?? 0;
+        const todayExpenses = (todayStoreExpensesAgg[0]?.total ?? 0) + (todayVendorPaymentsAgg[0]?.total ?? 0);
+        const mtdExpenses   = (mtdStoreExpensesAgg[0]?.total ?? 0) + (mtdVendorPaymentsAgg[0]?.total ?? 0);
+        const allTimeExpensesTotal = (allTimeStoreExpenses[0]?.total ?? 0) + (allTimeVendorPayments[0]?.total ?? 0);
+        const allTimeInflowTotal   = allTimeInflows[0]?.total ?? 0;
+
+        const availableCash = Math.max(0, allTimeInflowTotal - allTimeExpensesTotal);
+        const receivables   = receivablesAgg[0]?.total ?? 0;
         
-        // Calculate true 30-day upcoming payables liability (monthly EMIs for loans, bills due within 30 days for vendors)
-        const openObligations = upcomingPayablesAgg as unknown as Array<{
-            category: string;
-            originalAmount: number;
-            alreadyPaid: number;
-            minPayment: number;
-            isRecurring: boolean;
-            dueDate?: Date;
-        }>;
-        const upcomingPayables = openObligations.reduce((sum, o) => {
-            const remaining = Math.max(0, o.originalAmount - (o.alreadyPaid || 0));
-            if (remaining <= 0) return sum;
-            if (o.category === 'loan') {
-                return sum + (o.minPayment > 0 ? o.minPayment : (o.isRecurring ? o.originalAmount : remaining));
-            }
-            if (o.minPayment > 0) {
-                return sum + o.minPayment;
-            }
-            if (o.isRecurring) {
-                return sum + (o.minPayment > 0 ? o.minPayment : o.originalAmount);
-            }
-            if (o.dueDate && new Date(o.dueDate).getTime() > Date.now() + 30 * 86_400_000) {
-                // Distant due date (> 30 days) and no monthly installment: not due in next 30 days
-                return sum;
-            }
-            return sum + remaining;
-        }, 0);
+        // Calculate true upcoming payables (unpaid vendor bills)
+        const upcomingPayables = pendingVendorBills.reduce(
+            (sum, b) => sum + Math.max(0, b.totalAmount - b.paidAmount),
+            0
+        );
 
         const mtdRevenue       = mtdRevenueAgg[0]?.total ?? 0;
-        const mtdExpenses      = mtdExpensesAgg[0]?.total ?? 0;
         const businessProfit   = mtdRevenue - mtdExpenses;
         const savingBalance    = activeGoals.reduce((s, g) => s + g.savedAmount, 0);
         const workingCapital   = availableCash + receivables - upcomingPayables;
 
         const todaySales       = todaySalesAgg[0]?.total ?? 0;
         const todayCollections = todayCollectionsAgg[0]?.total ?? 0;
-        const todayExpenses    = todayExpensesAgg[0]?.total ?? 0;
         const todayProfit      = todaySales - todayExpenses;
 
         // Saving goals with computed progress
@@ -972,10 +966,10 @@ export const getFinanceOverview = async (_req: Request, res: Response, next: Nex
         const cashForecast = [];
         let runningBalance = availableCash;
         const payablesByDate: Record<string, number> = {};
-        for (const p of upcomingPayablesList) {
+        for (const p of pendingVendorBills) {
             if (p.dueDate) {
                 const key = p.dueDate.toISOString().split('T')[0];
-                payablesByDate[key] = (payablesByDate[key] ?? 0) + (p.amount - p.paidAmount);
+                payablesByDate[key] = (payablesByDate[key] ?? 0) + Math.max(0, p.totalAmount - p.paidAmount);
             }
         }
         for (let day = 1; day <= 30; day += 5) {
