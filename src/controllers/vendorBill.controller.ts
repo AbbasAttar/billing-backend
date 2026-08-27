@@ -124,6 +124,35 @@ export const addPayment = async (req: Request, res: Response, next: NextFunction
   }
 };
 
+export const deletePayment = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const rawId = req.params.id;
+    const rawIndex = req.params.paymentIndex;
+    const id = Array.isArray(rawId) ? rawId[0] : rawId;
+    const paymentIndex = Array.isArray(rawIndex) ? rawIndex[0] : rawIndex;
+
+    const idx = parseInt(paymentIndex, 10);
+    if (isNaN(idx) || idx < 0) {
+      return fail(res, 'Invalid payment index', 400);
+    }
+
+    const bill = await VendorBill.findById(id);
+    if (!bill) return fail(res, 'Bill not found', 404);
+
+    if (!bill.payments || idx >= bill.payments.length) {
+      return fail(res, 'Payment record not found', 404);
+    }
+
+    const [removedPayment] = bill.payments.splice(idx, 1);
+    bill.paidAmount = Math.max(0, bill.paidAmount - (removedPayment?.amount || 0));
+    await bill.save();
+
+    return ok(res, bill, 'Payment removed successfully');
+  } catch (error) {
+    next(error);
+  }
+};
+
 export const deleteBill = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const bill = await VendorBill.findByIdAndDelete(req.params.id);
