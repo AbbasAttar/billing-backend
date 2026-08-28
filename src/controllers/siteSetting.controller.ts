@@ -7,12 +7,16 @@ const ALLOWED_KEYS = [
   'instagram_posts',
   'instagram_access_token',
   'instagram_limit',
+  'default_collection_cycle_days',
+  'allow_custom_collection_date',
 ] as const;
 type AllowedKey = (typeof ALLOWED_KEYS)[number];
 
 function defaultValue(key: AllowedKey) {
   if (key === 'instagram_posts') return [];
   if (key === 'instagram_limit') return 6;
+  if (key === 'default_collection_cycle_days') return 14;
+  if (key === 'allow_custom_collection_date') return true;
   return null;
 }
 

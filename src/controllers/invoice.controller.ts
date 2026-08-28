@@ -656,7 +656,11 @@ export const addPayment = async (req: Request, res: Response, next: NextFunction
 export const updatePayment = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const index = parseInt(String(req.params.paymentIndex), 10);
-    const { amount, method } = req.body as { amount?: number; method?: 'cash' | 'online' };
+    const { amount, method, date } = req.body as {
+      amount?: number;
+      method?: 'cash' | 'online';
+      date?: string;
+    };
 
     const invoice = await Invoice.findById(req.params.id);
     if (!invoice) {
@@ -681,6 +685,14 @@ export const updatePayment = async (req: Request, res: Response, next: NextFunct
         return;
       }
       invoice.payments[index].method = method;
+    }
+    if (date !== undefined) {
+      const parsedDate = new Date(date);
+      if (Number.isNaN(parsedDate.getTime())) {
+        res.status(400).json({ message: 'Invalid payment date.' });
+        return;
+      }
+      invoice.payments[index].date = parsedDate;
     }
 
     const totalSettled = invoice.payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);

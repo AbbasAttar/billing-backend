@@ -9,6 +9,7 @@ import { SavingGoal } from '../models/SavingGoal.model';
 import { Expense } from '../models/Expense.model';
 import { VendorBill } from '../models/VendorBill.model';
 import { RecurringExpense } from '../models/RecurringExpense.model';
+import { SiteSetting } from '../models/SiteSetting.model';
 import { buildDashboardCommandCenter } from '../services/dashboardIntelligence';
 
 // ── Helper: get today's date range ──────────────────────────────────────────
@@ -337,7 +338,12 @@ export const getCashFlowInsights = async (req: Request, res: Response, next: Nex
                     ? 'softer-than-usual collections'
                     : 'stable collection patterns';
 
-        const collectionCycleDays = Math.round(
+        const customCycleSetting = await SiteSetting.findOne({ key: 'default_collection_cycle_days' }).lean();
+        const configuredCycle = typeof customCycleSetting?.value === 'number' && customCycleSetting.value > 0
+            ? customCycleSetting.value
+            : null;
+
+        const collectionCycleDays = configuredCycle ?? Math.round(
             clamp(
                 average(
                     settledInvoices
