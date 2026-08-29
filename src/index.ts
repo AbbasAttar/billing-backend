@@ -34,25 +34,7 @@ export const api = onRequest(
   }
 );
 
-// 2. Keep-Warm Heartbeat Function (Runs every 5 minutes to keep API container warm)
-export const keepWarmPing = onSchedule(
-  {
-    schedule: '*/5 * * * *',
-    timeZone: 'Asia/Kolkata',
-    region: 'asia-south1',
-  },
-  async () => {
-    try {
-      const resp = await fetch('https://asia-south1-attarwala-46200.cloudfunctions.net/api/health');
-      const data = await resp.json();
-      console.log('💓 Keep-warm heartbeat pinged api successfully:', data);
-    } catch (err: any) {
-      console.error('❌ Keep-warm heartbeat failed:', err.message);
-    }
-  }
-);
-
-// 3. Scheduled Function: Nightly Marketing Automation (Daily at 09:00 IST)
+// 2. Scheduled Function: Nightly Marketing Automation (Daily at 09:00 IST)
 export const nightlyMarketingCron = onSchedule(
   {
     schedule: '0 9 * * *',
