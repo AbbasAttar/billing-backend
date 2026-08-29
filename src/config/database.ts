@@ -61,19 +61,14 @@ const isConnectionAlive = async (): Promise<boolean> => {
 export const connectDB = async (): Promise<typeof mongoose> => {
   attachConnectionListeners();
 
-  // 1. If connection exists, verify that the underlying TCP socket is actually alive
-  if (mongoose.connection.readyState === 1) {
-    const alive = await isConnectionAlive();
-    if (alive) {
-      return mongoose;
-    }
-    // Socket was dropped during container sleep — cleanly close and reset
+  // 1. If connection exists and is ready, return immediately
+  if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
+    return mongoose;
+  }
+
+  // If connection is disconnecting or disconnected, clean up cached promise
+  if (mongoose.connection.readyState === 0 || mongoose.connection.readyState === 3) {
     cachedPromise = null;
-    try {
-      await mongoose.disconnect();
-    } catch {
-      // Ignore disconnect errors on dead sockets
-    }
   }
 
   // 2. If a connection attempt is already in progress, await it

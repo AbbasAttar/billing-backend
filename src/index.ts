@@ -34,17 +34,18 @@ export const api = onRequest(
   }
 );
 
-// 2. Keep-Warm Heartbeat Function (Runs every 10 minutes)
+// 2. Keep-Warm Heartbeat Function (Runs every 5 minutes to keep API container warm)
 export const keepWarmPing = onSchedule(
   {
-    schedule: '*/10 * * * *',
+    schedule: '*/5 * * * *',
     timeZone: 'Asia/Kolkata',
     region: 'asia-south1',
   },
   async () => {
     try {
-      await connectDB();
-      console.log('💓 Keep-warm heartbeat executed successfully.');
+      const resp = await fetch('https://asia-south1-attarwala-46200.cloudfunctions.net/api/health');
+      const data = await resp.json();
+      console.log('💓 Keep-warm heartbeat pinged api successfully:', data);
     } catch (err: any) {
       console.error('❌ Keep-warm heartbeat failed:', err.message);
     }

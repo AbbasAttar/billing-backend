@@ -60,62 +60,75 @@ app.use(cors({ origin: corsOrigin, credentials: true }));
 
 // Razorpay webhook must receive raw body for signature verification
 app.post('/api/razorpay/webhook', express.raw({ type: 'application/json' }), handleWebhook);
+app.post('/razorpay/webhook', express.raw({ type: 'application/json' }), handleWebhook);
 
 app.use(express.json());
 
+// Create centralized API Router
+const apiRouter = express.Router();
+
 // Health check
+apiRouter.get('/health', (_req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// API Routes mounted on apiRouter
+apiRouter.use('/customers', customerRoutes);
+apiRouter.use('/optical-numbers', opticalNumberRoutes); // legacy — kept for backward compat
+apiRouter.use('/optical-lenses', opticalLensRoutes);
+apiRouter.use('/prescriptions', prescriptionRoutes);
+apiRouter.use('/fragrances', fragranceRoutes);
+apiRouter.use('/frames', frameRoutes);
+apiRouter.use('/invoice-items', invoiceItemRoutes);
+apiRouter.use('/invoices', invoiceRoutes);
+apiRouter.use('/analytics', analyticsRoutes);
+apiRouter.use('/dashboard', dashboardRoutes);
+apiRouter.use('/cashflow', cashflowRoutes);
+apiRouter.use('/expenses', expenseRoutes);
+apiRouter.use('/vendor-bills', vendorBillRoutes);
+apiRouter.use('/payments', paymentsRoutes);
+apiRouter.use('/sales', salesRoutes);
+apiRouter.use('/inventory', inventoryIntelligenceRoutes);
+apiRouter.use('/personal-expenses', personalExpenseRoutes);
+apiRouter.use('/monthly-targets', monthlyTargetRoutes);
+apiRouter.use('/coatings', coatingRoutes);
+apiRouter.use('/lens-pricing', lensPricingRoutes);
+apiRouter.use('/lens-stock', lensStockRoutes);
+apiRouter.use('/frame-companies', frameCompanyRoutes);
+apiRouter.use('/frame-stock', frameStockRoutes);
+apiRouter.use('/frame-colors', frameColorRoutes);
+apiRouter.use('/marketing', marketingRoutes);
+apiRouter.use('/campaigns', campaignRoutes);
+apiRouter.use('/automation', automationRoutes);
+apiRouter.use('/lost-sales', lostSaleRoutes);
+apiRouter.use('/saving-goals', savingGoalRoutes);
+apiRouter.use('/recurring-expenses', recurringExpenseRoutes);
+apiRouter.use('/contact-lenses', contactLensRoutes);
+apiRouter.use('/public', publicRoutes);
+apiRouter.use('/auth',   authRoutes);
+apiRouter.use('/settings', siteSettingRoutes);
+apiRouter.use('/blog', blogRoutes);
+apiRouter.use('/razorpay', razorpayRoutes);
+apiRouter.use('/notifications', notificationRoutes);
+apiRouter.use('/debts', debtRoutes);
+apiRouter.use('/commitments', commitmentRoutes);
+apiRouter.use('/debt-config', debtConfigRoutes);
+apiRouter.use('/debt-payments', debtPaymentRoutes);
+apiRouter.use('/obligations', obligationRoutes);
+apiRouter.use('/obligation-payments', obligationPaymentRoutes);
+apiRouter.use('/finance', financeOverviewRoutes);
+apiRouter.use('/reports', lensReorderRoutes);
+apiRouter.use('/purchases', purchaseEntryRoutes);
+apiRouter.use('/wholesaler-queue', wholesalerQueueRoutes);
+
+// Root health check
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// API Routes
-app.use('/api/customers', customerRoutes);
-app.use('/api/optical-numbers', opticalNumberRoutes); // legacy — kept for backward compat
-app.use('/api/optical-lenses', opticalLensRoutes);
-app.use('/api/prescriptions', prescriptionRoutes);
-app.use('/api/fragrances', fragranceRoutes);
-app.use('/api/frames', frameRoutes);
-app.use('/api/invoice-items', invoiceItemRoutes);
-app.use('/api/invoices', invoiceRoutes);
-app.use('/api/analytics', analyticsRoutes);
-app.use('/api/dashboard', dashboardRoutes);
-app.use('/api/cashflow', cashflowRoutes);
-app.use('/api/expenses', expenseRoutes);
-app.use('/api/vendor-bills', vendorBillRoutes);
-app.use('/api/payments', paymentsRoutes);
-app.use('/api/sales', salesRoutes);
-app.use('/api/inventory', inventoryIntelligenceRoutes);
-app.use('/api/personal-expenses', personalExpenseRoutes);
-app.use('/api/monthly-targets', monthlyTargetRoutes);
-app.use('/api/coatings', coatingRoutes);
-app.use('/api/lens-pricing', lensPricingRoutes);
-app.use('/api/lens-stock', lensStockRoutes);
-app.use('/api/frame-companies', frameCompanyRoutes);
-app.use('/api/frame-stock', frameStockRoutes);
-app.use('/api/frame-colors', frameColorRoutes);
-app.use('/api/marketing', marketingRoutes);
-app.use('/api/campaigns', campaignRoutes);
-app.use('/api/automation', automationRoutes);
-app.use('/api/lost-sales', lostSaleRoutes);
-app.use('/api/saving-goals', savingGoalRoutes);
-app.use('/api/recurring-expenses', recurringExpenseRoutes);
-app.use('/api/contact-lenses', contactLensRoutes);
-app.use('/api/public', publicRoutes);
-app.use('/api/auth',   authRoutes);
-app.use('/api/settings', siteSettingRoutes);
-app.use('/api/blog', blogRoutes);
-app.use('/api/razorpay', razorpayRoutes);
-app.use('/api/notifications', notificationRoutes);
-app.use('/api/debts', debtRoutes);
-app.use('/api/commitments', commitmentRoutes);
-app.use('/api/debt-config', debtConfigRoutes);
-app.use('/api/debt-payments', debtPaymentRoutes);
-app.use('/api/obligations', obligationRoutes);
-app.use('/api/obligation-payments', obligationPaymentRoutes);
-app.use('/api/finance', financeOverviewRoutes);
-app.use('/api/reports', lensReorderRoutes);
-app.use('/api/purchases', purchaseEntryRoutes);
-app.use('/api/wholesaler-queue', wholesalerQueueRoutes);
+// Support both /api/* and /* paths
+app.use('/api', apiRouter);
+app.use('/', apiRouter);
 
 // 404 handler
 app.use((_req, res) => {
