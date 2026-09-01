@@ -16,12 +16,18 @@ import {
   getRecentInvoices,
   getRecentPayments,
   getSeasonalityIntelligence,
+  getRecallTasks,
+  markRecallSent,
+  snoozeRecall,
 } from '../controllers/dashboard.controller';
 
 const router = Router();
 
 router.get('/daily',            getDailyKPIs);
 router.get('/daily-tasks',      getDailyTasks);
+router.get('/recalls',          getRecallTasks);
+router.post('/recalls/mark-sent', markRecallSent);
+router.post('/recalls/snooze',  snoozeRecall);
 router.get('/opportunity-score', getOpportunityScore);
 router.get('/profit-leakage',   getProfitLeakage);
 router.get('/command-center',   getCommandCenter);

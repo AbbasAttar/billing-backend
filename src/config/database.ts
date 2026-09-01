@@ -9,9 +9,9 @@ const MONGOOSE_OPTIONS: mongoose.ConnectOptions = {
   maxPoolSize: 10,
   minPoolSize: 1,
   serverSelectionTimeoutMS: 5000,
-  socketTimeoutMS: 30000,
+  socketTimeoutMS: 20000,
   heartbeatFrequencyMS: 10000,
-  maxIdleTimeMS: 30000,
+  maxIdleTimeMS: 20000,
   autoIndex: env.NODE_ENV !== 'production',
 };
 
@@ -58,12 +58,32 @@ const isConnectionAlive = async (): Promise<boolean> => {
   }
 };
 
+let lastPingTime = 0;
+
 export const connectDB = async (): Promise<typeof mongoose> => {
   attachConnectionListeners();
 
-  // 1. If connection exists and is ready, return immediately
+  const now = Date.now();
+
+  // 1. If connection exists and is ready, verify socket health if it has been idle
   if (mongoose.connection.readyState === 1 && mongoose.connection.db) {
-    return mongoose;
+    if (now - lastPingTime < 15000) {
+      return mongoose;
+    }
+
+    const alive = await isConnectionAlive();
+    if (alive) {
+      lastPingTime = Date.now();
+      return mongoose;
+    }
+
+    console.warn('⚠️ Stale or unresponsive MongoDB socket detected after container idle. Reconnecting...');
+    try {
+      await mongoose.disconnect();
+    } catch {
+      // ignore
+    }
+    cachedPromise = null;
   }
 
   // If connection is disconnecting or disconnected, clean up cached promise
@@ -74,7 +94,9 @@ export const connectDB = async (): Promise<typeof mongoose> => {
   // 2. If a connection attempt is already in progress, await it
   if (cachedPromise) {
     try {
-      return await cachedPromise;
+      const conn = await cachedPromise;
+      lastPingTime = Date.now();
+      return conn;
     } catch {
       cachedPromise = null;
     }
@@ -90,6 +112,7 @@ export const connectDB = async (): Promise<typeof mongoose> => {
       try {
         const conn = await mongoose.connect(env.MONGODB_URI, MONGOOSE_OPTIONS);
         console.log(`✅ MongoDB connected: ${conn.connection.host}`);
+        lastPingTime = Date.now();
         return conn;
       } catch (error: any) {
         retries++;

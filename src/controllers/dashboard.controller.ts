@@ -1072,3 +1072,49 @@ export const getProfitLeakage = async (req: Request, res: Response, next: NextFu
         next(error);
     }
 };
+
+// ── GET /api/dashboard/recalls ──────────────────────────────────────────────
+export const getRecallTasks = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const { getCustomerRecalls } = await import('../services/recallEngine');
+        const dateParam = req.query.date ? new Date(req.query.date as string) : new Date();
+        const data = await getCustomerRecalls(dateParam);
+        res.json(data);
+    } catch (error) {
+        next(error);
+    }
+};
+
+// ── POST /api/dashboard/recalls/mark-sent ───────────────────────────────────
+export const markRecallSent = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const { markCustomerRecallSent } = await import('../services/recallEngine');
+        const { customerId, recallType, notes } = req.body;
+        if (!customerId || !recallType) {
+            res.status(400).json({ message: 'customerId and recallType are required' });
+            return;
+        }
+        const result = await markCustomerRecallSent(customerId, recallType, notes);
+        res.json(result);
+    } catch (error) {
+        next(error);
+    }
+};
+
+// ── POST /api/dashboard/recalls/snooze ──────────────────────────────────────
+export const snoozeRecall = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const { snoozeCustomerRecall } = await import('../services/recallEngine');
+        const { customerId, days = 14 } = req.body;
+        if (!customerId) {
+            res.status(400).json({ message: 'customerId is required' });
+            return;
+        }
+        const result = await snoozeCustomerRecall(customerId, Number(days));
+        res.json(result);
+    } catch (error) {
+        next(error);
+    }
+};
+
+

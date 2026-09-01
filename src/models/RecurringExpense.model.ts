@@ -5,7 +5,7 @@ export type RecurringFrequency = (typeof RECURRING_FREQUENCIES)[number];
 
 export const RECURRING_CATEGORIES = [
   'rent', 'electricity', 'salary', 'internet', 'stationery', 'packaging',
-  'marketing', 'repairs', 'transportation', 'bank_charges', 'qurdan',
+  'marketing', 'repairs', 'transportation', 'bank_charges', 'qurdan', 'loan',
   'taxes', 'insurance', 'professional', 'miscellaneous',
 ] as const;
 export type RecurringCategory = (typeof RECURRING_CATEGORIES)[number];
@@ -32,6 +32,11 @@ export interface IRecurringExpense extends Document {
   vendorName?: string;
   notes?: string;
   isActive: boolean;
+  completionDate?: Date;             // Date when this debt/recurring cost finishes
+  totalRepaymentAmount?: number;     // Total principal or amount to be repaid
+  totalRepaidAmount?: number;        // Total repaid so far
+  isLoanOrDebt?: boolean;            // Flag indicating this is a debt/loan repayment
+  repaymentStatus?: 'ongoing' | 'completed' | 'paused';
   deposits: IRecurringDeposit[];
   prepaidAmount: number;      // running total of deposits not yet applied to a generated entry
   createdAt: Date;
@@ -50,21 +55,26 @@ const DepositSchema = new Schema<IRecurringDeposit>(
 
 const RecurringExpenseSchema = new Schema<IRecurringExpense>(
   {
-    name:          { type: String, required: true, trim: true },
-    category:      { type: String, required: true, trim: true },
-    amount:        { type: Number, required: true, min: 0.01 },
-    frequency:     { type: String, required: true, enum: RECURRING_FREQUENCIES },
-    dayOfMonth:    { type: Number, min: 1, max: 31 },
-    nextDueDate:   { type: Date, required: true },
-    reminderDays:  { type: Number, default: 3, min: 0, max: 30 },
-    autoGenerate:  { type: Boolean, default: false },
-    autoMarkPaid:  { type: Boolean, default: false },
-    paymentMethod: { type: String },
-    vendorName:    { type: String, trim: true },
-    notes:         { type: String, trim: true, maxlength: 300 },
-    isActive:      { type: Boolean, default: true },
-    deposits:      { type: [DepositSchema], default: [] },
-    prepaidAmount: { type: Number, default: 0, min: 0 },
+    name:                 { type: String, required: true, trim: true },
+    category:             { type: String, required: true, trim: true },
+    amount:               { type: Number, required: true, min: 0.01 },
+    frequency:            { type: String, required: true, enum: RECURRING_FREQUENCIES },
+    dayOfMonth:           { type: Number, min: 1, max: 31 },
+    nextDueDate:          { type: Date, required: true },
+    reminderDays:         { type: Number, default: 3, min: 0, max: 30 },
+    autoGenerate:         { type: Boolean, default: false },
+    autoMarkPaid:         { type: Boolean, default: false },
+    paymentMethod:        { type: String },
+    vendorName:           { type: String, trim: true },
+    notes:                { type: String, trim: true, maxlength: 300 },
+    isActive:             { type: Boolean, default: true },
+    completionDate:       { type: Date },
+    totalRepaymentAmount: { type: Number, min: 0 },
+    totalRepaidAmount:    { type: Number, default: 0, min: 0 },
+    isLoanOrDebt:         { type: Boolean, default: false },
+    repaymentStatus:      { type: String, enum: ['ongoing', 'completed', 'paused'], default: 'ongoing' },
+    deposits:             { type: [DepositSchema], default: [] },
+    prepaidAmount:        { type: Number, default: 0, min: 0 },
   },
   { timestamps: true }
 );

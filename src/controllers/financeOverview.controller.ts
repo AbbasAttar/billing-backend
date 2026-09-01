@@ -336,3 +336,15 @@ export const getAttentionNeeded = async (_req: Request, res: Response, next: Nex
     return ok(res, { items, count: items.length });
   } catch (err) { next(err); }
 };
+
+// ── GET /api/finance/planner-command-center ─────────────────────────────────
+export const getPlannerCommandCenter = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { getFinancialPlannerData } = await import('../services/financialPlanner.service');
+    const refDate = req.query.date ? new Date(req.query.date as string) : new Date();
+    const data = await getFinancialPlannerData(refDate);
+    return ok(res, data);
+  } catch (err) {
+    next(err);
+  }
+};

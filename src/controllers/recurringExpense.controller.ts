@@ -43,6 +43,7 @@ export const createRecurring = async (req: Request, res: Response, next: NextFun
     const {
       name, category, amount, frequency, dayOfMonth, nextDueDate,
       reminderDays, autoGenerate, autoMarkPaid, paymentMethod, vendorName, notes,
+      completionDate, totalRepaymentAmount, totalRepaidAmount, isLoanOrDebt, repaymentStatus,
     } = req.body;
 
     if (!name?.trim()) return fail(res, 'name is required', 400);
@@ -67,7 +68,12 @@ export const createRecurring = async (req: Request, res: Response, next: NextFun
       paymentMethod: paymentMethod?.trim(),
       vendorName: vendorName?.trim(),
       notes: notes?.trim(),
-      isActive: true,
+      isActive: repaymentStatus === 'completed' ? false : true,
+      completionDate: completionDate ? new Date(completionDate) : undefined,
+      totalRepaymentAmount: typeof totalRepaymentAmount === 'number' ? totalRepaymentAmount : undefined,
+      totalRepaidAmount: typeof totalRepaidAmount === 'number' ? totalRepaidAmount : 0,
+      isLoanOrDebt: isLoanOrDebt ?? (category === 'qurdan' || category === 'loan' || name.toLowerCase().includes('loan') || name.toLowerCase().includes('qardan')),
+      repaymentStatus: repaymentStatus ?? 'ongoing',
       deposits: [],
       prepaidAmount: 0,
     });
@@ -80,6 +86,7 @@ export const updateRecurring = async (req: Request, res: Response, next: NextFun
     const allowed = [
       'name', 'category', 'amount', 'frequency', 'dayOfMonth', 'nextDueDate',
       'reminderDays', 'autoGenerate', 'autoMarkPaid', 'paymentMethod', 'vendorName', 'notes', 'isActive',
+      'completionDate', 'totalRepaymentAmount', 'totalRepaidAmount', 'isLoanOrDebt', 'repaymentStatus',
     ];
     const update: Record<string, unknown> = {};
     for (const key of allowed) {
@@ -89,6 +96,14 @@ export const updateRecurring = async (req: Request, res: Response, next: NextFun
       const d = new Date(update.nextDueDate as string);
       d.setHours(0, 0, 0, 0);
       update.nextDueDate = d;
+    }
+    if (update.completionDate) {
+      const d = new Date(update.completionDate as string);
+      d.setHours(0, 0, 0, 0);
+      update.completionDate = d;
+    }
+    if (update.repaymentStatus === 'completed') {
+      update.isActive = false;
     }
     const item = await RecurringExpense.findByIdAndUpdate(req.params.id, update, { new: true });
     if (!item) return fail(res, 'Recurring expense not found', 404);

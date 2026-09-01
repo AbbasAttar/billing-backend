@@ -14,6 +14,9 @@ export interface IInvoiceItem extends Document {
   lensLabel?: string;
   quantity: number;
   price: number;
+  mrp?: number;
+  storePrice?: number;
+  tier?: string;
   // Lens product fields — denormalized
   lensBrand?: string;
   lensName?: string;
@@ -63,6 +66,9 @@ const InvoiceItemSchema = new Schema<IInvoiceItem>(
     lensLabel: { type: String, default: null },
     quantity: { type: Number, required: true, min: 0.0001 },
     price: { type: Number, required: true, min: 0 },
+    mrp: { type: Number, default: null },
+    storePrice: { type: Number, default: null },
+    tier: { type: String, default: null },
     // Lens product fields
     lensBrand: { type: String, default: null },
     lensName: { type: String, default: null },

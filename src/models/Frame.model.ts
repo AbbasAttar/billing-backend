@@ -8,6 +8,10 @@ export interface IFrame extends Document {
   type?: string;
   costPrice?: number;
   sellPrice?: number;
+  mrp?: number;
+  tier?: 'essential' | 'trendy' | 'premium' | 'luxury';
+  floorPrice?: number;
+  secretCode?: string;
   stock?: number;
   frameCode?: string;
   isArchived?: boolean;
@@ -23,6 +27,10 @@ const FrameSchema = new Schema<IFrame>(
     type: { type: String, trim: true },
     costPrice: { type: Number, min: 0 },
     sellPrice: { type: Number, min: 0 },
+    mrp: { type: Number, min: 0 },
+    tier: { type: String, enum: ['essential', 'trendy', 'premium', 'luxury'] },
+    floorPrice: { type: Number, min: 0 },
+    secretCode: { type: String, trim: true },
     stock: { type: Number, min: 0, default: 0 },
     frameCode: { type: String, trim: true },
     isArchived: { type: Boolean, default: false },

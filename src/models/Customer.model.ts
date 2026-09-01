@@ -9,6 +9,9 @@ export interface ICustomer extends Document {
   tags: string[];
   notes?: string;
   preferredChannel?: 'whatsapp' | 'sms' | 'email';
+  lastContactedAt?: Date;
+  lastContactType?: string;
+  snoozedUntil?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -23,6 +26,9 @@ const CustomerSchema = new Schema<ICustomer>(
     tags: { type: [String], default: [] },
     notes: { type: String, trim: true },
     preferredChannel: { type: String, enum: ['whatsapp', 'sms', 'email'] },
+    lastContactedAt: { type: Date },
+    lastContactType: { type: String, trim: true },
+    snoozedUntil: { type: Date },
   },
   { timestamps: true }
 );

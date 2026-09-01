@@ -13,6 +13,9 @@ export interface IInvoice extends Document {
   subtotal: number;
   discount: number;
   total: number;
+  mrpTotal?: number;
+  storePriceTotal?: number;
+  realDiscount?: number;
   payments: IPayment[];
   billDate: Date;
   billClearDate?: Date;
@@ -33,6 +36,9 @@ const InvoiceSchema = new Schema<IInvoice>(
     subtotal: { type: Number, required: true, min: 0, default: 0 },
     discount: { type: Number, default: 0, min: 0 },
     total: { type: Number, required: true, min: 0 },
+    mrpTotal: { type: Number, default: null },
+    storePriceTotal: { type: Number, default: null },
+    realDiscount: { type: Number, default: 0 },
     payments: [PaymentSchema],
     billDate: { type: Date, required: true, default: Date.now },
     billClearDate: { type: Date },
