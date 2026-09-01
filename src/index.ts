@@ -34,18 +34,21 @@ export const api = onRequest(
   }
 );
 
-// 2. Keep-Warm Heartbeat Function (Runs every 5 minutes to prevent Cloud Run idle freezing)
+// 2. Keep-Warm Heartbeat Function (Runs every 1 minute to keep Cloud Run CPU active and sockets hot)
 export const keepWarmPing = onSchedule(
   {
-    schedule: '*/5 * * * *',
+    schedule: '* * * * *',
     timeZone: 'Asia/Kolkata',
     region: 'asia-south1',
   },
   async () => {
     try {
-      const resp = await fetch('https://asia-south1-attarwala-46200.cloudfunctions.net/api/health');
-      const data = await resp.json();
-      console.log('💓 Keep-warm heartbeat pinged API successfully:', data);
+      const results = await Promise.allSettled([
+        fetch('https://asia-south1-attarwala-46200.cloudfunctions.net/api/health').then((r) => r.json()),
+        fetch('https://asia-south1-attarwala-46200.cloudfunctions.net/api/public/categories').then((r) => r.json()),
+        fetch('https://attarwala-46200.web.app/').then((r) => r.status),
+      ]);
+      console.log('💓 Heartbeat kept API, DB connection, and Storefront warm:', results.map((r) => r.status));
     } catch (err: any) {
       console.error('❌ Keep-warm heartbeat ping failed:', err.message);
     }

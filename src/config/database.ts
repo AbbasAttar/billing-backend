@@ -43,16 +43,19 @@ const isConnectionAlive = async (): Promise<boolean> => {
     return false;
   }
 
+  let timer: NodeJS.Timeout | undefined;
   try {
     // 1.5s ping timeout to detect dead TCP sockets immediately without hanging
     const pingPromise = mongoose.connection.db.admin().ping();
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('MongoDB ping timed out')), 1500)
-    );
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('MongoDB ping timed out')), 1500);
+    });
 
     await Promise.race([pingPromise, timeoutPromise]);
+    if (timer) clearTimeout(timer);
     return true;
   } catch (err: any) {
+    if (timer) clearTimeout(timer);
     console.warn(`⚠️ Stale MongoDB socket detected (${err.message}). Forcing reconnect...`);
     return false;
   }
