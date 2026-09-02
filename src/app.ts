@@ -56,8 +56,19 @@ import { handleWebhook } from './controllers/razorpay.controller';
 const app = express();
 
 // Middleware
-const corsOrigin = env.CORS_ORIGIN.split(',');
-app.use(cors({ origin: corsOrigin, credentials: true }));
+const allowedOrigins = env.CORS_ORIGIN.split(',').map((s) => s.trim()).filter(Boolean);
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return callback(null, true);
+      if (/^https?:\/\/(.*attarwala.*|.*hosted\.app|.*web\.app|.*firebaseapp\.com)$/.test(origin)) return callback(null, true);
+      return callback(null, true);
+    },
+    credentials: true,
+  })
+);
 
 // Razorpay webhook must receive raw body for signature verification
 app.post('/api/razorpay/webhook', express.raw({ type: 'application/json' }), handleWebhook);
