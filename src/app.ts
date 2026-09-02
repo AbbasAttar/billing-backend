@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { env } from './config/env';
+import { connectDB } from './config/database';
 import { errorHandler } from './middleware/errorHandler';
 
 import customerRoutes from './routes/customer.routes';
@@ -63,6 +64,24 @@ app.post('/api/razorpay/webhook', express.raw({ type: 'application/json' }), han
 app.post('/razorpay/webhook', express.raw({ type: 'application/json' }), handleWebhook);
 
 app.use(express.json());
+
+// Ensure active database connection before processing queries (excluding lightweight health checks)
+app.use(async (req, res, next) => {
+  if (req.path === '/health' || req.path === '/api/health') {
+    return next();
+  }
+  try {
+    await connectDB();
+    next();
+  } catch (err: any) {
+    console.error('🔴 Database connection error in request middleware:', err.message);
+    res.status(503).json({
+      success: false,
+      error: 'Database connection currently reconnecting. Please retry in a few seconds.',
+      message: err.message,
+    });
+  }
+});
 
 // Create centralized API Router
 const apiRouter = express.Router();
