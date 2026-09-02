@@ -3,11 +3,6 @@ import { onSchedule } from 'firebase-functions/v2/scheduler';
 import app from './app';
 import { connectDB } from './config/database';
 
-// 0. Pre-warm MongoDB connection on container initialization
-connectDB().catch((err) => {
-  console.warn('⚠️ Background pre-warm DB connect notice:', err.message);
-});
-
 // 1. Cloud Function HTTP API (Express REST API)
 export const api = onRequest(
   {
