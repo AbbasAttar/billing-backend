@@ -1025,7 +1025,18 @@ const PAID_STATUSES = ['paid', 'preparing', 'ready', 'dispatched', 'fulfilled'] 
 export const getAllMerged = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const [invoices, orders] = await Promise.all([
-      Invoice.find().sort({ billDate: -1 }).populate('customer', 'name mobile').lean(),
+      Invoice.find()
+        .sort({ billDate: -1 })
+        .populate('customer', 'name mobileNumber mobile address')
+        .populate({
+          path: 'items',
+          populate: [
+            { path: 'frame', select: 'name companyName houseName' },
+            { path: 'opticalLens', select: 'name brand category' },
+            { path: 'fragrance', select: 'name companyName type' },
+          ],
+        })
+        .lean(),
       Order.find({ status: { $in: PAID_STATUSES } }).sort({ createdAt: 1 }).lean(),
     ]);
 
@@ -1044,6 +1055,7 @@ export const getAllMerged = async (req: Request, res: Response, next: NextFuncti
         source:        'in-store' as const,
         invoiceNumber: inv.invoiceNumber,
         customer:      inv.customer,
+        items:         inv.items ?? [],
         total:         inv.total,
         subtotal:      inv.subtotal,
         discount:      inv.discount,
@@ -1060,7 +1072,8 @@ export const getAllMerged = async (req: Request, res: Response, next: NextFuncti
           _id:           ord._id,
           source:        'online' as const,
           invoiceNumber: ord.invoiceNumber,
-          customer:      { name: ord.customerName, mobile: ord.customerPhone },
+          customer:      { name: ord.customerName, mobile: ord.customerPhone, mobileNumber: ord.customerPhone, address: ord.address },
+          items:         ord.items ?? [],
           total:         ord.total,
           subtotal:      ord.subtotal,
           discount:      0,

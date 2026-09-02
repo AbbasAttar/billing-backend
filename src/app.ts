@@ -51,6 +51,7 @@ import financeOverviewRoutes from './routes/financeOverview.routes';
 import lensReorderRoutes from './routes/lensReorder.routes';
 import purchaseEntryRoutes from './routes/purchaseEntry.routes';
 import wholesalerQueueRoutes from './routes/wholesalerQueue.routes';
+import customerRequirementRoutes from './routes/customerRequirement.routes';
 import { handleWebhook } from './controllers/razorpay.controller';
 
 const app = express();
@@ -150,6 +151,7 @@ apiRouter.use('/finance', financeOverviewRoutes);
 apiRouter.use('/reports', lensReorderRoutes);
 apiRouter.use('/purchases', purchaseEntryRoutes);
 apiRouter.use('/wholesaler-queue', wholesalerQueueRoutes);
+apiRouter.use('/customer-requirements', customerRequirementRoutes);
 
 // Root health check
 app.get('/health', (_req, res) => {

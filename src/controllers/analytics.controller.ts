@@ -35,6 +35,25 @@ interface ProductAgg {
     type?: string;
 }
 
+// ── Date Key Helpers (Timezone-safe) ──────────────────────────────────────────
+
+const formatLocalDateKey = (dateInput: Date | string | number): string => {
+    const d = new Date(dateInput);
+    if (isNaN(d.getTime())) return '';
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+};
+
+const formatLocalMonthKey = (dateInput: Date | string | number): string => {
+    const d = new Date(dateInput);
+    if (isNaN(d.getTime())) return '';
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    return `${y}-${m}`;
+};
+
 // ── Controller ───────────────────────────────────────────────────────────────
 
 export const getAnalyticsSummary = async (req: Request, res: Response, next: NextFunction) => {
@@ -58,13 +77,27 @@ export const getAnalyticsSummary = async (req: Request, res: Response, next: Nex
             }
         ]);
 
-        // ── 2. Monthly Collection (Invoices cleared in this month) ────────────────
+        // ── 2. Monthly Collection (Actual cash/online collections received in this month) ──
         const monthlyCollectionAgg = await Invoice.aggregate([
-            { $match: { billClearDate: { $gte: startOfMonth, $lte: endOfMonth } } },
+            { $unwind: '$payments' },
+            {
+                $match: {
+                    $or: [
+                        { 'payments.date': { $gte: startOfMonth.toISOString(), $lte: endOfMonth.toISOString() } },
+                        { 'payments.date': { $gte: startOfMonth, $lte: endOfMonth } },
+                        {
+                            $and: [
+                                { $or: [{ 'payments.date': { $exists: false } }, { 'payments.date': null }] },
+                                { billDate: { $gte: startOfMonth, $lte: endOfMonth } }
+                            ]
+                        }
+                    ]
+                }
+            },
             {
                 $group: {
                     _id: null,
-                    amount: { $sum: '$total' }
+                    amount: { $sum: '$payments.amount' }
                 }
             }
         ]);
@@ -98,11 +131,11 @@ export const getAnalyticsSummary = async (req: Request, res: Response, next: Nex
         ]);
 
         const lifetimeCollectionAgg = await Invoice.aggregate([
-            { $match: { billClearDate: { $exists: true, $ne: null } } },
+            { $unwind: '$payments' },
             {
                 $group: {
                     _id: null,
-                    amount: { $sum: '$total' }
+                    amount: { $sum: '$payments.amount' }
                 }
             }
         ]);
@@ -759,14 +792,23 @@ export const getExecutiveAnalytics = async (req: Request, res: Response, next: N
         prevWindowStart.setDate(prevWindowStart.getDate() - (days - 1));
         prevWindowStart.setHours(0, 0, 0, 0);
 
-        // Fetch current and previous period invoices
-        const [currentInvoices, prevInvoices] = await Promise.all([
+        // Fetch current and previous period invoices + all payments made in the period
+        const [currentInvoices, prevInvoices, currentPaymentsInvoices] = await Promise.all([
             Invoice.find({ billDate: { $gte: windowStart, $lte: windowEnd } })
                 .select({ subtotal: 1, discount: 1, total: 1, payments: 1, billDate: 1, billClearDate: 1, items: 1, customer: 1 })
                 .populate('items')
                 .lean(),
             Invoice.find({ billDate: { $gte: prevWindowStart, $lte: prevWindowEnd } })
                 .select({ total: 1, discount: 1, payments: 1 })
+                .lean(),
+            Invoice.find({
+                $or: [
+                    { 'payments.date': { $gte: windowStart.toISOString(), $lte: windowEnd.toISOString() } },
+                    { 'payments.date': { $gte: windowStart, $lte: windowEnd } },
+                    { billDate: { $gte: windowStart, $lte: windowEnd } },
+                ]
+            })
+                .select({ payments: 1, billDate: 1 })
                 .lean(),
         ]);
 
@@ -778,7 +820,26 @@ export const getExecutiveAnalytics = async (req: Request, res: Response, next: N
         const prevGrossRevenue = prevInvoices.reduce((s, inv) => s + (inv.total || 0), 0);
         const revenueDelta = prevGrossRevenue > 0 ? ((grossRevenue - prevGrossRevenue) / prevGrossRevenue) * 100 : 0;
 
-        const totalCollected = currentInvoices.reduce((s, inv) => s + getPaidAmount(inv), 0);
+        // Accurate collections received in window
+        let totalCollected = 0;
+        let cashPayments = 0;
+        let upiPayments = 0;
+
+        for (const inv of currentPaymentsInvoices) {
+            if (Array.isArray(inv.payments)) {
+                for (const p of inv.payments) {
+                    const pDate = p.date ? new Date(p.date) : new Date(inv.billDate);
+                    if (pDate >= windowStart && pDate <= windowEnd) {
+                        const amt = p.amount || 0;
+                        totalCollected += amt;
+                        const method = (p.method || '').toLowerCase();
+                        if (method.includes('cash')) cashPayments += amt;
+                        else upiPayments += amt;
+                    }
+                }
+            }
+        }
+
         const prevTotalCollected = prevInvoices.reduce((s, inv) => s + getPaidAmount(inv), 0);
         const collectionDelta = prevTotalCollected > 0 ? ((totalCollected - prevTotalCollected) / prevTotalCollected) * 100 : 0;
 
@@ -790,19 +851,6 @@ export const getExecutiveAnalytics = async (req: Request, res: Response, next: N
 
         const invoiceCount = currentInvoices.length;
         const aov = invoiceCount > 0 ? grossRevenue / invoiceCount : 0;
-
-        // Payment channels
-        let cashPayments = 0;
-        let upiPayments = 0;
-        for (const inv of currentInvoices) {
-            if (Array.isArray(inv.payments)) {
-                for (const p of inv.payments) {
-                    const method = (p.method || '').toLowerCase();
-                    if (method.includes('cash')) cashPayments += (p.amount || 0);
-                    else upiPayments += (p.amount || 0);
-                }
-            }
-        }
 
         // Calculate Cost & Margins across items
         let totalCost = 0;
@@ -937,40 +985,71 @@ export const getExecutiveAnalytics = async (req: Request, res: Response, next: N
             for (let i = 0; i < (days === 365 ? 12 : 6); i++) {
                 const d = new Date(windowStart);
                 d.setMonth(d.getMonth() + i);
-                const monthKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+                const monthKey = formatLocalMonthKey(d);
                 const label = d.toLocaleString('en-US', { month: 'short' });
                 timelineMap.set(monthKey, { label, date: monthKey, revenue: 0, collected: 0, discount: 0, count: 0 });
             }
 
+            // Map billed revenue
             for (const inv of currentInvoices) {
-                const d = new Date(inv.billDate);
-                const monthKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+                const monthKey = formatLocalMonthKey(inv.billDate);
                 const point = timelineMap.get(monthKey);
                 if (point) {
                     point.revenue += (inv.total || 0);
-                    point.collected += getPaidAmount(inv);
                     point.discount += (inv.discount || 0);
                     point.count += 1;
                 }
             }
+
+            // Map actual collected inflow
+            for (const inv of currentPaymentsInvoices) {
+                if (Array.isArray(inv.payments)) {
+                    for (const p of inv.payments) {
+                        const pDate = p.date ? new Date(p.date) : new Date(inv.billDate);
+                        if (pDate >= windowStart && pDate <= windowEnd) {
+                            const monthKey = formatLocalMonthKey(pDate);
+                            const point = timelineMap.get(monthKey);
+                            if (point) {
+                                point.collected += (p.amount || 0);
+                            }
+                        }
+                    }
+                }
+            }
         } else {
-            // Group by Day
+            // Group by Day (Local timezone safe)
             for (let i = 0; i < days; i++) {
                 const d = new Date(windowStart);
                 d.setDate(d.getDate() + i);
-                const dayKey = d.toISOString().slice(0, 10);
+                const dayKey = formatLocalDateKey(d);
                 const label = days === 7 ? d.toLocaleString('en-US', { weekday: 'short' }) : `${d.getDate()} ${d.toLocaleString('en-US', { month: 'short' })}`;
                 timelineMap.set(dayKey, { label, date: dayKey, revenue: 0, collected: 0, discount: 0, count: 0 });
             }
 
+            // Map billed revenue by billDate
             for (const inv of currentInvoices) {
-                const dayKey = new Date(inv.billDate).toISOString().slice(0, 10);
+                const dayKey = formatLocalDateKey(inv.billDate);
                 const point = timelineMap.get(dayKey);
                 if (point) {
                     point.revenue += (inv.total || 0);
-                    point.collected += getPaidAmount(inv);
                     point.discount += (inv.discount || 0);
                     point.count += 1;
+                }
+            }
+
+            // Map actual collections by payment date
+            for (const inv of currentPaymentsInvoices) {
+                if (Array.isArray(inv.payments)) {
+                    for (const p of inv.payments) {
+                        const pDate = p.date ? new Date(p.date) : new Date(inv.billDate);
+                        if (pDate >= windowStart && pDate <= windowEnd) {
+                            const dayKey = formatLocalDateKey(pDate);
+                            const point = timelineMap.get(dayKey);
+                            if (point) {
+                                point.collected += (p.amount || 0);
+                            }
+                        }
+                    }
                 }
             }
         }
