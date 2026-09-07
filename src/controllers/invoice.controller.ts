@@ -11,6 +11,7 @@ import { Customer } from '../models/Customer.model';
 import { Frame } from '../models/Frame.model';
 import { Fragrance } from '../models/Fragrance.model';
 import { Order } from '../models/Order.model';
+import { SiteSetting } from '../models/SiteSetting.model';
 import { deductLensStock } from './lensStock.controller';
 import { generateInvoiceNumber, financialYear, formatInvoiceNo } from '../utils/invoiceNumber';
 import { InvoiceCounter } from '../models/InvoiceCounter.model';
@@ -336,12 +337,29 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
 
     // ── 6. Create InvoiceItems ───────────────────────────────────────────────
     const invoiceItemIds: mongoose.Types.ObjectId[] = [];
+    let calculatedTotalCogs = 0;
 
     for (const item of resolvedItems) {
+      let costPrice = typeof (item as any).costPrice === 'number' ? (item as any).costPrice : 0;
+
+      // Auto-lookup costPrice if not provided
+      if (costPrice === 0) {
+        if (item.type === 'frame' && item.frame) {
+          const frameDoc = await Frame.findById(item.frame).select('costPrice').lean();
+          if (frameDoc?.costPrice) costPrice = frameDoc.costPrice;
+        } else if (item.type === 'fragrance' && item.fragrance) {
+          const fragDoc = await Fragrance.findById(item.fragrance).select('costPrice variants').lean();
+          if (fragDoc?.costPrice) costPrice = fragDoc.costPrice;
+        }
+      }
+
       const doc: any = {
         quantity: item.quantity,
         price: item.price,
+        costPrice,
       };
+      calculatedTotalCogs += costPrice * item.quantity;
+
       if (item.type === 'frame' && item.frame) {
         doc.frame = item.frame;
         if ((item as any).frameVariantLabel) doc.frameVariantLabel = (item as any).frameVariantLabel;
@@ -455,7 +473,48 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       }
     }
 
-    // ── 9. Create Invoice ────────────────────────────────────────────────────
+    // ── 9. Load Financial Config & Customer Visit Data ─────────────────────────
+    const [financialSetting, priorInvoicesCount] = await Promise.all([
+      SiteSetting.findOne({ key: 'retail_financial_settings' }).lean(),
+      Invoice.countDocuments({ customer: customerId }),
+    ]);
+
+    const defaultSettings = {
+      defaultCardSwipeFeePct: 0,
+      defaultPackagingCost: 35,
+    };
+    const finConfig = financialSetting?.value
+      ? { ...defaultSettings, ...financialSetting.value }
+      : defaultSettings;
+
+    const isNewCustomer = priorInvoicesCount === 0;
+    const visitNumber = priorInvoicesCount + 1;
+
+    const packagingCost =
+      typeof body.packagingCost === 'number'
+        ? body.packagingCost
+        : finConfig.defaultPackagingCost;
+
+    const onlinePaid = initialPayments
+      .filter((p) => p.method === 'online')
+      .reduce((s, p) => s + p.amount, 0);
+
+    const paymentProcessingFee =
+      typeof body.paymentProcessingFee === 'number'
+        ? body.paymentProcessingFee
+        : Number(((onlinePaid * (finConfig.defaultCardSwipeFeePct / 100))).toFixed(2));
+
+    const netContributionMargin = Math.max(
+      0,
+      Number((total - calculatedTotalCogs - packagingCost - paymentProcessingFee).toFixed(2))
+    );
+    const contributionMarginPct =
+      total > 0 ? Number(((netContributionMargin / total) * 100).toFixed(2)) : 0;
+
+    const acquisitionSource =
+      body.acquisitionSource || (isNewCustomer ? 'walk_by' : 'repeat');
+
+    // ── 10. Create Invoice ───────────────────────────────────────────────────
     const invoiceNumber = await generateInvoiceNumber(billDate);
     const invoice = await Invoice.create({
       customer: customerId,
@@ -466,6 +525,14 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       billDate,
       payments: initialPayments,
       invoiceNumber,
+      acquisitionSource,
+      totalCogs: calculatedTotalCogs,
+      packagingCost,
+      paymentProcessingFee,
+      netContributionMargin,
+      contributionMarginPct,
+      isNewCustomer,
+      visitNumber,
       ...(billClearDate ? { billClearDate } : {}),
     });
 

@@ -7,6 +7,17 @@ export interface IPayment {
   writeoff?: number;
 }
 
+export type AcquisitionSource =
+  | 'google_maps'
+  | 'instagram'
+  | 'whatsapp'
+  | 'referral'
+  | 'doctor_rx'
+  | 'walk_by'
+  | 'flyers'
+  | 'repeat'
+  | 'other';
+
 export interface IInvoice extends Document {
   customer: mongoose.Types.ObjectId;
   items: mongoose.Types.ObjectId[];
@@ -20,6 +31,14 @@ export interface IInvoice extends Document {
   billDate: Date;
   billClearDate?: Date;
   invoiceNumber?: string;
+  acquisitionSource?: AcquisitionSource;
+  totalCogs?: number;
+  packagingCost?: number;
+  paymentProcessingFee?: number;
+  netContributionMargin?: number;
+  contributionMarginPct?: number;
+  isNewCustomer?: boolean;
+  visitNumber?: number;
 }
 
 const PaymentSchema = new Schema<IPayment>({
@@ -43,11 +62,25 @@ const InvoiceSchema = new Schema<IInvoice>(
     billDate: { type: Date, required: true, default: Date.now },
     billClearDate: { type: Date },
     invoiceNumber: { type: String, default: null },
+    acquisitionSource: {
+      type: String,
+      enum: ['google_maps', 'instagram', 'whatsapp', 'referral', 'doctor_rx', 'walk_by', 'flyers', 'repeat', 'other'],
+      default: 'walk_by',
+    },
+    totalCogs: { type: Number, default: 0 },
+    packagingCost: { type: Number, default: 0 },
+    paymentProcessingFee: { type: Number, default: 0 },
+    netContributionMargin: { type: Number, default: 0 },
+    contributionMarginPct: { type: Number, default: 0 },
+    isNewCustomer: { type: Boolean, default: true },
+    visitNumber: { type: Number, default: 1 },
   },
   { timestamps: true }
 );
 
 InvoiceSchema.index({ customer: 1 });
 InvoiceSchema.index({ billDate: -1 });
+InvoiceSchema.index({ acquisitionSource: 1, billDate: -1 });
+InvoiceSchema.index({ isNewCustomer: 1, billDate: -1 });
 
 export const Invoice = mongoose.model<IInvoice>('Invoice', InvoiceSchema);

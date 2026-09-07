@@ -14,6 +14,7 @@ export interface IInvoiceItem extends Document {
   lensLabel?: string;
   quantity: number;
   price: number;
+  costPrice?: number;
   mrp?: number;
   storePrice?: number;
   tier?: string;
@@ -66,6 +67,7 @@ const InvoiceItemSchema = new Schema<IInvoiceItem>(
     lensLabel: { type: String, default: null },
     quantity: { type: Number, required: true, min: 0.0001 },
     price: { type: Number, required: true, min: 0 },
+    costPrice: { type: Number, default: 0 },
     mrp: { type: Number, default: null },
     storePrice: { type: Number, default: null },
     tier: { type: String, default: null },

@@ -3,6 +3,7 @@ export interface CreateFrameItemInput {
   frame: string;
   quantity: number;
   price: number;
+  costPrice?: number;
   frameVariantLabel?: string;
 }
 
@@ -11,6 +12,7 @@ export interface CreateFragranceItemInput {
   fragrance: string;
   quantity: number;
   price: number;
+  costPrice?: number;
 }
 
 export interface CreateOpticalLensItemInput {
@@ -53,6 +55,7 @@ export interface CreateOpticalLensItemInput {
   fulfilledQty?: number | null;
   quantity: number;
   price: number;
+  costPrice?: number;
 }
 
 export type CreateInvoiceItemInput =
@@ -65,6 +68,18 @@ export interface CreateInvoiceInput {
   customerName?: string;
   customerAddress?: string;
   customerMobile?: string;
+  acquisitionSource?:
+    | 'google_maps'
+    | 'instagram'
+    | 'whatsapp'
+    | 'referral'
+    | 'doctor_rx'
+    | 'walk_by'
+    | 'flyers'
+    | 'repeat'
+    | 'other';
+  packagingCost?: number;
+  paymentProcessingFee?: number;
   items: CreateInvoiceItemInput[];
   initialPayment?: number;    // optional upfront payment recorded at creation time
   initialPayments?: Array<{

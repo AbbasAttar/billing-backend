@@ -7,11 +7,13 @@ import {
     getFragranceTypeMix,
     getLensTypeDemand,
     getExecutiveAnalytics,
+    getUnitEconomicsAnalytics,
 } from '../controllers/analytics.controller';
 
 const router = Router();
 
 router.get('/executive',          getExecutiveAnalytics);
+router.get('/unit-economics',     getUnitEconomicsAnalytics);
 router.get('/summary',            getAnalyticsSummary);
 router.get('/monthly-summary',    getMonthlySummary);
 router.get('/top-items',          getTopItems);

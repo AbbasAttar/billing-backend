@@ -5,6 +5,10 @@ import { InvoiceItem } from '../models/InvoiceItem.model';
 import { Fragrance } from '../models/Fragrance.model';
 import { Frame } from '../models/Frame.model';
 import { OpticalLens } from '../models/OpticalLens.model';
+import { AdSpend } from '../models/AdSpend.model';
+import { SiteSetting } from '../models/SiteSetting.model';
+import { VendorBill } from '../models/VendorBill.model';
+import { Obligation } from '../models/Obligation.model';
 
 // ── Aggregation result types ─────────────────────────────────────────────────
 
@@ -1125,6 +1129,283 @@ export const getExecutiveAnalytics = async (req: Request, res: Response, next: N
             settlementMix,
             dayOfWeekStats,
             topProducts,
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const getUnitEconomicsAnalytics = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const timeframe = (req.query.timeframe as string) || 'month'; // '7d' | '30d' | 'month' | 'quarter' | 'year' | 'all'
+        const now = new Date();
+        let startDate: Date;
+        const endDate = new Date(now);
+
+        if (timeframe === '7d') {
+            startDate = new Date(now.getTime() - 7 * 86400000);
+        } else if (timeframe === '30d') {
+            startDate = new Date(now.getTime() - 30 * 86400000);
+        } else if (timeframe === 'quarter') {
+            startDate = new Date(now.getTime() - 90 * 86400000);
+        } else if (timeframe === 'year') {
+            startDate = new Date(now.getFullYear(), 0, 1);
+        } else if (timeframe === 'all') {
+            startDate = new Date(2020, 0, 1);
+        } else {
+            // 'month' (current month)
+            startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+        }
+
+        const [invoices, financialSetting, adSpends, frameStock, fragStock, vendorBills, obligations] = await Promise.all([
+            Invoice.find({ billDate: { $gte: startDate, $lte: endDate } })
+                .populate('items')
+                .lean(),
+            SiteSetting.findOne({ key: 'retail_financial_settings' }).lean(),
+            AdSpend.find({ date: { $gte: startDate, $lte: endDate } }).lean(),
+            Frame.find({ isArchived: { $ne: true } }).select('costPrice stock').lean(),
+            Fragrance.find({ isArchived: { $ne: true } }).select('costPrice stock variants').lean(),
+            VendorBill.find({ status: { $ne: 'paid' } }).select('totalAmount paidAmount').lean(),
+            Obligation.find({ status: 'open' }).select('originalAmount alreadyPaid').lean(),
+        ]);
+
+        const defaultSettings = {
+            defaultCardSwipeFeePct: 0,
+            defaultPackagingCost: 35,
+        };
+        const config = financialSetting?.value ? { ...defaultSettings, ...financialSetting.value } : defaultSettings;
+
+        let totalRevenue = 0;
+        let totalCogs = 0;
+        let totalPackaging = 0;
+        let totalProcessingFees = 0;
+        let totalNetContributionMargin = 0;
+
+        let newCustomerRevenue = 0;
+        let newCustomerCount = 0;
+        let newCustomerContributionMargin = 0;
+
+        let repeatCustomerRevenue = 0;
+        let repeatCustomerCount = 0;
+        let repeatCustomerContributionMargin = 0;
+
+        const sourceMap = new Map<string, {
+            source: string;
+            revenue: number;
+            invoicesCount: number;
+            newCustomerCount: number;
+            cogs: number;
+            packaging: number;
+            fees: number;
+            contributionMargin: number;
+            adSpend: number;
+        }>();
+
+        const defaultSources = [
+            'walk_by',
+            'google_maps',
+            'instagram',
+            'whatsapp',
+            'referral',
+            'doctor_rx',
+            'flyers',
+            'repeat',
+            'other',
+        ];
+
+        for (const s of defaultSources) {
+            sourceMap.set(s, {
+                source: s,
+                revenue: 0,
+                invoicesCount: 0,
+                newCustomerCount: 0,
+                cogs: 0,
+                packaging: 0,
+                fees: 0,
+                contributionMargin: 0,
+                adSpend: 0,
+            });
+        }
+
+        // Aggregate Ad Spends by mapped channels
+        for (const ad of adSpends) {
+            let targetSource = 'other';
+            if (ad.channel === 'google') targetSource = 'google_maps';
+            else if (ad.channel === 'instagram' || ad.channel === 'facebook') targetSource = 'instagram';
+            else if (ad.channel === 'whatsapp') targetSource = 'whatsapp';
+            else if (ad.channel === 'newspaper' || ad.channel === 'flyers') targetSource = 'flyers';
+
+            const existing = sourceMap.get(targetSource) || {
+                source: targetSource,
+                revenue: 0,
+                invoicesCount: 0,
+                newCustomerCount: 0,
+                cogs: 0,
+                packaging: 0,
+                fees: 0,
+                contributionMargin: 0,
+                adSpend: 0,
+            };
+            existing.adSpend += (ad.amount || 0);
+            sourceMap.set(targetSource, existing);
+        }
+
+        for (const inv of invoices) {
+            const rev = inv.total || 0;
+            totalRevenue += rev;
+
+            // Compute cogs if already recorded or fallback
+            let cogs = inv.totalCogs || 0;
+            if (!cogs && Array.isArray(inv.items)) {
+                cogs = inv.items.reduce((s: number, it: any) => s + ((it?.costPrice || 0) * (it?.quantity || 1)), 0);
+            }
+            totalCogs += cogs;
+
+            const packaging = typeof inv.packagingCost === 'number' ? inv.packagingCost : config.defaultPackagingCost;
+            totalPackaging += packaging;
+
+            let fee = typeof inv.paymentProcessingFee === 'number' ? inv.paymentProcessingFee : 0;
+            if (!fee && config.defaultCardSwipeFeePct > 0 && Array.isArray(inv.payments)) {
+                const onlineAmount = inv.payments.filter((p: any) => p.method === 'online').reduce((s: number, p: any) => s + (p.amount || 0), 0);
+                fee = Number(((onlineAmount * (config.defaultCardSwipeFeePct / 100))).toFixed(2));
+            }
+            totalProcessingFees += fee;
+
+            const margin = typeof inv.netContributionMargin === 'number' && inv.netContributionMargin > 0
+                ? inv.netContributionMargin
+                : Math.max(0, rev - cogs - packaging - fee);
+            totalNetContributionMargin += margin;
+
+            const isNew = inv.isNewCustomer !== undefined ? inv.isNewCustomer : (inv.visitNumber === 1 || !inv.visitNumber);
+            if (isNew) {
+                newCustomerRevenue += rev;
+                newCustomerCount += 1;
+                newCustomerContributionMargin += margin;
+            } else {
+                repeatCustomerRevenue += rev;
+                repeatCustomerCount += 1;
+                repeatCustomerContributionMargin += margin;
+            }
+
+            const src = (inv.acquisitionSource as string) || (isNew ? 'walk_by' : 'repeat');
+            const srcEntry = sourceMap.get(src) || {
+                source: src,
+                revenue: 0,
+                invoicesCount: 0,
+                newCustomerCount: 0,
+                cogs: 0,
+                packaging: 0,
+                fees: 0,
+                contributionMargin: 0,
+                adSpend: 0,
+            };
+            srcEntry.revenue += rev;
+            srcEntry.invoicesCount += 1;
+            if (isNew) srcEntry.newCustomerCount += 1;
+            srcEntry.cogs += cogs;
+            srcEntry.packaging += packaging;
+            srcEntry.fees += fee;
+            srcEntry.contributionMargin += margin;
+            sourceMap.set(src, srcEntry);
+        }
+
+        const totalInvoices = invoices.length;
+        const contributionMarginPct = totalRevenue > 0 ? Number(((totalNetContributionMargin / totalRevenue) * 100).toFixed(1)) : 0;
+        const aov = totalInvoices > 0 ? Math.round(totalRevenue / totalInvoices) : 0;
+        const breakevenCac = Math.round(aov * (contributionMarginPct / 100));
+
+        // Source List with CAC and ROAS
+        const sourcesList = Array.from(sourceMap.values()).map(s => {
+            const netContribution = Math.round(s.contributionMargin);
+            const channelNetProfit = Math.round(netContribution - s.adSpend);
+            const roas = s.adSpend > 0 ? Number((s.revenue / s.adSpend).toFixed(2)) : null;
+            const cac = (s.adSpend > 0 && s.newCustomerCount > 0) ? Math.round(s.adSpend / s.newCustomerCount) : (s.adSpend > 0 ? Math.round(s.adSpend) : 0);
+            return {
+                ...s,
+                revenue: Math.round(s.revenue),
+                cogs: Math.round(s.cogs),
+                contributionMargin: netContribution,
+                adSpend: Math.round(s.adSpend),
+                channelNetProfit,
+                roas,
+                cac,
+                marginPct: s.revenue > 0 ? Number(((netContribution / s.revenue) * 100).toFixed(1)) : 0,
+            };
+        }).sort((a, b) => b.revenue - a.revenue);
+
+        // Retail Cash Conversion Cycle (CCC) Calculation
+        const totalFrameInventoryValue = frameStock.reduce((sum, f) => sum + ((f.costPrice || 0) * (f.stock || 0)), 0);
+        const totalFragranceInventoryValue = fragStock.reduce((sum, fr) => {
+            let val = (fr.costPrice || 0) * (fr.stock || 0);
+            if (Array.isArray(fr.variants)) {
+                val += fr.variants.reduce((vSum, v) => vSum + ((v.costPrice || fr.costPrice || 0) * (v.stock || 0)), 0);
+            }
+            return sum + val;
+        }, 0);
+        const totalStockValue = totalFrameInventoryValue + totalFragranceInventoryValue || 500000;
+
+        const daysInPeriod = Math.max(1, Math.round((endDate.getTime() - startDate.getTime()) / 86400000));
+        const annualizedCogs = totalCogs > 0 ? (totalCogs / daysInPeriod) * 365 : 600000;
+        const dio = Math.round((totalStockValue / (annualizedCogs || 1)) * 365);
+
+        const outstandingDues = invoices.reduce((sum, inv) => {
+            const paid = Array.isArray(inv.payments) ? inv.payments.reduce((pSum: number, p: any) => pSum + (p.amount || 0), 0) : 0;
+            return sum + Math.max(0, (inv.total || 0) - paid);
+        }, 0);
+        const annualizedSales = totalRevenue > 0 ? (totalRevenue / daysInPeriod) * 365 : 1200000;
+        const dso = Math.max(1, Math.round((outstandingDues / (annualizedSales || 1)) * 365));
+
+        const totalPayables = vendorBills.reduce((s, v) => s + Math.max(0, (v.totalAmount || 0) - (v.paidAmount || 0)), 0) +
+            obligations.reduce((s, o) => s + Math.max(0, (o.originalAmount || 0) - (o.alreadyPaid || 0)), 0);
+        const dpo = Math.max(15, Math.round((totalPayables / (annualizedCogs || 1)) * 365));
+
+        const ccc = Math.round(dio + dso - dpo);
+
+        res.json({
+            timeframe,
+            period: {
+                from: startDate.toISOString(),
+                to: endDate.toISOString(),
+                days: daysInPeriod,
+            },
+            config,
+            kpis: {
+                totalRevenue: Math.round(totalRevenue),
+                totalCogs: Math.round(totalCogs),
+                totalPackaging: Math.round(totalPackaging),
+                totalProcessingFees: Math.round(totalProcessingFees),
+                netContributionMargin: Math.round(totalNetContributionMargin),
+                contributionMarginPct,
+                totalInvoices,
+                aov,
+                breakevenCac,
+            },
+            customerSplit: {
+                newCustomers: {
+                    revenue: Math.round(newCustomerRevenue),
+                    count: newCustomerCount,
+                    contributionMargin: Math.round(newCustomerContributionMargin),
+                    revenuePct: totalRevenue > 0 ? Number(((newCustomerRevenue / totalRevenue) * 100).toFixed(1)) : 0,
+                    aov: newCustomerCount > 0 ? Math.round(newCustomerRevenue / newCustomerCount) : 0,
+                },
+                repeatCustomers: {
+                    revenue: Math.round(repeatCustomerRevenue),
+                    count: repeatCustomerCount,
+                    contributionMargin: Math.round(repeatCustomerContributionMargin),
+                    revenuePct: totalRevenue > 0 ? Number(((repeatCustomerRevenue / totalRevenue) * 100).toFixed(1)) : 0,
+                    aov: repeatCustomerCount > 0 ? Math.round(repeatCustomerRevenue / repeatCustomerCount) : 0,
+                },
+            },
+            sources: sourcesList,
+            cashConversionCycle: {
+                dio: Math.min(365, dio),
+                dso: Math.min(60, dso),
+                dpo: Math.min(180, dpo),
+                ccc: Math.min(365, ccc),
+                totalStockValue: Math.round(totalStockValue),
+                outstandingDues: Math.round(outstandingDues),
+                totalPayables: Math.round(totalPayables),
+            },
         });
     } catch (error) {
         next(error);
