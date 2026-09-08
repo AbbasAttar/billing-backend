@@ -120,13 +120,14 @@ export const deleteRecurring = async (req: Request, res: Response, next: NextFun
 };
 
 // POST /api/recurring-expenses/:id/mark-paid
-// 1-Click marks recurring expense as paid for the current cycle and records store expense
+// Marks recurring expense as paid (full or partial) for the current cycle and records store expense
 export const markPaidForCurrentMonth = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { paymentMethod, amount, note } = req.body as {
+    const { paymentMethod, amount, note, advanceSchedule } = req.body as {
       paymentMethod?: string;
       amount?: number;
       note?: string;
+      advanceSchedule?: boolean;
     };
 
     const item = await RecurringExpense.findById(req.params.id);
@@ -144,20 +145,39 @@ export const markPaidForCurrentMonth = async (req: Request, res: Response, next:
     else expCategory = 'miscellaneous';
 
     // 1. Create store expense entry
+    const isPartial = paidAmount < item.amount;
+    const monthYear = new Date().toLocaleString('en-IN', { month: 'short', year: 'numeric' });
+    const defaultNote = isPartial
+      ? `Partial fixed payment: ${item.name} (₹${paidAmount.toLocaleString('en-IN')})`
+      : `Paid recurring: ${item.name} (${monthYear})`;
+
     const createdExpense = await Expense.create({
       date: new Date(),
       amount: paidAmount,
       category: expCategory,
       paymentMethod: method,
       vendorName: item.vendorName || item.name,
-      note: note || `Paid recurring: ${item.name}`,
+      note: note || defaultNote,
     });
 
-    // 2. Advance nextDueDate to next schedule
-    item.nextDueDate = computeNextDueDate(item.frequency, item.nextDueDate, item.dayOfMonth);
+    // 2. Track total repaid for loans / debts
+    const currentRepaid = (item.totalRepaidAmount || 0) + paidAmount;
+    item.totalRepaidAmount = currentRepaid;
+
+    if (item.totalRepaymentAmount && item.totalRepaymentAmount > 0 && currentRepaid >= item.totalRepaymentAmount) {
+      item.repaymentStatus = 'completed';
+      item.isActive = false;
+    }
+
+    // 3. Advance nextDueDate if advanceSchedule is true (default true if full payment, or if explicitly requested)
+    const shouldAdvance = advanceSchedule !== undefined ? Boolean(advanceSchedule) : !isPartial;
+    if (shouldAdvance) {
+      item.nextDueDate = computeNextDueDate(item.frequency, item.nextDueDate, item.dayOfMonth);
+    }
+
     await item.save();
 
-    return ok(res, { item, expense: createdExpense }, 'Recurring bill marked as paid');
+    return ok(res, { item, expense: createdExpense }, 'Recurring bill payment recorded');
   } catch (err) { next(err); }
 };
 
