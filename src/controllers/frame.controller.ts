@@ -4,8 +4,8 @@ import { InvoiceItem } from '../models/InvoiceItem.model';
 
 function buildFrameQuery(q: string) {
   if (!q) return {};
-  // Exact 10-digit code → search by frameCode first
-  if (/^\d{10}$/.test(q)) {
+  // Exact 10-16 digit code → search by frameCode first
+  if (/^\d{10,16}$/.test(q)) {
     return { $or: [{ frameCode: q }, { name: { $regex: q, $options: 'i' } }] };
   }
   return { $or: [

@@ -399,7 +399,29 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         doc.leftAxis = (item as any).leftAxis ?? null;
         doc.leftAddition = (item as any).leftAddition ?? null;
         // Fulfillment tracking
-        doc.fulfillmentSource = (item as any).fulfillmentSource || 'stock';
+        const sendToWholesaler = (item as any).sendToWholesaler;
+        const isAlreadyOrdered = !!(
+          (item as any).alreadyOrdered ||
+          (item as any).skipWholesalerQueue ||
+          (item as any).fulfillmentSource === 'already_ordered'
+        );
+        const isCounterStock = (item as any).fulfillmentSource === 'stock' && sendToWholesaler === false;
+
+        if (isAlreadyOrdered) {
+          doc.fulfillmentSource = 'stock';
+          doc.sentToWholesaler = true;
+          doc.labStatus = 'fitted';
+          doc.wholesalerOrderDate = new Date();
+        } else if (isCounterStock) {
+          doc.fulfillmentSource = 'stock';
+          doc.sentToWholesaler = false;
+          doc.labStatus = 'fitted';
+        } else {
+          // Default for optical lenses: send number to wholesaler queue
+          doc.fulfillmentSource = (item as any).fulfillmentSource || 'ordered';
+          doc.sentToWholesaler = (item as any).sentToWholesaler || false;
+          doc.labStatus = (item as any).labStatus || 'pending';
+        }
         doc.requestedQty = (item as any).requestedQty ?? item.quantity;
         doc.fulfilledQty = (item as any).fulfilledQty ?? item.quantity;
       }

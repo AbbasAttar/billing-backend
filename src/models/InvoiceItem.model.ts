@@ -41,6 +41,9 @@ export interface IInvoiceItem extends Document {
   fulfilledQty?: number | null;
   sentToWholesaler?: boolean;
   wholesalerOrderDate?: Date | null;
+  labStatus?: 'pending' | 'sent' | 'received' | 'fitted' | 'cancelled';
+  labReceivedDate?: Date | null;
+  labFittedDate?: Date | null;
   // Structured prescription fields
   rightSpherical?: number | null;
   rightCylinder?: number | null;
@@ -94,6 +97,9 @@ const InvoiceItemSchema = new Schema<IInvoiceItem>(
     fulfilledQty: { type: Number, default: null },
     sentToWholesaler: { type: Boolean, default: false },
     wholesalerOrderDate: { type: Date, default: null },
+    labStatus: { type: String, enum: ['pending', 'sent', 'received', 'fitted', 'cancelled'], default: 'pending' },
+    labReceivedDate: { type: Date, default: null },
+    labFittedDate: { type: Date, default: null },
     // Structured prescription fields
     rightSpherical: { type: Number, default: null },
     rightCylinder: { type: Number, default: null },

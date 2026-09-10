@@ -6,22 +6,42 @@ import { ok, fail } from '../utils/response';
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-// Parses a 10-digit frame code into its components.
-// Format: CC PPPP MM YY  (all digits)
+// Parses a frame code into its components.
+// Format: CC PPPP MM YY [BBBB] [QQ]  (10, 14, or 16 digits)
+// CC: 2-digit company code
+// PPPP: 4-digit cost price
+// MM: 2-digit purchase month (01-12)
+// YY: 2-digit purchase year (e.g. 26 -> 2026)
+// BBBB: 4-digit brand rate / MRP (optional)
+// QQ: 2-digit count / quantity (optional)
 function parseFrameCode(code: string): {
   companyCode: string;
   costPrice: number;
   month: number;
   year: number;
+  brandRate?: number;
+  sellPrice?: number;
+  count?: number;
 } | null {
-  if (!/^\d{10}$/.test(code)) return null;
+  if (!/^\d{10}$/.test(code) && !/^\d{14}$/.test(code) && !/^\d{16}$/.test(code)) return null;
   const companyCode = code.slice(0, 2);
   const costPrice   = parseInt(code.slice(2, 6), 10);
   const month       = parseInt(code.slice(6, 8), 10);
   const year        = 2000 + parseInt(code.slice(8, 10), 10);
   if (month < 1 || month > 12) return null;
   if (costPrice <= 0) return null;
-  return { companyCode, costPrice, month, year };
+
+  let brandRate: number | undefined;
+  let count: number | undefined;
+
+  if (code.length >= 14) {
+    brandRate = parseInt(code.slice(10, 14), 10);
+  }
+  if (code.length === 16) {
+    count = parseInt(code.slice(14, 16), 10);
+  }
+
+  return { companyCode, costPrice, month, year, brandRate, sellPrice: brandRate, count };
 }
 
 // ── DECODE (no auth needed, just a helper) ────────────────────────────────────
@@ -30,7 +50,7 @@ export const decode = async (req: Request, res: Response, next: NextFunction) =>
   try {
     const code = String(req.params.code ?? '').trim();
     const parsed = parseFrameCode(code);
-    if (!parsed) return fail(res, 'Invalid frame code — must be exactly 10 digits (CCPPPPMMYY)', 400);
+    if (!parsed) return fail(res, 'Invalid frame code — must be 10, 14, or 16 digits (CC PPPP MM YY [BBBB] [QQ])', 400);
 
     const company = await FrameCompany.findOne({ code: parsed.companyCode });
     return ok(res, {
@@ -43,6 +63,10 @@ export const decode = async (req: Request, res: Response, next: NextFunction) =>
       monthLabel:   MONTH_NAMES[parsed.month - 1],
       suggestedSellMin: Math.round(parsed.costPrice * 3),
       suggestedSellMax: Math.round(parsed.costPrice * 3.5),
+      brandRate:    parsed.brandRate ?? null,
+      mrp:          parsed.brandRate ?? null,
+      sellPrice:    parsed.sellPrice ?? null,
+      quantity:     parsed.count ?? null,
       knownCompany: !!company,
     });
   } catch (e) { next(e); }
@@ -68,26 +92,29 @@ export const create = async (req: Request, res: Response, next: NextFunction) =>
   try {
     const { frameCode, sellPrice, quantity, reorderLevel } = req.body as {
       frameCode:    string;
-      sellPrice:    number;
+      sellPrice?:   number;
       quantity?:    number;
       reorderLevel?: number;
     };
 
     const code = String(frameCode ?? '').trim();
     const parsed = parseFrameCode(code);
-    if (!parsed) return fail(res, 'Invalid frame code — must be exactly 10 digits (CCPPPPMMYY)', 400);
-    if (typeof sellPrice !== 'number' || sellPrice < 0) return fail(res, 'sellPrice must be a non-negative number', 400);
+    if (!parsed) return fail(res, 'Invalid frame code — must be 10, 14, or 16 digits (CC PPPP MM YY [SSSS] [QQ])', 400);
+
+    const finalSellPrice = typeof sellPrice === 'number' && sellPrice >= 0
+      ? sellPrice
+      : (parsed.sellPrice ?? Math.round(parsed.costPrice * 3));
 
     const company = await FrameCompany.findOne({ code: parsed.companyCode });
     if (!company) return fail(res, `Unknown company code "${parsed.companyCode}" — add it in Settings → Frame Companies first`, 400);
 
-    const qty = typeof quantity === 'number' ? quantity : 0;
+    const qty = typeof quantity === 'number' ? quantity : (parsed.count ?? 0);
 
     // If same code already exists, increment quantity instead of failing
     const existing = await FrameStock.findOne({ frameCode: code });
     if (existing) {
       existing.quantity += qty;
-      existing.sellPrice = sellPrice;
+      existing.sellPrice = finalSellPrice;
       await existing.save();
       return ok(res, existing, 'Frame stock quantity updated');
     }
@@ -97,7 +124,7 @@ export const create = async (req: Request, res: Response, next: NextFunction) =>
       companyCode:   parsed.companyCode,
       companyName:   company.name,
       costPrice:     parsed.costPrice,
-      sellPrice,
+      sellPrice:     finalSellPrice,
       purchaseMonth: parsed.month,
       purchaseYear:  parsed.year,
       quantity:      qty,
