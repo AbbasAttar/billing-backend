@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import mongoose from 'mongoose';
 import * as XLSX from 'xlsx';
 import { Coating } from '../models/Coating.model';
-import { Invoice } from '../models/Invoice.model';
+import { Invoice, IPayment } from '../models/Invoice.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
 import { OpticalLens } from '../models/OpticalLens.model';
 import { Prescription } from '../models/Prescription.model';
@@ -618,7 +618,13 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
 
 export const updateInvoice = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { discount, billDate } = req.body as { discount?: number; billDate?: string };
+    const { discount, billDate, payments, packagingCost, acquisitionSource } = req.body as {
+      discount?: number;
+      billDate?: string;
+      payments?: Array<{ amount: number; method: 'cash' | 'online'; date?: string | Date; writeoff?: number }>;
+      packagingCost?: number;
+      acquisitionSource?: any;
+    };
 
     const invoice = await Invoice.findById(req.params.id);
     if (!invoice) {
@@ -635,26 +641,96 @@ export const updateInvoice = async (req: Request, res: Response, next: NextFunct
       invoice.billDate = d;
     }
 
+    if (acquisitionSource !== undefined) {
+      invoice.acquisitionSource = acquisitionSource;
+    }
+
+    if (packagingCost !== undefined && typeof packagingCost === 'number' && packagingCost >= 0) {
+      invoice.packagingCost = packagingCost;
+    }
+
     if (discount !== undefined) {
       if (typeof discount !== 'number' || discount < 0) {
         res.status(400).json({ message: 'Discount must be a non-negative number.' });
         return;
       }
-      if (discount >= invoice.subtotal) {
+      if (discount >= invoice.subtotal && invoice.subtotal > 0) {
         res.status(400).json({ message: 'Discount cannot equal or exceed the subtotal.' });
         return;
       }
       invoice.discount = discount;
-      invoice.total = invoice.subtotal - discount;
-
-      // Recalculate billClearDate after total changes
-      const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
-      if (totalPaid >= invoice.total) {
-        invoice.billClearDate = invoice.payments[invoice.payments.length - 1]?.date ?? new Date();
-      } else {
-        invoice.billClearDate = undefined;
-      }
+      invoice.total = Math.max(0, invoice.subtotal - discount);
     }
+
+    if (payments !== undefined) {
+      if (!Array.isArray(payments)) {
+        res.status(400).json({ message: 'payments must be an array.' });
+        return;
+      }
+
+      const updatedPayments: IPayment[] = [];
+      for (const p of payments) {
+        if (typeof p.amount !== 'number' || p.amount < 0) {
+          res.status(400).json({ message: 'Payment amount must be a non-negative number.' });
+          return;
+        }
+        if (!p.method || !['cash', 'online'].includes(p.method)) {
+          res.status(400).json({ message: "Payment method must be 'cash' or 'online'." });
+          return;
+        }
+        const writeoff = typeof p.writeoff === 'number' && p.writeoff > 0 ? p.writeoff : 0;
+        if (p.amount > 0 || writeoff > 0) {
+          const pDate = p.date ? new Date(p.date) : invoice.billDate ?? new Date();
+          if (isNaN(pDate.getTime())) {
+            res.status(400).json({ message: 'Invalid payment date.' });
+            return;
+          }
+          updatedPayments.push({
+            date: pDate,
+            amount: p.amount,
+            method: p.method,
+            writeoff,
+          });
+        }
+      }
+
+      const totalPaid = updatedPayments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
+      if (totalPaid > invoice.total + 0.01) {
+        res.status(400).json({
+          message: `Total payments (₹${totalPaid.toLocaleString('en-IN')}) cannot exceed invoice total (₹${invoice.total.toLocaleString('en-IN')}).`,
+        });
+        return;
+      }
+
+      invoice.payments = updatedPayments as any;
+    }
+
+    // Recalculate billClearDate after total or payments change
+    const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
+    if (totalPaid >= invoice.total && invoice.total > 0) {
+      invoice.billClearDate = invoice.payments[invoice.payments.length - 1]?.date ?? invoice.billDate ?? new Date();
+    } else if (invoice.total === 0 && totalPaid === 0) {
+      invoice.billClearDate = invoice.billDate ?? new Date();
+    } else {
+      invoice.billClearDate = undefined;
+    }
+
+    // Recalculate payment fee and contribution margins
+    const onlinePaid = invoice.payments
+      .filter((p) => p.method === 'online')
+      .reduce((s, p) => s + p.amount, 0);
+
+    const paymentProcessingFee = Number((onlinePaid * (0.0195 * 1.18)).toFixed(2));
+    invoice.paymentProcessingFee = paymentProcessingFee;
+    const pkgCost = invoice.packagingCost ?? 0;
+    const cogs = invoice.totalCogs ?? 0;
+    const netContributionMargin = Math.max(
+      0,
+      Number((invoice.total - cogs - pkgCost - paymentProcessingFee).toFixed(2))
+    );
+    invoice.netContributionMargin = netContributionMargin;
+    invoice.contributionMarginPct =
+      invoice.total > 0 ? Number(((netContributionMargin / invoice.total) * 100).toFixed(2)) : 0;
 
     await invoice.save();
     const populated = await populateInvoice(Invoice.findById(invoice._id));

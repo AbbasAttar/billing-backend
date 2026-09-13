@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { Frame } from '../models/Frame.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
+import { calculateDefaultFramePricing } from '../utils/pricing.utils';
 
 function buildFrameQuery(q: string) {
   if (!q) return {};
@@ -64,7 +65,20 @@ export const createFrame = async (req: Request, res: Response, next: NextFunctio
 
 export const updateFrame = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const frame = await Frame.findByIdAndUpdate(req.params.id, req.body, {
+    const updateData = { ...req.body };
+    const costPrice = Number(updateData.costPrice);
+    if (costPrice && costPrice > 0) {
+      const defaults = calculateDefaultFramePricing(costPrice, updateData.mrp || updateData.sellPrice);
+      if (!updateData.tier) updateData.tier = defaults.tier;
+      if (updateData.storePrice === undefined || updateData.storePrice === null || updateData.storePrice === 0) {
+        updateData.storePrice = defaults.storePrice;
+      }
+      if (updateData.floorPrice === undefined || updateData.floorPrice === null || updateData.floorPrice === 0) {
+        updateData.floorPrice = defaults.floorPrice;
+      }
+    }
+
+    const frame = await Frame.findByIdAndUpdate(req.params.id, updateData, {
       new: true,
       runValidators: true,
     });

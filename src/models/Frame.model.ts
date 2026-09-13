@@ -1,5 +1,6 @@
 import mongoose, { Schema, Document } from 'mongoose';
 import { IWebFields, WebFieldsSchema } from './webFields.schema';
+import { calculateDefaultFramePricing } from '../utils/pricing.utils';
 
 export interface IFrame extends Document {
   companyName: string;
@@ -18,6 +19,8 @@ export interface IFrame extends Document {
   isArchived?: boolean;
   archivedAt?: Date;
   web?: IWebFields;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
 const FrameSchema = new Schema<IFrame>(
@@ -41,6 +44,21 @@ const FrameSchema = new Schema<IFrame>(
   },
   { timestamps: true }
 );
+
+FrameSchema.pre('save', function (this: IFrame) {
+  if (this.costPrice && this.costPrice > 0) {
+    const defaults = calculateDefaultFramePricing(this.costPrice, this.mrp || this.sellPrice);
+    if (!this.tier) {
+      this.tier = defaults.tier;
+    }
+    if (this.storePrice === undefined || this.storePrice === null || this.storePrice === 0) {
+      this.storePrice = defaults.storePrice;
+    }
+    if (this.floorPrice === undefined || this.floorPrice === null || this.floorPrice === 0) {
+      this.floorPrice = defaults.floorPrice;
+    }
+  }
+});
 
 FrameSchema.index({ name: 'text', companyName: 'text', houseName: 'text' });
 FrameSchema.index({ frameCode: 1 }, { sparse: true });

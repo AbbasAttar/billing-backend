@@ -4,6 +4,7 @@ import {
   getMonthlyTargets,
   getCurrentMonthTarget,
   getMonthlyTargetByMonth,
+  getSuggestedMonthlyTarget,
   deleteMonthlyTarget,
 } from '../controllers/monthlyTarget.controller';
 
@@ -11,6 +12,7 @@ const router = Router();
 
 router.get('/', getMonthlyTargets);
 router.get('/current', getCurrentMonthTarget);
+router.get('/suggested/:month', getSuggestedMonthlyTarget);
 router.get('/:month', getMonthlyTargetByMonth);
 router.put('/:month', upsertMonthlyTarget);
 router.delete('/:id', deleteMonthlyTarget);

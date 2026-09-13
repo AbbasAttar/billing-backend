@@ -20,6 +20,8 @@ export interface IFragrance extends Document {
   isArchived?: boolean;
   archivedAt?: Date;
   web?: IWebFields;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
 const FragranceVariantSchema = new Schema<IFragranceVariant>(

@@ -1,6 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import { PurchaseEntry } from '../models/PurchaseEntry.model';
 import { LensStock } from '../models/LensStock.model';
+import { InvoiceItem } from '../models/InvoiceItem.model';
+import { Prescription } from '../models/Prescription.model';
 import { LENS_TYPES, LENS_MATERIALS, LENS_COLORS } from '../models/LensPricing.model';
 
 // ── Validation ────────────────────────────────────────────────────────────────
@@ -273,6 +275,325 @@ export const markReceived = async (
     }
 
     res.json({ count: updated.length, entries: updated });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ── PATCH /api/purchases/:id — update single purchase entry (e.g. costPerPair, supplier, notes, qty) ──
+
+export const updatePurchaseEntry = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { costPerPair, supplier, notes, qty, lensType, material, coating, color, eye, sph, cyl, add } = req.body;
+
+    const entry = await PurchaseEntry.findById(id);
+    if (!entry) {
+      res.status(404).json({ message: 'Purchase entry not found.' });
+      return;
+    }
+
+    if (costPerPair !== undefined) {
+      const parsedCost = costPerPair === null || costPerPair === '' ? null : Number(costPerPair);
+      if (parsedCost !== null && (isNaN(parsedCost) || parsedCost < 0)) {
+        res.status(400).json({ message: 'costPerPair must be a non-negative number.' });
+        return;
+      }
+      entry.costPerPair = parsedCost;
+    }
+
+    if (supplier !== undefined) entry.supplier = supplier ? String(supplier).trim() : null;
+    if (notes !== undefined) entry.notes = notes ? String(notes).trim() : null;
+    if (qty !== undefined) {
+      const parsedQty = Number(qty);
+      if (isNaN(parsedQty) || parsedQty <= 0) {
+        res.status(400).json({ message: 'qty must be a positive number.' });
+        return;
+      }
+      entry.qty = parsedQty;
+    }
+
+    if (lensType !== undefined && (lensType === null || LENS_TYPES.includes(lensType))) {
+      entry.lensType = lensType;
+    }
+    if (material !== undefined && (material === null || LENS_MATERIALS.includes(material))) {
+      entry.material = material;
+    }
+    if (coating !== undefined) entry.coating = coating ? String(coating).trim() : null;
+    if (color !== undefined && (color === null || LENS_COLORS.includes(color))) {
+      entry.color = color;
+    }
+    if (eye !== undefined && EYE_VALUES.includes(eye)) entry.eye = eye;
+    if (sph !== undefined) entry.sph = sph === null || sph === '' ? null : Number(sph);
+    if (cyl !== undefined) entry.cyl = cyl === null || cyl === '' ? 0 : Number(cyl);
+    if (add !== undefined) entry.add = add === null || add === '' ? null : Number(add);
+
+    await entry.save();
+
+    // If costPerPair was updated and complete SKU is known, update LensStock lastCost
+    if (entry.costPerPair !== null && entry.lensType && entry.material && entry.coating && entry.color && entry.sph !== null) {
+      await LensStock.findOneAndUpdate(
+        {
+          lensType: entry.lensType,
+          material: entry.material,
+          coating: entry.coating,
+          color: entry.color,
+          sph: entry.sph,
+          cyl: typeof entry.cyl === 'number' ? entry.cyl : 0,
+          add: typeof entry.add === 'number' ? entry.add : null,
+        },
+        {
+          $set: { lastCost: entry.costPerPair },
+          $setOnInsert: { reorderLevel: 2, costPrice: entry.costPerPair },
+        },
+        { upsert: true, new: true, runValidators: false },
+      );
+    }
+
+    res.json({ message: 'Purchase entry updated successfully', entry });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ── POST /api/purchases/populate-all — populate from sales, customer Rx & lab orders ──
+
+export const populateAllLensSources = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const alreadyImported = new Set(
+      (await PurchaseEntry.distinct('importedFrom', { importedFrom: { $ne: null } })).map(String)
+    );
+
+    let createdCount = 0;
+    let skippedCount = 0;
+
+    // 1. Process InvoiceItems
+    const invoiceItems = await InvoiceItem.find({
+      $or: [
+        { lensType: { $exists: true, $ne: null } },
+        { opticalLens: { $exists: true, $ne: null } },
+        { rightEyeNumber: { $exists: true, $ne: null } },
+        { leftEyeNumber: { $exists: true, $ne: null } },
+        { spherical: { $exists: true, $ne: null } },
+        { rightSpherical: { $exists: true, $ne: null } },
+        { leftSpherical: { $exists: true, $ne: null } },
+        { sentToWholesaler: true },
+        { wholesalerOrderDate: { $exists: true, $ne: null } },
+      ],
+    }).lean();
+
+    for (const item of invoiceItems) {
+      const id = String(item._id);
+      if (alreadyImported.has(id) || alreadyImported.has(`${id}_re`) || alreadyImported.has(`${id}_le`)) {
+        skippedCount++;
+        continue;
+      }
+
+      const rawType = `${item.lensType || item.lensCategory || ''}`.toLowerCase();
+      const rawMat = `${item.lensMaterial || ''}`.toLowerCase();
+      const rawCol = `${item.lensColor || ''}`.toLowerCase();
+      const rawCoat = `${item.lensCoating || ''}`.toLowerCase();
+
+      const lensType = rawType.includes('prog')
+        ? 'Progressive'
+        : (rawType.includes('bi') || rawType.includes('kt'))
+        ? 'Bifocal'
+        : 'Single Vision';
+      const material = rawMat.includes('poly') || rawMat.includes('pc')
+        ? 'Polycarbonate'
+        : rawMat.includes('glass')
+        ? 'Glass'
+        : 'Fiber';
+      const color = (rawCol.includes('photo') || rawCol.includes('pg') || rawCol.includes('pb'))
+        ? 'Photo Chromatic'
+        : rawCol.includes('polar')
+        ? 'Polarized'
+        : rawCol.includes('tint')
+        ? 'Tinted'
+        : 'White';
+      const coating = (item.lensCoating && item.lensCoating.trim()) ||
+        (rawCoat.includes('blue') || rawCoat.includes('bb')
+          ? 'Blue Block'
+          : rawCoat.includes('hc') || rawCoat.includes('hard')
+          ? 'Hard Coat'
+          : 'Anti-Reflective');
+
+      const qty = item.quantity || 1;
+      const costPerPair = typeof item.costPrice === 'number' && item.costPrice > 0 ? item.costPrice : null;
+      const purchaseDate = item.wholesalerOrderDate || (item as any).createdAt || new Date();
+      const supplier = item.sentToWholesaler ? 'Wholesale Lab' : null;
+      const notes = item.lensLabel || (item.userName ? `Patient: ${item.userName}` : 'Sales / Prescription Lens');
+
+      // Check if both eyes have distinct prescription
+      const hasDistinctEyes = (
+        (item.rightSpherical !== null && item.rightSpherical !== undefined && item.leftSpherical !== null && item.leftSpherical !== undefined && item.rightSpherical !== item.leftSpherical) ||
+        (item.rightCylinder !== null && item.rightCylinder !== undefined && item.leftCylinder !== null && item.leftCylinder !== undefined && item.rightCylinder !== item.leftCylinder) ||
+        (item.rightEyeNumber && item.leftEyeNumber && item.rightEyeNumber !== item.leftEyeNumber)
+      );
+
+      if (hasDistinctEyes) {
+        // RE entry
+        await PurchaseEntry.create({
+          status: 'received',
+          lensType,
+          material,
+          coating,
+          color,
+          eye: 'right',
+          sph: item.rightSpherical ?? item.spherical ?? 0,
+          cyl: item.rightCylinder ?? item.cylinder ?? 0,
+          add: item.rightAddition ?? item.addition ?? null,
+          qty,
+          costPerPair: costPerPair !== null ? Math.round((costPerPair / 2) * 100) / 100 : null,
+          supplier,
+          notes: `${notes} (RE)`,
+          purchaseDate,
+          wholesalerOrderDate: item.wholesalerOrderDate ?? null,
+          importedFrom: `${id}_re`,
+        });
+        alreadyImported.add(`${id}_re`);
+        createdCount++;
+
+        // LE entry
+        await PurchaseEntry.create({
+          status: 'received',
+          lensType,
+          material,
+          coating,
+          color,
+          eye: 'left',
+          sph: item.leftSpherical ?? item.spherical ?? 0,
+          cyl: item.leftCylinder ?? item.cylinder ?? 0,
+          add: item.leftAddition ?? item.addition ?? null,
+          qty,
+          costPerPair: costPerPair !== null ? Math.round((costPerPair / 2) * 100) / 100 : null,
+          supplier,
+          notes: `${notes} (LE)`,
+          purchaseDate,
+          wholesalerOrderDate: item.wholesalerOrderDate ?? null,
+          importedFrom: `${id}_le`,
+        });
+        alreadyImported.add(`${id}_le`);
+        createdCount++;
+      } else {
+        const eyeVal = item.eye === 'left' ? 'left' : item.eye === 'right' ? 'right' : 'both';
+        const sphVal = item.eye === 'left' ? (item.leftSpherical ?? item.spherical ?? 0) : (item.rightSpherical ?? item.spherical ?? 0);
+        const cylVal = item.eye === 'left' ? (item.leftCylinder ?? item.cylinder ?? 0) : (item.rightCylinder ?? item.cylinder ?? 0);
+        const addVal = item.eye === 'left' ? (item.leftAddition ?? item.addition ?? null) : (item.rightAddition ?? item.addition ?? null);
+
+        await PurchaseEntry.create({
+          status: 'received',
+          lensType,
+          material,
+          coating,
+          color,
+          eye: eyeVal,
+          sph: sphVal,
+          cyl: cylVal,
+          add: addVal,
+          qty,
+          costPerPair,
+          supplier,
+          notes,
+          purchaseDate,
+          wholesalerOrderDate: item.wholesalerOrderDate ?? null,
+          importedFrom: id,
+        });
+        alreadyImported.add(id);
+        createdCount++;
+      }
+    }
+
+    // 2. Process Prescriptions not linked to invoice items
+    const prescriptions = await Prescription.find({}).lean();
+    for (const rx of prescriptions) {
+      const rxId = String(rx._id);
+      if (alreadyImported.has(`rx_${rxId}`) || alreadyImported.has(`rx_${rxId}_re`) || alreadyImported.has(`rx_${rxId}_le`)) {
+        continue;
+      }
+
+      const hasRE = rx.rightSpherical !== undefined || rx.rightCylinder !== undefined;
+      const hasLE = rx.leftSpherical !== undefined || rx.leftCylinder !== undefined;
+
+      if (hasRE && hasLE && (rx.rightSpherical !== rx.leftSpherical || rx.rightCylinder !== rx.leftCylinder)) {
+        await PurchaseEntry.create({
+          status: 'received',
+          lensType: 'Single Vision',
+          material: 'Fiber',
+          coating: 'Anti-Reflective',
+          color: 'White',
+          eye: 'right',
+          sph: rx.rightSpherical ?? 0,
+          cyl: rx.rightCylinder ?? 0,
+          add: rx.rightAddition ?? null,
+          qty: 1,
+          costPerPair: null,
+          supplier: null,
+          notes: `Prescription: ${rx.label || 'Customer Rx'} (RE)`,
+          purchaseDate: (rx as any).createdAt ?? new Date(),
+          importedFrom: `rx_${rxId}_re`,
+        });
+        alreadyImported.add(`rx_${rxId}_re`);
+        createdCount++;
+
+        await PurchaseEntry.create({
+          status: 'received',
+          lensType: 'Single Vision',
+          material: 'Fiber',
+          coating: 'Anti-Reflective',
+          color: 'White',
+          eye: 'left',
+          sph: rx.leftSpherical ?? 0,
+          cyl: rx.leftCylinder ?? 0,
+          add: rx.leftAddition ?? null,
+          qty: 1,
+          costPerPair: null,
+          supplier: null,
+          notes: `Prescription: ${rx.label || 'Customer Rx'} (LE)`,
+          purchaseDate: (rx as any).createdAt ?? new Date(),
+          importedFrom: `rx_${rxId}_le`,
+        });
+        alreadyImported.add(`rx_${rxId}_le`);
+        createdCount++;
+      } else if (hasRE || hasLE) {
+        await PurchaseEntry.create({
+          status: 'received',
+          lensType: 'Single Vision',
+          material: 'Fiber',
+          coating: 'Anti-Reflective',
+          color: 'White',
+          eye: hasRE ? 'right' : 'left',
+          sph: (hasRE ? rx.rightSpherical : rx.leftSpherical) ?? 0,
+          cyl: (hasRE ? rx.rightCylinder : rx.leftCylinder) ?? 0,
+          add: (hasRE ? rx.rightAddition : rx.leftAddition) ?? null,
+          qty: 1,
+          costPerPair: null,
+          supplier: null,
+          notes: `Prescription: ${rx.label || 'Customer Rx'}`,
+          purchaseDate: (rx as any).createdAt ?? new Date(),
+          importedFrom: `rx_${rxId}`,
+        });
+        alreadyImported.add(`rx_${rxId}`);
+        createdCount++;
+      }
+    }
+
+    const totalCount = await PurchaseEntry.countDocuments({});
+
+    res.json({
+      message: `Populated ${createdCount} lens entries from product sales, customer prescriptions, and lab orders.`,
+      createdCount,
+      skippedCount,
+      totalCount,
+    });
   } catch (error) {
     next(error);
   }
