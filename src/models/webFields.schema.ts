@@ -128,7 +128,7 @@ export const WebFieldsSchema = new Schema<IWebFields>(
       type: [{
         colors: { type: [{ name: { type: String, trim: true }, hex: { type: String, trim: true } }], default: [] },
         label:  { type: String, trim: true },
-        stock:  { type: Number, min: 0, default: 0 },
+        stock:  { type: Number, default: 0 },
       }],
       default: undefined,
       _id: false,

@@ -130,3 +130,193 @@ export const deleteFrame = async (req: Request, res: Response, next: NextFunctio
     next(error);
   }
 };
+
+// ── FRAME TRENDS ─────────────────────────────────────────────────────────────
+
+export const getFrameTrends = async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    // 1. Top sold frames
+    const topSoldRaw = await InvoiceItem.aggregate([
+      { $match: { frame: { $exists: true, $ne: null } } },
+      {
+        $group: {
+          _id: '$frame',
+          count: { $sum: '$quantity' },
+          totalRevenue: { $sum: { $multiply: ['$quantity', '$price'] } },
+        },
+      },
+      { $sort: { count: -1 } },
+      { $limit: 25 },
+      {
+        $lookup: {
+          from: 'frames',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'frameDoc',
+        },
+      },
+      { $unwind: '$frameDoc' },
+      {
+        $project: {
+          _id: 1,
+          companyName: '$frameDoc.companyName',
+          name: '$frameDoc.name',
+          type: { $ifNull: ['$frameDoc.type', 'Full Rim'] },
+          shape: { $ifNull: ['$frameDoc.web.shape', '—'] },
+          tier: '$frameDoc.tier',
+          currentStock: { $ifNull: ['$frameDoc.stock', 0] },
+          count: 1,
+          totalRevenue: { $round: ['$totalRevenue', 0] },
+        },
+      },
+    ]);
+
+    // 2. Low stock frames (stock <= 2, active)
+    const lowStock = await Frame.find({
+      isArchived: { $ne: true },
+      stock: { $lte: 2 },
+    })
+      .sort({ stock: 1, companyName: 1 })
+      .limit(50)
+      .lean();
+
+    // 3. Shape & Type distribution from sold frames
+    const shapeDistRaw = await InvoiceItem.aggregate([
+      { $match: { frame: { $exists: true, $ne: null } } },
+      {
+        $lookup: {
+          from: 'frames',
+          localField: 'frame',
+          foreignField: '_id',
+          as: 'frameDoc',
+        },
+      },
+      { $unwind: '$frameDoc' },
+      {
+        $group: {
+          _id: { $ifNull: ['$frameDoc.web.shape', 'Classic / Standard'] },
+          count: { $sum: '$quantity' },
+        },
+      },
+      { $sort: { count: -1 } },
+      { $limit: 10 },
+    ]);
+
+    const shapeDistribution = shapeDistRaw.map((d) => ({
+      shape: d._id || 'Classic',
+      count: d.count,
+    }));
+
+    const typeDistRaw = await InvoiceItem.aggregate([
+      { $match: { frame: { $exists: true, $ne: null } } },
+      {
+        $lookup: {
+          from: 'frames',
+          localField: 'frame',
+          foreignField: '_id',
+          as: 'frameDoc',
+        },
+      },
+      { $unwind: '$frameDoc' },
+      {
+        $group: {
+          _id: { $ifNull: ['$frameDoc.type', 'Full Rim'] },
+          count: { $sum: '$quantity' },
+        },
+      },
+      { $sort: { count: -1 } },
+    ]);
+
+    const typeDistribution = typeDistRaw.map((d) => ({
+      type: d._id || 'Full Rim',
+      count: d.count,
+    }));
+
+    // 4. Restock suggestions: top sold frames that are low/out of stock
+    const restockSuggestions = topSoldRaw
+      .filter((f) => f.currentStock <= 2)
+      .map((f) => ({
+        ...f,
+        reorderLevel: 2,
+        needsRestock: true,
+      }));
+
+    res.json({
+      topSold: topSoldRaw,
+      lowStock,
+      shapeDistribution,
+      typeDistribution,
+      restockSuggestions,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ── FRAME SOLD HISTORY ────────────────────────────────────────────────────────
+
+export const getFrameSold = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const days = Math.min(parseInt(req.query.days as string) || 90, 730);
+    const from = new Date();
+    from.setDate(from.getDate() - days);
+
+    const records = await InvoiceItem.aggregate([
+      {
+        $match: {
+          frame: { $exists: true, $ne: null },
+          createdAt: { $gte: from },
+        },
+      },
+      {
+        $lookup: {
+          from: 'frames',
+          localField: 'frame',
+          foreignField: '_id',
+          as: 'frameDoc',
+        },
+      },
+      { $unwind: '$frameDoc' },
+      {
+        $group: {
+          _id: '$frame',
+          companyName: { $first: '$frameDoc.companyName' },
+          name: { $first: '$frameDoc.name' },
+          type: { $first: { $ifNull: ['$frameDoc.type', 'Full Rim'] } },
+          shape: { $first: { $ifNull: ['$frameDoc.web.shape', '—'] } },
+          tier: { $first: '$frameDoc.tier' },
+          currentStock: { $first: { $ifNull: ['$frameDoc.stock', 0] } },
+          timesSold: { $sum: '$quantity' },
+          avgPrice: { $avg: '$price' },
+          minPrice: { $min: '$price' },
+          maxPrice: { $max: '$price' },
+          totalRevenue: { $sum: { $multiply: ['$price', '$quantity'] } },
+        },
+      },
+      { $sort: { timesSold: -1 } },
+      { $limit: 500 },
+      {
+        $project: {
+          _id: 1,
+          frameId: '$_id',
+          companyName: 1,
+          name: 1,
+          type: 1,
+          shape: 1,
+          tier: 1,
+          currentStock: 1,
+          timesSold: 1,
+          avgPrice: { $round: ['$avgPrice', 0] },
+          minPrice: 1,
+          maxPrice: 1,
+          totalRevenue: { $round: ['$totalRevenue', 0] },
+        },
+      },
+    ]);
+
+    res.json({ days, from, records });
+  } catch (error) {
+    next(error);
+  }
+};
+

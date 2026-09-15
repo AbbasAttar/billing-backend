@@ -2129,3 +2129,438 @@ export const getUnitEconomicsAnalytics = async (req: Request, res: Response, nex
         next(error);
     }
 };
+
+// ── GET Sales Volume & Distribution Analytics ─────────────────────────────────
+
+export const getSalesDistributionAnalytics = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const timeframe = (req.query.timeframe as string) || '30d';
+        const referenceDate = req.query.date ? new Date(req.query.date as string) : new Date();
+        const now = isNaN(referenceDate.getTime()) ? new Date() : referenceDate;
+
+        let windowStart: Date;
+        let windowEnd: Date;
+        let displayLabel = 'Last 30 Days';
+
+        const qYear = parseInt(req.query.year as string);
+        const qMonth = parseInt(req.query.month as string);
+
+        if (timeframe === 'mtd') {
+            windowStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+            windowEnd = new Date(now);
+            displayLabel = `${now.toLocaleString('en-US', { month: 'long', year: 'numeric' })} (MTD)`;
+        } else if (timeframe === 'last_month') {
+            windowStart = new Date(now.getFullYear(), now.getMonth() - 1, 1, 0, 0, 0, 0);
+            windowEnd = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999);
+            displayLabel = windowStart.toLocaleString('en-US', { month: 'long', year: 'numeric' });
+        } else if (timeframe === 'month' && !isNaN(qYear) && !isNaN(qMonth)) {
+            windowStart = new Date(qYear, qMonth - 1, 1, 0, 0, 0, 0);
+            windowEnd = new Date(qYear, qMonth, 0, 23, 59, 59, 999);
+            displayLabel = windowStart.toLocaleString('en-US', { month: 'long', year: 'numeric' });
+        } else if (timeframe === '7d') {
+            windowEnd = new Date(now);
+            windowEnd.setHours(23, 59, 59, 999);
+            windowStart = new Date(now);
+            windowStart.setDate(windowStart.getDate() - 6);
+            windowStart.setHours(0, 0, 0, 0);
+            displayLabel = 'Last 7 Days';
+        } else if (timeframe === '90d') {
+            windowEnd = new Date(now);
+            windowEnd.setHours(23, 59, 59, 999);
+            windowStart = new Date(now);
+            windowStart.setDate(windowStart.getDate() - 89);
+            windowStart.setHours(0, 0, 0, 0);
+            displayLabel = 'Last 90 Days';
+        } else if (timeframe === 'ytd') {
+            windowStart = new Date(now.getFullYear(), 0, 1, 0, 0, 0, 0);
+            windowEnd = new Date(now);
+            displayLabel = `Year to Date (${now.getFullYear()})`;
+        } else {
+            // default 30d
+            windowEnd = new Date(now);
+            windowEnd.setHours(23, 59, 59, 999);
+            windowStart = new Date(now);
+            windowStart.setDate(windowStart.getDate() - 29);
+            windowStart.setHours(0, 0, 0, 0);
+            displayLabel = 'Last 30 Days';
+        }
+
+        // ── 1. Daily Invoices Aggregation ────────────────────────────────────
+        const dailyInvoicesAgg = await Invoice.aggregate([
+            {
+                $match: {
+                    billDate: { $gte: windowStart, $lte: windowEnd },
+                },
+            },
+            {
+                $group: {
+                    _id: {
+                        $dateToString: {
+                            format: '%Y-%m-%d',
+                            date: '$billDate',
+                            timezone: '+05:30',
+                        },
+                    },
+                    count: { $sum: 1 },
+                    revenue: { $sum: '$total' },
+                },
+            },
+            { $sort: { _id: 1 } },
+        ]);
+
+        const dailyMap = new Map<string, { count: number; revenue: number }>();
+        for (const item of dailyInvoicesAgg) {
+            dailyMap.set(item._id, { count: item.count, revenue: item.revenue });
+        }
+
+        // Fill all days continuously
+        const invoicesPerDay: Array<{ date: string; displayDate: string; count: number; revenue: number }> = [];
+        const iter = new Date(windowStart);
+        let totalInvoices = 0;
+        let totalDailyRevenue = 0;
+        let peakCount = 0;
+        let peakDate = '';
+
+        while (iter <= windowEnd) {
+            const key = formatLocalDateKey(iter);
+            const found = dailyMap.get(key) || { count: 0, revenue: 0 };
+            const displayDate = iter.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+
+            invoicesPerDay.push({
+                date: key,
+                displayDate,
+                count: found.count,
+                revenue: Math.round(found.revenue),
+            });
+
+            totalInvoices += found.count;
+            totalDailyRevenue += found.revenue;
+            if (found.count > peakCount) {
+                peakCount = found.count;
+                peakDate = displayDate;
+            }
+
+            iter.setDate(iter.getDate() + 1);
+        }
+
+        const daysCount = invoicesPerDay.length || 1;
+        const avgInvoicesPerDay = Number((totalInvoices / daysCount).toFixed(1));
+
+        // ── 2. Weekday Revenue Distribution ──────────────────────────────────
+        // (Uses wider 90d window or current timeframe to compute representative distribution)
+        const weekdayWindowStart = timeframe === '7d' || timeframe === 'mtd' ? windowStart : new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+        const weekdayAgg = await Invoice.aggregate([
+            {
+                $match: {
+                    billDate: { $gte: weekdayWindowStart, $lte: windowEnd },
+                },
+            },
+            {
+                $group: {
+                    _id: {
+                        $dayOfWeek: {
+                            date: '$billDate',
+                            timezone: '+05:30',
+                        },
+                    },
+                    count: { $sum: 1 },
+                    revenue: { $sum: '$total' },
+                },
+            },
+        ]);
+
+        // Map $dayOfWeek (1=Sun, 2=Mon, 3=Tue, 4=Wed, 5=Thu, 6=Fri, 7=Sat) to Mon -> Sun
+        const weekdayOrder = [
+            { dayIndex: 2, dayName: 'Monday', shortDay: 'Mon' },
+            { dayIndex: 3, dayName: 'Tuesday', shortDay: 'Tue' },
+            { dayIndex: 4, dayName: 'Wednesday', shortDay: 'Wed' },
+            { dayIndex: 5, dayName: 'Thursday', shortDay: 'Thu' },
+            { dayIndex: 6, dayName: 'Friday', shortDay: 'Fri' },
+            { dayIndex: 7, dayName: 'Saturday', shortDay: 'Sat' },
+            { dayIndex: 1, dayName: 'Sunday', shortDay: 'Sun' },
+        ];
+
+        const weekdayMap = new Map<number, { count: number; revenue: number }>();
+        let totalWeekdayRevenue = 0;
+        let totalWeekdayInvoices = 0;
+        for (const w of weekdayAgg) {
+            weekdayMap.set(w._id, { count: w.count, revenue: w.revenue });
+            totalWeekdayRevenue += w.revenue;
+            totalWeekdayInvoices += w.count;
+        }
+
+        let maxWeekdayRev = 0;
+        const weekdayPerformance = weekdayOrder.map((w) => {
+            const found = weekdayMap.get(w.dayIndex) || { count: 0, revenue: 0 };
+            const rev = Math.round(found.revenue);
+            if (rev > maxWeekdayRev) maxWeekdayRev = rev;
+            return {
+                dayName: w.dayName,
+                shortDay: w.shortDay,
+                dayIndex: w.dayIndex,
+                revenue: rev,
+                invoiceCount: found.count,
+                avgTicket: found.count > 0 ? Math.round(found.revenue / found.count) : 0,
+                revenueShare: totalWeekdayRevenue > 0 ? Number(((found.revenue / totalWeekdayRevenue) * 100).toFixed(1)) : 0,
+                isPeak: false,
+            };
+        });
+
+        // Mark peak day
+        for (const item of weekdayPerformance) {
+            if (item.revenue === maxWeekdayRev && maxWeekdayRev > 0) {
+                item.isPeak = true;
+            }
+        }
+
+        // ── 3. Monthly Category Units (Fragrance, Frame, Lens) for Past 12 Months ──
+        const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1, 0, 0, 0, 0);
+        const monthlyUnitsAgg = await InvoiceItem.aggregate([
+            {
+                $lookup: {
+                    from: 'invoices',
+                    localField: '_id',
+                    foreignField: 'items',
+                    as: 'invoice',
+                },
+            },
+            { $unwind: '$invoice' },
+            {
+                $match: {
+                    'invoice.billDate': { $gte: twelveMonthsAgo, $lte: now },
+                },
+            },
+            {
+                $project: {
+                    quantity: { $ifNull: ['$quantity', 1] },
+                    price: { $ifNull: ['$price', 0] },
+                    monthKey: {
+                        $dateToString: {
+                            format: '%Y-%m',
+                            date: '$invoice.billDate',
+                            timezone: '+05:30',
+                        },
+                    },
+                    isFrame: {
+                        $cond: [
+                            {
+                                $or: [
+                                    { $gt: ['$frame', null] },
+                                    { $eq: ['$type', 'frame'] },
+                                ],
+                            },
+                            1,
+                            0,
+                        ],
+                    },
+                    isFragrance: {
+                        $cond: [
+                            {
+                                $or: [
+                                    { $gt: ['$fragrance', null] },
+                                    { $eq: ['$type', 'fragrance'] },
+                                ],
+                            },
+                            1,
+                            0,
+                        ],
+                    },
+                    isLens: {
+                        $cond: [
+                            {
+                                $or: [
+                                    { $gt: ['$opticalLens', null] },
+                                    { $eq: ['$type', 'opticalLens'] },
+                                    { $eq: ['$isCustomLens', true] },
+                                    { $gt: ['$lensBrand', null] },
+                                    { $gt: ['$lensType', null] },
+                                ],
+                            },
+                            1,
+                            0,
+                        ],
+                    },
+                },
+            },
+            {
+                $group: {
+                    _id: '$monthKey',
+                    frameUnits: {
+                        $sum: {
+                            $cond: [{ $eq: ['$isFrame', 1] }, '$quantity', 0],
+                        },
+                    },
+                    fragranceUnits: {
+                        $sum: {
+                            $cond: [{ $eq: ['$isFragrance', 1] }, '$quantity', 0],
+                        },
+                    },
+                    lensUnits: {
+                        $sum: {
+                            $cond: [{ $eq: ['$isLens', 1] }, '$quantity', 0],
+                        },
+                    },
+                    frameRevenue: {
+                        $sum: {
+                            $cond: [{ $eq: ['$isFrame', 1] }, { $multiply: ['$quantity', '$price'] }, 0],
+                        },
+                    },
+                    fragranceRevenue: {
+                        $sum: {
+                            $cond: [{ $eq: ['$isFragrance', 1] }, { $multiply: ['$quantity', '$price'] }, 0],
+                        },
+                    },
+                    lensRevenue: {
+                        $sum: {
+                            $cond: [{ $eq: ['$isLens', 1] }, { $multiply: ['$quantity', '$price'] }, 0],
+                        },
+                    },
+                    totalRevenue: {
+                        $sum: { $multiply: ['$quantity', '$price'] },
+                    },
+                },
+            },
+            { $sort: { _id: 1 } },
+        ]);
+
+        const monthlyUnitsMap = new Map<string, {
+            frameUnits: number;
+            fragranceUnits: number;
+            lensUnits: number;
+            frameRevenue: number;
+            fragranceRevenue: number;
+            lensRevenue: number;
+            totalRevenue: number;
+        }>();
+        for (const m of monthlyUnitsAgg) {
+            monthlyUnitsMap.set(m._id, {
+                frameUnits: m.frameUnits,
+                fragranceUnits: m.fragranceUnits,
+                lensUnits: m.lensUnits,
+                frameRevenue: m.frameRevenue || 0,
+                fragranceRevenue: m.fragranceRevenue || 0,
+                lensRevenue: m.lensRevenue || 0,
+                totalRevenue: m.totalRevenue || 0,
+            });
+        }
+
+        // Build 12-month array
+        const monthlyCategoryUnits: Array<{
+            month: string;
+            label: string;
+            frames: number;
+            lenses: number;
+            fragrances: number;
+            totalUnits: number;
+            frameRevenue: number;
+            lensRevenue: number;
+            fragranceRevenue: number;
+            revenue: number;
+            avgFramePrice: number;
+            avgLensPrice: number;
+            avgFragrancePrice: number;
+        }> = [];
+
+        let total12mFrames = 0;
+        let total12mLenses = 0;
+        let total12mFragrances = 0;
+        let total12mFrameRev = 0;
+        let total12mLensRev = 0;
+        let total12mFragranceRev = 0;
+        let total12mRevenue = 0;
+
+        for (let i = 11; i >= 0; i--) {
+            const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+            const mKey = formatLocalMonthKey(d);
+            const label = d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+            const data = monthlyUnitsMap.get(mKey) || {
+                frameUnits: 0,
+                fragranceUnits: 0,
+                lensUnits: 0,
+                frameRevenue: 0,
+                fragranceRevenue: 0,
+                lensRevenue: 0,
+                totalRevenue: 0,
+            };
+
+            const frames = Number(data.frameUnits.toFixed(2));
+            const lenses = Number(data.lensUnits.toFixed(2));
+            const fragrances = Number(data.fragranceUnits.toFixed(2));
+            const totalUnits = Number((frames + lenses + fragrances).toFixed(2));
+
+            const frameRevenue = Math.round(data.frameRevenue);
+            const lensRevenue = Math.round(data.lensRevenue);
+            const fragranceRevenue = Math.round(data.fragranceRevenue);
+            const monthRevenue = Math.round(data.totalRevenue);
+
+            const avgFramePrice = frames > 0 ? Math.round(frameRevenue / frames) : 0;
+            const avgLensPrice = lenses > 0 ? Math.round(lensRevenue / lenses) : 0;
+            const avgFragrancePrice = fragrances > 0 ? Math.round(fragranceRevenue / fragrances) : 0;
+
+            total12mFrames += frames;
+            total12mLenses += lenses;
+            total12mFragrances += fragrances;
+            total12mFrameRev += frameRevenue;
+            total12mLensRev += lensRevenue;
+            total12mFragranceRev += fragranceRevenue;
+            total12mRevenue += monthRevenue;
+
+            monthlyCategoryUnits.push({
+                month: mKey,
+                label,
+                frames,
+                lenses,
+                fragrances,
+                totalUnits,
+                frameRevenue,
+                lensRevenue,
+                fragranceRevenue,
+                revenue: monthRevenue,
+                avgFramePrice,
+                avgLensPrice,
+                avgFragrancePrice,
+            });
+        }
+
+        const grandTotalUnits = total12mFrames + total12mLenses + total12mFragrances;
+
+        res.json({
+            timeframe,
+            displayLabel,
+            invoicesDaily: {
+                totalInvoices,
+                totalRevenue: Math.round(totalDailyRevenue),
+                avgPerDay: avgInvoicesPerDay,
+                peakCount,
+                peakDate,
+                days: invoicesPerDay,
+            },
+            weekdayPerformance: {
+                totalRevenue: Math.round(totalWeekdayRevenue),
+                totalInvoices: totalWeekdayInvoices,
+                weekdays: weekdayPerformance,
+            },
+            monthlyUnits: {
+                twelveMonthTotals: {
+                    frames: total12mFrames,
+                    lenses: total12mLenses,
+                    fragrances: total12mFragrances,
+                    totalUnits: grandTotalUnits,
+                    framesSharePct: grandTotalUnits > 0 ? Number(((total12mFrames / grandTotalUnits) * 100).toFixed(1)) : 0,
+                    lensesSharePct: grandTotalUnits > 0 ? Number(((total12mLenses / grandTotalUnits) * 100).toFixed(1)) : 0,
+                    fragrancesSharePct: grandTotalUnits > 0 ? Number(((total12mFragrances / grandTotalUnits) * 100).toFixed(1)) : 0,
+                    framesRevenue: total12mFrameRev,
+                    lensesRevenue: total12mLensRev,
+                    fragrancesRevenue: total12mFragranceRev,
+                    totalRevenue: total12mRevenue,
+                    framesRevSharePct: total12mRevenue > 0 ? Number(((total12mFrameRev / total12mRevenue) * 100).toFixed(1)) : 0,
+                    lensesRevSharePct: total12mRevenue > 0 ? Number(((total12mLensRev / total12mRevenue) * 100).toFixed(1)) : 0,
+                    fragrancesRevSharePct: total12mRevenue > 0 ? Number(((total12mFragranceRev / total12mRevenue) * 100).toFixed(1)) : 0,
+                },
+                months: monthlyCategoryUnits,
+            },
+        });
+    } catch (error) {
+        next(error);
+    }
+};

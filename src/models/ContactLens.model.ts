@@ -24,7 +24,7 @@ const ContactLensSchema = new Schema<IContactLens>(
     diameter:  { type: String, trim: true },
     costPrice: { type: Number, min: 0 },
     sellPrice: { type: Number, min: 0 },
-    stock:     { type: Number, min: 0, default: 0 },
+    stock:     { type: Number, default: 0 },
     web: { type: WebFieldsSchema, default: () => ({ isPublished: false, images: [], tags: [], seo: {} }) },
   },
   { timestamps: true }

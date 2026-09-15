@@ -24,7 +24,7 @@ const LensStockSchema = new Schema<ILensStock>(
     sph:          { type: Number, required: true },
     cyl:          { type: Number, required: true, default: 0 },
     add:          { type: Number, default: null },
-    quantity:     { type: Number, required: true, min: 0, default: 0 },
+    quantity:     { type: Number, required: true, default: 0 },
     reorderLevel: { type: Number, required: true, min: 0, default: 2 },
     costPrice:    { type: Number, required: true, min: 0, default: 0 },
     lastCost:     { type: Number, default: null },

@@ -18,6 +18,8 @@ export interface IInvoiceItem extends Document {
   mrp?: number;
   storePrice?: number;
   tier?: string;
+  // Fragrance / Attar grade selection (e.g. Grade 1, Grade 2, etc.)
+  fragranceGrade?: string;
   // Lens product fields — denormalized
   lensBrand?: string;
   lensName?: string;
@@ -74,6 +76,7 @@ const InvoiceItemSchema = new Schema<IInvoiceItem>(
     mrp: { type: Number, default: null },
     storePrice: { type: Number, default: null },
     tier: { type: String, default: null },
+    fragranceGrade: { type: String, default: null },
     // Lens product fields
     lensBrand: { type: String, default: null },
     lensName: { type: String, default: null },
@@ -115,7 +118,18 @@ const InvoiceItemSchema = new Schema<IInvoiceItem>(
 
 InvoiceItemSchema.path('frame').validate(function (this: IInvoiceItem) {
   const refs = [this.frame, this.opticalLens, this.fragrance].filter(Boolean);
-  if (this.fulfillmentSource === 'unfulfilled') return refs.length <= 1;
+  if (
+    this.fulfillmentSource === 'unfulfilled' ||
+    this.isCustomLens ||
+    Boolean(this.lensBrand) ||
+    Boolean(this.lensType) ||
+    Boolean(this.lensLabel) ||
+    Boolean(this.prescription) ||
+    this.rightSpherical !== null && this.rightSpherical !== undefined ||
+    this.leftSpherical !== null && this.leftSpherical !== undefined
+  ) {
+    return refs.length <= 1;
+  }
   return refs.length === 1;
 }, 'Each invoice item must reference exactly one of: frame, opticalLens, fragrance');
 

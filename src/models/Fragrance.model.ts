@@ -29,7 +29,7 @@ const FragranceVariantSchema = new Schema<IFragranceVariant>(
     label: { type: String, required: true, trim: true },
     costPrice: { type: Number, min: 0 },
     sellPrice: { type: Number, required: true, min: 0 },
-    stock: { type: Number, min: 0, default: 0 },
+    stock: { type: Number, default: 0 },
   },
   { _id: false }
 );
@@ -46,7 +46,7 @@ const FragranceSchema = new Schema<IFragrance>(
     authenticity: { type: String, enum: ['original', 'dupe'] },
     costPrice: { type: Number, min: 0 },
     sellPrice: { type: Number, min: 0 },
-    stock: { type: Number, min: 0, default: 0 },
+    stock: { type: Number, default: 0 },
     variants: { type: [FragranceVariantSchema], default: [] },
     isArchived: { type: Boolean, default: false },
     archivedAt: { type: Date },

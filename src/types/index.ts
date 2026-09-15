@@ -13,6 +13,7 @@ export interface CreateFragranceItemInput {
   quantity: number;
   price: number;
   costPrice?: number;
+  fragranceGrade?: string;
 }
 
 export interface CreateOpticalLensItemInput {

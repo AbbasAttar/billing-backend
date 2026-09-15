@@ -159,3 +159,211 @@ export const deleteFragrance = async (req: Request, res: Response, next: NextFun
     next(error);
   }
 };
+
+// ── FRAGRANCE TRENDS ─────────────────────────────────────────────────────────
+
+export const getFragranceTrends = async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    // 1. Top sold fragrances
+    const topSoldRaw = await InvoiceItem.aggregate([
+      { $match: { fragrance: { $exists: true, $ne: null } } },
+      {
+        $group: {
+          _id: '$fragrance',
+          count: { $sum: '$quantity' },
+          totalRevenue: { $sum: { $multiply: ['$quantity', '$price'] } },
+        },
+      },
+      { $sort: { count: -1 } },
+      { $limit: 25 },
+      {
+        $lookup: {
+          from: 'fragrances',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'fragranceDoc',
+        },
+      },
+      { $unwind: '$fragranceDoc' },
+      {
+        $project: {
+          _id: 1,
+          companyName: '$fragranceDoc.companyName',
+          name: '$fragranceDoc.name',
+          type: { $ifNull: ['$fragranceDoc.type', 'attar'] },
+          authenticity: { $ifNull: ['$fragranceDoc.authenticity', 'original'] },
+          currentStock: {
+            $cond: {
+              if: { $gt: [{ $size: { $ifNull: ['$fragranceDoc.variants', []] } }, 0] },
+              then: { $sum: '$fragranceDoc.variants.stock' },
+              else: { $ifNull: ['$fragranceDoc.stock', 0] },
+            },
+          },
+          count: 1,
+          totalRevenue: { $round: ['$totalRevenue', 0] },
+        },
+      },
+    ]);
+
+    // 2. Low stock fragrances (total stock <= 2 or any variant stock <= 1)
+    const allActive = await Fragrance.find({ isArchived: { $ne: true } })
+      .sort({ companyName: 1, name: 1 })
+      .lean();
+
+    const lowStock = allActive
+      .filter((f) => {
+        if (f.variants && f.variants.length > 0) {
+          const totalStock = f.variants.reduce((s, v) => s + (v.stock || 0), 0);
+          const hasLowVariant = f.variants.some((v) => (v.stock || 0) <= 1);
+          return totalStock <= 2 || hasLowVariant;
+        }
+        return (f.stock ?? 0) <= 2;
+      })
+      .slice(0, 50);
+
+    // 3. Type distribution
+    const typeDistRaw = await InvoiceItem.aggregate([
+      { $match: { fragrance: { $exists: true, $ne: null } } },
+      {
+        $lookup: {
+          from: 'fragrances',
+          localField: 'fragrance',
+          foreignField: '_id',
+          as: 'fragranceDoc',
+        },
+      },
+      { $unwind: '$fragranceDoc' },
+      {
+        $group: {
+          _id: { $ifNull: ['$fragranceDoc.type', 'attar'] },
+          count: { $sum: '$quantity' },
+        },
+      },
+      { $sort: { count: -1 } },
+    ]);
+
+    const typeDistribution = typeDistRaw.map((d) => ({
+      type: d._id,
+      count: d.count,
+    }));
+
+    // 4. Authenticity distribution
+    const authDistRaw = await InvoiceItem.aggregate([
+      { $match: { fragrance: { $exists: true, $ne: null } } },
+      {
+        $lookup: {
+          from: 'fragrances',
+          localField: 'fragrance',
+          foreignField: '_id',
+          as: 'fragranceDoc',
+        },
+      },
+      { $unwind: '$fragranceDoc' },
+      {
+        $group: {
+          _id: { $ifNull: ['$fragranceDoc.authenticity', 'original'] },
+          count: { $sum: '$quantity' },
+        },
+      },
+      { $sort: { count: -1 } },
+    ]);
+
+    const authenticityDistribution = authDistRaw.map((d) => ({
+      authenticity: d._id,
+      count: d.count,
+    }));
+
+    // 5. Restock suggestions: top sold fragrances that are low/out of stock
+    const restockSuggestions = topSoldRaw
+      .filter((f) => f.currentStock <= 2)
+      .map((f) => ({
+        ...f,
+        reorderLevel: 2,
+        needsRestock: true,
+      }));
+
+    res.json({
+      topSold: topSoldRaw,
+      lowStock,
+      typeDistribution,
+      authenticityDistribution,
+      restockSuggestions,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ── FRAGRANCE SOLD HISTORY ───────────────────────────────────────────────────
+
+export const getFragranceSold = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const days = Math.min(parseInt(req.query.days as string) || 90, 730);
+    const from = new Date();
+    from.setDate(from.getDate() - days);
+
+    const records = await InvoiceItem.aggregate([
+      {
+        $match: {
+          fragrance: { $exists: true, $ne: null },
+          createdAt: { $gte: from },
+        },
+      },
+      {
+        $lookup: {
+          from: 'fragrances',
+          localField: 'fragrance',
+          foreignField: '_id',
+          as: 'fragranceDoc',
+        },
+      },
+      { $unwind: '$fragranceDoc' },
+      {
+        $group: {
+          _id: '$fragrance',
+          companyName: { $first: '$fragranceDoc.companyName' },
+          name: { $first: '$fragranceDoc.name' },
+          type: { $first: { $ifNull: ['$fragranceDoc.type', 'attar'] } },
+          authenticity: { $first: { $ifNull: ['$fragranceDoc.authenticity', 'original'] } },
+          currentStock: {
+            $first: {
+              $cond: {
+                if: { $gt: [{ $size: { $ifNull: ['$fragranceDoc.variants', []] } }, 0] },
+                then: { $sum: '$fragranceDoc.variants.stock' },
+                else: { $ifNull: ['$fragranceDoc.stock', 0] },
+              },
+            },
+          },
+          timesSold: { $sum: '$quantity' },
+          avgPrice: { $avg: '$price' },
+          minPrice: { $min: '$price' },
+          maxPrice: { $max: '$price' },
+          totalRevenue: { $sum: { $multiply: ['$price', '$quantity'] } },
+        },
+      },
+      { $sort: { timesSold: -1 } },
+      { $limit: 500 },
+      {
+        $project: {
+          _id: 1,
+          fragranceId: '$_id',
+          companyName: 1,
+          name: 1,
+          type: 1,
+          authenticity: 1,
+          currentStock: 1,
+          timesSold: 1,
+          avgPrice: { $round: ['$avgPrice', 0] },
+          minPrice: 1,
+          maxPrice: 1,
+          totalRevenue: { $round: ['$totalRevenue', 0] },
+        },
+      },
+    ]);
+
+    res.json({ days, from, records });
+  } catch (error) {
+    next(error);
+  }
+};
+

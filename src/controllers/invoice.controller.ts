@@ -286,9 +286,11 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
                 return computed === item.frameVariantLabel;
               });
               if (varIdx >= 0) {
+                const currentStock = frameDoc.web.frameVariants[varIdx]?.stock || 0;
+                const newStock = Math.max(0, currentStock - (item.quantity || 1));
                 await Frame.updateOne(
                   { _id: item.frame },
-                  { $inc: { [`web.frameVariants.${varIdx}.stock`]: -item.quantity } },
+                  { $set: { [`web.frameVariants.${varIdx}.stock`]: newStock } },
                 );
               }
             }
@@ -298,6 +300,23 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       } else if (item.type === 'fragrance') {
         if (item.fragrance && mongoose.isValidObjectId(item.fragrance)) {
           await Fragrance.findByIdAndUpdate(item.fragrance, { sellPrice: item.price });
+
+          // Deduct variant stock when a specific grade / variant is selected
+          const selectedGrade = (item as any).fragranceGrade || (item as any).fragranceVariantLabel;
+          if (selectedGrade) {
+            const fragDoc = await Fragrance.findById(item.fragrance);
+            if (fragDoc?.variants?.length) {
+              const varIdx = fragDoc.variants.findIndex((v: any) => v.label === selectedGrade);
+              if (varIdx >= 0) {
+                const currentStock = fragDoc.variants[varIdx]?.stock || 0;
+                const newStock = Math.max(0, currentStock - (item.quantity || 1));
+                await Fragrance.updateOne(
+                  { _id: item.fragrance },
+                  { $set: { [`variants.${varIdx}.stock`]: newStock } }
+                );
+              }
+            }
+          }
         }
         resolvedItems.push({ ...(item as any) });
       } else {
@@ -349,7 +368,14 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
           if (frameDoc?.costPrice) costPrice = frameDoc.costPrice;
         } else if (item.type === 'fragrance' && item.fragrance) {
           const fragDoc = await Fragrance.findById(item.fragrance).select('costPrice variants').lean();
-          if (fragDoc?.costPrice) costPrice = fragDoc.costPrice;
+          const selectedGrade = (item as any).fragranceGrade || (item as any).fragranceVariantLabel;
+          if (selectedGrade && fragDoc?.variants?.length) {
+            const matchedVar = fragDoc.variants.find((v: any) => v.label === selectedGrade);
+            if (matchedVar?.costPrice) costPrice = matchedVar.costPrice;
+            else if (fragDoc?.costPrice) costPrice = fragDoc.costPrice;
+          } else if (fragDoc?.costPrice) {
+            costPrice = fragDoc.costPrice;
+          }
         }
       }
 
@@ -364,7 +390,11 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         doc.frame = item.frame;
         if ((item as any).frameVariantLabel) doc.frameVariantLabel = (item as any).frameVariantLabel;
       }
-      if (item.type === 'fragrance' && item.fragrance) doc.fragrance = item.fragrance;
+      if (item.type === 'fragrance' && item.fragrance) {
+        doc.fragrance = item.fragrance;
+        const grade = (item as any).fragranceGrade || (item as any).fragranceVariantLabel;
+        if (grade) doc.fragranceGrade = grade;
+      }
       if (item.type === 'opticalLens') {
         doc.opticalLens = item._resolvedOpticalLens || item.opticalLens;
         doc.prescription = item._resolvedPrescription || item.prescription;
@@ -964,8 +994,60 @@ export const addItemToInvoice = async (req: Request, res: Response, next: NextFu
 
     const body = req.body as any;
     
+    // Auto-resolve optical lens if type is opticalLens or lens fields are present
+    const isLens =
+      body.type === 'opticalLens' ||
+      Boolean(body.lensBrand) ||
+      Boolean(body.lensName) ||
+      Boolean(body.lensType) ||
+      Boolean(body.lensLabel) ||
+      body.rightSpherical !== undefined ||
+      body.leftSpherical !== undefined;
+
+    if (isLens && (!body.opticalLens || !mongoose.isValidObjectId(body.opticalLens))) {
+      const brand = body.lensBrand?.trim() || body.lensCompany?.trim() || 'Custom';
+      const name = body.lensName?.trim() || body.lensType?.trim() || 'Single Vision';
+      const category = body.lensCategory || body.lensType || 'Single Vision';
+
+      const filter = {
+        brand,
+        name,
+        category,
+        index: body.lensIndex || null,
+        coating: body.lensCoating || null,
+        spherical: body.spherical === undefined ? null : body.spherical,
+        cylinder: body.cylinder === undefined ? null : body.cylinder,
+        addition: body.addition === undefined ? null : body.addition,
+      };
+
+      let lensDoc = await OpticalLens.findOne({
+        brand: { $regex: new RegExp(`^${escapeRegExp(filter.brand)}$`, 'i') },
+        name: { $regex: new RegExp(`^${escapeRegExp(filter.name)}$`, 'i') },
+        category: filter.category,
+        index: filter.index,
+        coating: filter.coating,
+        spherical: filter.spherical,
+        cylinder: filter.cylinder,
+        addition: filter.addition,
+      } as any);
+
+      if (!lensDoc) {
+        try {
+          lensDoc = await OpticalLens.create({ ...filter, sellPrice: body.price } as any);
+        } catch (err: any) {
+          if (err.code === 11000) {
+            lensDoc = await OpticalLens.findOne(filter as any);
+          }
+        }
+      }
+
+      if (lensDoc) {
+        body.opticalLens = lensDoc._id;
+      }
+    }
+
     const refCount = [body.frame, body.opticalLens, body.fragrance].filter(Boolean).length;
-    if (refCount !== 1) {
+    if (refCount !== 1 && !isLens) {
       res.status(400).json({ message: 'Each invoice item must reference exactly one of: frame, opticalLens, fragrance' });
       return;
     }
@@ -983,23 +1065,41 @@ export const addItemToInvoice = async (req: Request, res: Response, next: NextFu
       quantity: body.quantity,
       price: body.price,
     };
-    if (body.type === 'frame' && body.frame) doc.frame = body.frame;
-    if (body.type === 'fragrance' && body.fragrance) doc.fragrance = body.fragrance;
-    if (body.type === 'opticalLens') {
-      doc.opticalLens = body.opticalLens;
+    if ((body.type === 'frame' || body.frame) && body.frame) doc.frame = body.frame;
+    if ((body.type === 'fragrance' || body.fragrance) && body.fragrance) {
+      doc.fragrance = body.fragrance;
+      if (body.fragranceGrade) doc.fragranceGrade = body.fragranceGrade;
+    }
+    if (isLens || body.type === 'opticalLens' || body.opticalLens) {
+      if (body.opticalLens) doc.opticalLens = body.opticalLens;
       doc.prescription = body.prescription;
-      doc.eye = body.eye;
+      doc.eye = body.eye || 'both';
       doc.userName = body.userName;
       doc.spherical = body.spherical;
       doc.cylinder = body.cylinder;
       doc.axis = body.axis;
       doc.addition = body.addition;
       doc.lensLabel = body.lensLabel;
-      doc.lensBrand = body.lensBrand;
-      doc.lensName = body.lensName;
-      doc.lensCategory = body.lensCategory;
-      doc.lensIndex = body.lensIndex;
-      doc.lensCoating = body.lensCoating;
+      doc.lensBrand = body.lensBrand || null;
+      doc.lensName = body.lensName || null;
+      doc.lensCategory = body.lensCategory || null;
+      doc.lensIndex = body.lensIndex || null;
+      doc.lensCoating = body.lensCoating || null;
+      doc.lensMaterial = body.lensMaterial || null;
+      doc.lensColor = body.lensColor || null;
+      doc.lensCompany = body.lensCompany || null;
+      doc.lensType = body.lensType || null;
+      doc.rightEyeNumber = body.rightEyeNumber || null;
+      doc.leftEyeNumber = body.leftEyeNumber || null;
+      doc.rightSpherical = body.rightSpherical;
+      doc.rightCylinder = body.rightCylinder;
+      doc.rightAxis = body.rightAxis;
+      doc.rightAddition = body.rightAddition;
+      doc.leftSpherical = body.leftSpherical;
+      doc.leftCylinder = body.leftCylinder;
+      doc.leftAxis = body.leftAxis;
+      doc.leftAddition = body.leftAddition;
+      doc.isCustomLens = body.isCustomLens ?? !body.opticalLens;
     }
 
     const invoiceItem = await InvoiceItem.create(doc);
@@ -1135,7 +1235,7 @@ export const renumberAllInvoices = async (_req: Request, res: Response, next: Ne
 export const updateItemInInvoice = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id, itemId } = req.params;
-    const { quantity, price } = req.body;
+    const { quantity, price, fragranceGrade } = req.body;
     
     if (typeof quantity !== 'number' || quantity <= 0) {
       res.status(400).json({ message: 'Quantity must be a positive number.' });
@@ -1157,7 +1257,11 @@ export const updateItemInInvoice = async (req: Request, res: Response, next: Nex
       return;
     }
     
-    await InvoiceItem.findByIdAndUpdate(itemId, { quantity, price });
+    const updateItemPayload: any = { quantity, price };
+    if (fragranceGrade !== undefined) {
+      updateItemPayload.fragranceGrade = fragranceGrade;
+    }
+    await InvoiceItem.findByIdAndUpdate(itemId, updateItemPayload);
     
     // Recalc total
     const allItems = await InvoiceItem.find({ _id: { $in: invoice.items } });

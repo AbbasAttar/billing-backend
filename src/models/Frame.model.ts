@@ -36,7 +36,7 @@ const FrameSchema = new Schema<IFrame>(
     tier: { type: String, enum: ['essential', 'trendy', 'premium', 'luxury'] },
     floorPrice: { type: Number, min: 0 },
     secretCode: { type: String, trim: true },
-    stock: { type: Number, min: 0, default: 0 },
+    stock: { type: Number, default: 0 },
     frameCode: { type: String, trim: true },
     isArchived: { type: Boolean, default: false },
     archivedAt: { type: Date },

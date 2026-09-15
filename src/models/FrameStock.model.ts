@@ -21,7 +21,7 @@ const FrameStockSchema = new Schema<IFrameStock>(
     sellPrice:     { type: Number, required: true, min: 0 },
     purchaseMonth: { type: Number, required: true, min: 1, max: 12 },
     purchaseYear:  { type: Number, required: true },
-    quantity:      { type: Number, required: true, min: 0, default: 0 },
+    quantity:      { type: Number, required: true, default: 0 },
     reorderLevel:  { type: Number, required: true, min: 0, default: 2 },
   },
   { timestamps: true }
