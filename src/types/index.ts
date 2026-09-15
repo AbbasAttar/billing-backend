@@ -1,15 +1,17 @@
 export interface CreateFrameItemInput {
   type: 'frame';
-  frame: string;
+  frame?: string;
   quantity: number;
   price: number;
   costPrice?: number;
   frameVariantLabel?: string;
+  lensBrand?: string;
+  name?: string;
 }
 
 export interface CreateFragranceItemInput {
   type: 'fragrance';
-  fragrance: string;
+  fragrance?: string;
   quantity: number;
   price: number;
   costPrice?: number;

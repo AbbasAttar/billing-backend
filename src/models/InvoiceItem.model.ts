@@ -116,21 +116,17 @@ const InvoiceItemSchema = new Schema<IInvoiceItem>(
   { timestamps: true }
 );
 
+InvoiceItemSchema.pre('validate', function (this: IInvoiceItem) {
+  const refs = [this.frame, this.opticalLens, this.fragrance].filter(Boolean);
+  if (refs.length > 1) {
+    throw new Error('Each invoice item cannot reference more than one of: frame, opticalLens, fragrance');
+  }
+});
+
 InvoiceItemSchema.path('frame').validate(function (this: IInvoiceItem) {
   const refs = [this.frame, this.opticalLens, this.fragrance].filter(Boolean);
-  if (
-    this.fulfillmentSource === 'unfulfilled' ||
-    this.isCustomLens ||
-    Boolean(this.lensBrand) ||
-    Boolean(this.lensType) ||
-    Boolean(this.lensLabel) ||
-    Boolean(this.prescription) ||
-    this.rightSpherical !== null && this.rightSpherical !== undefined ||
-    this.leftSpherical !== null && this.leftSpherical !== undefined
-  ) {
-    return refs.length <= 1;
-  }
-  return refs.length === 1;
-}, 'Each invoice item must reference exactly one of: frame, opticalLens, fragrance');
+  return refs.length <= 1;
+}, 'Each invoice item cannot reference more than one of: frame, opticalLens, fragrance');
 
 export const InvoiceItem = mongoose.model<IInvoiceItem>('InvoiceItem', InvoiceItemSchema);
+

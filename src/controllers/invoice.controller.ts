@@ -994,15 +994,17 @@ export const addItemToInvoice = async (req: Request, res: Response, next: NextFu
 
     const body = req.body as any;
     
-    // Auto-resolve optical lens if type is opticalLens or lens fields are present
+    // Auto-resolve optical lens if type is opticalLens or (untyped and no frame/fragrance) lens fields are present
     const isLens =
       body.type === 'opticalLens' ||
-      Boolean(body.lensBrand) ||
-      Boolean(body.lensName) ||
-      Boolean(body.lensType) ||
-      Boolean(body.lensLabel) ||
-      body.rightSpherical !== undefined ||
-      body.leftSpherical !== undefined;
+      (!body.type && !body.frame && !body.fragrance && (
+        Boolean(body.lensBrand) ||
+        Boolean(body.lensName) ||
+        Boolean(body.lensType) ||
+        Boolean(body.lensLabel) ||
+        body.rightSpherical !== undefined ||
+        body.leftSpherical !== undefined
+      ));
 
     if (isLens && (!body.opticalLens || !mongoose.isValidObjectId(body.opticalLens))) {
       const brand = body.lensBrand?.trim() || body.lensCompany?.trim() || 'Custom';
@@ -1047,8 +1049,8 @@ export const addItemToInvoice = async (req: Request, res: Response, next: NextFu
     }
 
     const refCount = [body.frame, body.opticalLens, body.fragrance].filter(Boolean).length;
-    if (refCount !== 1 && !isLens) {
-      res.status(400).json({ message: 'Each invoice item must reference exactly one of: frame, opticalLens, fragrance' });
+    if (refCount > 1) {
+      res.status(400).json({ message: 'Each invoice item cannot reference more than one of: frame, opticalLens, fragrance' });
       return;
     }
     
