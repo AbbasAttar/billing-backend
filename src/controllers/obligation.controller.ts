@@ -189,8 +189,8 @@ export const deleteObligation = async (req: Request, res: Response, next: NextFu
   try {
     const obl = await Obligation.findByIdAndDelete(req.params.id);
     if (!obl) return fail(res, 'Not found', 404);
-    await ObligationPayment.deleteMany({ obligationId: new mongoose.Types.ObjectId(req.params.id as string) });
-    await Cashflow.deleteMany({ obligationId: new mongoose.Types.ObjectId(req.params.id as string) });
+    await ObligationPayment.deleteMany({ obligationId: req.params.id });
+    await Cashflow.deleteMany({ obligationId: req.params.id });
     return ok(res, { _id: req.params.id }, 'Deleted');
   } catch (err) { next(err); }
 };

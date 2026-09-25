@@ -338,3 +338,119 @@ export const getQuoteHistory = async (req: Request, res: Response, next: NextFun
   }
 };
 
+// GET /lens-pricing/options?sph=&cyl=&add=&lensType=
+// Finds all relevant lens choices matching the customer's RX across categories (Standard, Blue Cut, High Index, Progressive, Photochromic)
+export const getPresentationOptions = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { sph: qSph, cyl: qCyl, add: qAdd, lensType = 'Single Vision' } = req.query as Record<string, string | undefined>;
+
+    const sph = Math.abs(parseFloat(qSph ?? '0'));
+    const cyl = Math.abs(parseFloat(qCyl ?? '0'));
+    const add = qAdd ? Math.abs(parseFloat(qAdd)) : null;
+
+    const baseQuery: Record<string, unknown> = {
+      minSph: { $lte: sph },
+      maxSph: { $gte: sph },
+      minCyl: { $lte: cyl },
+      maxCyl: { $gte: cyl },
+    };
+
+    if (lensType) {
+      baseQuery.lensType = lensType;
+    }
+
+    if (add !== null && add > 0) {
+      baseQuery.$or = [
+        { minAdd: null },
+        { minAdd: { $lte: add }, maxAdd: { $gte: add } },
+        { minAdd: { $lte: add }, maxAdd: null },
+      ];
+    }
+
+    const options = await LensPricing.find(baseQuery).sort({ price: 1, costPrice: 1 });
+
+    return ok(res, {
+      rx: { sph, cyl, add, lensType },
+      count: options.length,
+      options,
+    });
+  } catch (e) {
+    next(e);
+  }
+};
+
+// POST /lens-pricing/seed-enterprise
+// Seeds or updates Enterprise Ophthalmics Feb 2024 price list into DB
+export const seedEnterpriseCatalog = async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const wholesaleName = 'Enterprise Ophthalmics';
+    const effDate = 'Feb 2024';
+
+    // Sample Enterprise Catalog Seed
+    const enterpriseRules = [
+      // 1. Scratch Guard 56
+      { lensType: 'Single Vision', material: 'Fiber', coating: 'Hard Coat (HC)', color: 'White', axisType: 'any', minSph: 0, maxSph: 8, minCyl: 0, maxCyl: 2, price: 450, costPrice: 140, wholesaler: wholesaleName, brand: 'Scratch Guard 56', features: ['Scratch Resistant', 'Hard Coat', 'Value Standard'], effectiveDate: effDate, dia: '70/65' },
+      { lensType: 'Single Vision', material: 'Fiber', coating: 'Hard Coat (HC)', color: 'White', axisType: 'any', minSph: 0, maxSph: 6, minCyl: 2.25, maxCyl: 4, price: 650, costPrice: 220, wholesaler: wholesaleName, brand: 'Scratch Guard 56 High Cyl', features: ['Scratch Resistant', 'High Cylinder'], effectiveDate: effDate, dia: '70' },
+      { lensType: 'Single Vision', material: 'Fiber', coating: 'Hard Coat (HC)', color: 'White', axisType: 'any', minSph: 0, maxSph: 1.75, minCyl: 0, maxCyl: 2, price: 500, costPrice: 160, wholesaler: wholesaleName, brand: 'Scratch Guard 56 Plus', features: ['Scratch Resistant'], effectiveDate: effDate, dia: '65' },
+
+      // 2. Radiator 56 Green
+      { lensType: 'Single Vision', material: 'Fiber', coating: 'Green HMC', color: 'White', axisType: 'any', minSph: 0, maxSph: 4, minCyl: 0, maxCyl: 2, price: 600, costPrice: 165, wholesaler: wholesaleName, brand: 'Radiator 56 Green', features: ['Anti-Glare HMC', 'Green Reflection', 'Clean Vision'], effectiveDate: effDate, dia: '70' },
+      { lensType: 'Single Vision', material: 'Fiber', coating: 'Green HMC', color: 'White', axisType: 'any', minSph: 4.25, maxSph: 6, minCyl: 0, maxCyl: 2, price: 750, costPrice: 220, wholesaler: wholesaleName, brand: 'Radiator 56 Green', features: ['Anti-Glare HMC', 'Green Reflection'], effectiveDate: effDate, dia: '70' },
+      { lensType: 'Single Vision', material: 'Fiber', coating: 'Green HMC', color: 'White', axisType: 'any', minSph: 6.25, maxSph: 10, minCyl: 0, maxCyl: 2, price: 950, costPrice: 325, wholesaler: wholesaleName, brand: 'Radiator 56 Green High Power', features: ['Anti-Glare HMC', 'Extended Power'], effectiveDate: effDate, dia: '70' },
+
+      // 3. Egalite 56 ASP SHMC
+      { lensType: 'Single Vision', material: 'Fiber', coating: 'SHMC Hydrophobic', color: 'White', axisType: 'any', minSph: 0, maxSph: 6, minCyl: 0, maxCyl: 2, price: 950, costPrice: 290, wholesaler: wholesaleName, brand: 'Egalite 56 ASP', features: ['Aspheric Design', 'Super Hydrophobic', 'Dust & Water Repellent'], effectiveDate: effDate, dia: '70/65' },
+
+      // 4. Egalite 56 ASP SHMC Blue Block
+      { lensType: 'Single Vision', material: 'Fiber', coating: 'Blue Block SHMC', color: 'White', axisType: 'any', minSph: 0, maxSph: 6, minCyl: 0, maxCyl: 2, price: 1200, costPrice: 350, wholesaler: wholesaleName, brand: 'Egalite 56 Blue Cut', features: ['Blue Light Protection', 'Digital Screen Armor', 'Super Hydrophobic'], effectiveDate: effDate, dia: '70/65' },
+      { lensType: 'Single Vision', material: 'Fiber', coating: 'Blue Block SHMC', color: 'White', axisType: 'any', minSph: 0, maxSph: 6, minCyl: 2.25, maxCyl: 4, price: 1450, costPrice: 475, wholesaler: wholesaleName, brand: 'Egalite 56 Blue Cut High Cyl', features: ['Blue Light Protection', 'High Cylinder Support'], effectiveDate: effDate, dia: '70/65' },
+
+      // 5. Egalite 61 (MR8) ASP SHMC Blue Block (1.60 High Index)
+      { lensType: 'Single Vision', material: 'Fiber', coating: 'Blue Block 1.60 SHMC', color: 'White', axisType: 'any', minSph: 0, maxSph: 10, minCyl: 0, maxCyl: 2, price: 1800, costPrice: 585, wholesaler: wholesaleName, brand: 'Egalite 61 MR8 Thin', features: ['1.60 Thin High Index', 'MR8 Toughness', 'Blue Light Shield', '20% Thinner'], effectiveDate: effDate, dia: '70' },
+
+      // 6. Egalite 67 (MR7) ASP SHMC Blue Block (1.67 Ultra-Thin)
+      { lensType: 'Single Vision', material: 'Fiber', coating: 'Blue Block 1.67 SHMC', color: 'White', axisType: 'any', minSph: 2, maxSph: 12, minCyl: 0, maxCyl: 2, price: 2800, costPrice: 860, wholesaler: wholesaleName, brand: 'Egalite 67 MR7 Ultra-Thin', features: ['1.67 Ultra-Thin', 'MR7 Premium Index', '35% Thinner & Lighter', 'Blue Cut Armor'], effectiveDate: effDate, dia: '70' },
+
+      // 7. Advanced Clear Drive 1.60 (MR8) Blue Cut
+      { lensType: 'Single Vision', material: 'Fiber', coating: 'Clear Drive Blue Cut', color: 'White', axisType: 'any', minSph: 0, maxSph: 8, minCyl: 0, maxCyl: 2, price: 2900, costPrice: 900, wholesaler: wholesaleName, brand: 'Advanced Clear Drive 1.60', features: ['Anti-Glare Night Drive', 'Clear Vision Coating', 'Blue Cut UV420', '1.60 Thin'], effectiveDate: effDate, dia: '74' },
+
+      // 8. Terco (Polycarbonate)
+      { lensType: 'Single Vision', material: 'Polycarbonate', coating: 'Hard Coat (HC)', color: 'White', axisType: 'any', minSph: 0, maxSph: 6, minCyl: 0, maxCyl: 2, price: 1500, costPrice: 350, wholesaler: wholesaleName, brand: 'Terco Polycarbonate', features: ['Unbreakable Safety Lens', 'Sports & Rimless Tough', 'Ultra Light'], effectiveDate: effDate, dia: '70/65' },
+      { lensType: 'Single Vision', material: 'Polycarbonate', coating: 'Hydrophobic SHMC', color: 'White', axisType: 'any', minSph: 0, maxSph: 6, minCyl: 0, maxCyl: 2, price: 1800, costPrice: 550, wholesaler: wholesaleName, brand: 'Terco Hydro Poly', features: ['Unbreakable Polycarbonate', 'Super Hydrophobic Coating', 'Impact Resistant'], effectiveDate: effDate, dia: '70/65' },
+
+      // 9. Chroma Fast (Photochromic)
+      { lensType: 'Single Vision', material: 'Fiber', coating: 'Photochromic HMC', color: 'Photo Chromatic', axisType: 'any', minSph: 0, maxSph: 4, minCyl: 0, maxCyl: 2, price: 1950, costPrice: 595, wholesaler: wholesaleName, brand: 'Chroma Fast Sun-Sens', features: ['Fast Outdoor Darkening', 'Indoor Clear Transition', 'UV Sun Shield'], effectiveDate: effDate, dia: '70/65' },
+
+      // 10. Chemi 1.74 ASP SHMC (Ultra High Index 1.74)
+      { lensType: 'Single Vision', material: 'Fiber', coating: 'Blue Cut 1.74 SHMC', color: 'White', axisType: 'any', minSph: 3, maxSph: 12, minCyl: 0, maxCyl: 2, price: 7500, costPrice: 2750, wholesaler: wholesaleName, brand: 'Chemi 1.74 Ultra-Slim', features: ['1.74 Highest Index', '50% Thinner Edges', 'Flatest Aspheric Profile', 'Premium Japan MR174'], effectiveDate: effDate, dia: '75/70' },
+
+      // 11. Verso Progressives
+      { lensType: 'Progressive', material: 'Fiber', coating: 'HMC Coating', color: 'White', axisType: 'any', minSph: 0, maxSph: 3, minCyl: 0, maxCyl: 2, minAdd: 1, maxAdd: 3.5, price: 1500, costPrice: 480, wholesaler: wholesaleName, brand: 'Verso Standard Progressive', features: ['Smooth Distance-to-Near', 'No Visible Lines', 'Anti-Reflective HMC'], effectiveDate: effDate, dia: '70' },
+      { lensType: 'Progressive', material: 'Fiber', coating: 'Blue Cut HMC+', color: 'White', axisType: 'any', minSph: 0, maxSph: 3, minCyl: 0, maxCyl: 2, minAdd: 1, maxAdd: 3.5, price: 2400, costPrice: 610, wholesaler: wholesaleName, brand: 'Verso Advanced Blue Cut', features: ['Wide Corridor Progressive', 'Digital Blue Light Filter', 'Super Hydrophobic'], effectiveDate: effDate, dia: '70' },
+      { lensType: 'Progressive', material: 'Fiber', coating: 'DriveX Anti-Glare', color: 'White', axisType: 'any', minSph: 0, maxSph: 3, minCyl: 0, maxCyl: 2, minAdd: 1, maxAdd: 3.5, price: 2900, costPrice: 900, wholesaler: wholesaleName, brand: 'Verso Advanced DriveX', features: ['Night Driving Progressive', 'Expanded Intermediate Corridor', 'Anti-Glare Drive Coat'], effectiveDate: effDate, dia: '70' },
+      { lensType: 'Progressive', material: 'Fiber', coating: 'Freeform Digital 1.60', color: 'White', axisType: 'any', minSph: 0, maxSph: 6, minCyl: 0, maxCyl: 2, minAdd: 1, maxAdd: 3.5, price: 4800, costPrice: 1650, wholesaler: wholesaleName, brand: 'Verso 1.60 Digital Bluecut', features: ['Custom Back-Surface Freeform', '1.60 High Index Thin', 'Blue Light Shield', 'Zero Distortion'], effectiveDate: effDate, dia: '70/65' },
+    ];
+
+    let insertedCount = 0;
+    for (const rule of enterpriseRules) {
+      await LensPricing.updateOne(
+        {
+          wholesaler: rule.wholesaler,
+          brand: rule.brand,
+          minSph: rule.minSph,
+          maxSph: rule.maxSph,
+          minCyl: rule.minCyl,
+          maxCyl: rule.maxCyl,
+        },
+        { $set: rule },
+        { upsert: true }
+      );
+      insertedCount++;
+    }
+
+    return ok(res, { count: insertedCount, message: `Successfully seeded ${insertedCount} Enterprise Ophthalmics lens rules.` });
+  } catch (e) {
+    next(e);
+  }
+};
+

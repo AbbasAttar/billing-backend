@@ -1,16 +1,10 @@
-import mongoose, { Schema, Document } from 'mongoose';
+import { createFirestoreModel, BaseDoc } from '../lib/firestoreModel';
 
-export interface ICoating extends Document {
+export interface ICoating extends BaseDoc {
   name: string;
   shortName?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
-const CoatingSchema = new Schema<ICoating>(
-  {
-    name: { type: String, required: true, trim: true, unique: true },
-    shortName: { type: String, trim: true, default: null },
-  },
-  { timestamps: true }
-);
-
-export const Coating = mongoose.model<ICoating>('Coating', CoatingSchema);
+export const Coating = createFirestoreModel<ICoating>('coatings');

@@ -1,46 +1,30 @@
-import mongoose, { Document, Schema } from 'mongoose';
+import { createFirestoreModel, BaseDoc } from '../lib/firestoreModel';
 import bcrypt from 'bcryptjs';
 
-export interface IUser extends Document {
-  name:             string;
-  phone:            string;
-  passwordHash:     string;
-  phoneVerified:    boolean;
-  email?:           string;
-  emailVerified:    boolean;
-  reauthToken?:     string;
-  reauthExpiry?:    Date;
-  address?:         string;
-  city?:            string;
-  state?:           string;
-  pincode?:         string;
-  avatarB64?:       string;
-  createdAt:        Date;
-  updatedAt:        Date;
-  comparePassword(password: string): Promise<boolean>;
+export interface IUser extends BaseDoc {
+  name: string;
+  phone: string;
+  passwordHash: string;
+  phoneVerified: boolean;
+  email?: string;
+  emailVerified: boolean;
+  reauthToken?: string;
+  reauthExpiry?: Date;
+  address?: string;
+  city?: string;
+  state?: string;
+  pincode?: string;
+  avatarB64?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
-const userSchema = new Schema<IUser>(
-  {
-    name:            { type: String, required: true, trim: true },
-    phone:           { type: String, required: true, unique: true, index: true },
-    passwordHash:    { type: String, required: true },
-    phoneVerified:   { type: Boolean, default: false },
-    email:           { type: String, trim: true },
-    emailVerified:   { type: Boolean, default: false },
-    reauthToken:     { type: String },
-    reauthExpiry:    { type: Date },
-    address:         { type: String, trim: true },
-    city:            { type: String, trim: true },
-    state:           { type: String, trim: true },
-    pincode:         { type: String, trim: true },
-    avatarB64:       { type: String },
+const baseUserModel = createFirestoreModel<IUser>('users');
+
+export const User = {
+  ...baseUserModel,
+  async comparePassword(user: IUser, password: string): Promise<boolean> {
+    if (!user || !user.passwordHash) return false;
+    return bcrypt.compare(password, user.passwordHash);
   },
-  { timestamps: true },
-);
-
-userSchema.methods.comparePassword = function (password: string) {
-  return bcrypt.compare(password, this.passwordHash);
 };
-
-export const User = mongoose.model<IUser>('User', userSchema);

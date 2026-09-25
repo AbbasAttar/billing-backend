@@ -163,7 +163,7 @@ export const getLensAnalytics = async (req: Request, res: Response, next: NextFu
 
     const perMonth = days / 30;
     const stockRecommendations = catalogueSales.map(row => {
-      const lens = lensMap.get(row._id?.toString() ?? '');
+      const lens = lensMap.get(row._id?.toString() ?? '') as any;
       const unitsPerMonth = row.unitsSold / perMonth;
       return {
         lensId:        row._id,

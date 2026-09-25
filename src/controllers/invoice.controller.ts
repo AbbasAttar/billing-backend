@@ -19,6 +19,13 @@ import type { CreateInvoiceInput, CreateInvoiceItemInput, DemandLogInput } from 
 
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+function isValidId(id: any): boolean {
+  if (!id) return false;
+  if (typeof id === 'string') return id.trim().length > 0 && id.trim() !== 'undefined' && id.trim() !== 'null';
+  if (typeof id === 'object' && (id._id || id.id)) return true;
+  return false;
+}
+
 // ── Populate helper ──────────────────────────────────────────────────────────
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -160,7 +167,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
     let customerId: mongoose.Types.ObjectId;
     let resolvedCustomerName: string = 'Customer';
 
-    if (customerIdRaw && mongoose.isValidObjectId(customerIdRaw)) {
+    if (isValidId(customerIdRaw)) {
       const existing = await Customer.findById(customerIdRaw);
       if (!existing) {
         res.status(404).json({ message: 'Customer not found.' });
@@ -194,7 +201,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         const enhancedItem: any = { ...item };
         let targetUserName = item.userName?.trim() || resolvedCustomerName;
 
-        if (item.prescription && mongoose.isValidObjectId(item.prescription)) {
+        if (isValidId(item.prescription)) {
           const rx = await Prescription.findById(item.prescription);
           if (rx) {
             if (!item.userName?.trim() && rx.userName) targetUserName = rx.userName;
@@ -274,7 +281,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         enhancedItem.userName = targetUserName;
         resolvedItems.push(enhancedItem);
       } else if (item.type === 'frame') {
-        if (item.frame && mongoose.isValidObjectId(item.frame)) {
+        if (isValidId(item.frame)) {
           await Frame.findByIdAndUpdate(item.frame, { sellPrice: item.price });
 
           // Deduct variant stock when a specific colour is selected
@@ -298,7 +305,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         }
         resolvedItems.push({ ...(item as any) });
       } else if (item.type === 'fragrance') {
-        if (item.fragrance && mongoose.isValidObjectId(item.fragrance)) {
+        if (isValidId(item.fragrance)) {
           await Fragrance.findByIdAndUpdate(item.fragrance, { sellPrice: item.price });
 
           // Deduct variant stock when a specific grade / variant is selected
@@ -648,18 +655,34 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
 
 export const updateInvoice = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { discount, billDate, payments, packagingCost, acquisitionSource } = req.body as {
+    const { discount, billDate, payments, packagingCost, acquisitionSource, customer } = req.body as {
       discount?: number;
       billDate?: string;
       payments?: Array<{ amount: number; method: 'cash' | 'online'; date?: string | Date; writeoff?: number }>;
       packagingCost?: number;
       acquisitionSource?: any;
+      customer?: any;
     };
 
     const invoice = await Invoice.findById(req.params.id);
     if (!invoice) {
       res.status(404).json({ message: 'Invoice not found' });
       return;
+    }
+
+    if (customer !== undefined && customer !== null) {
+      const custId = typeof customer === 'object' ? (customer._id || customer.id) : customer;
+      if (isValidId(custId)) {
+        const existingCust = await Customer.findById(custId);
+        if (!existingCust) {
+          res.status(404).json({ message: 'Customer not found.' });
+          return;
+        }
+        invoice.customer = existingCust._id || existingCust.id;
+      } else {
+        res.status(400).json({ message: 'Invalid customer ID.' });
+        return;
+      }
     }
 
     if (billDate !== undefined) {
@@ -1006,7 +1029,7 @@ export const addItemToInvoice = async (req: Request, res: Response, next: NextFu
         body.leftSpherical !== undefined
       ));
 
-    if (isLens && (!body.opticalLens || !mongoose.isValidObjectId(body.opticalLens))) {
+    if (isLens && (!body.opticalLens || !isValidId(body.opticalLens))) {
       const brand = body.lensBrand?.trim() || body.lensCompany?.trim() || 'Custom';
       const name = body.lensName?.trim() || body.lensType?.trim() || 'Single Vision';
       const category = body.lensCategory || body.lensType || 'Single Vision';

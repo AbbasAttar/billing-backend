@@ -66,7 +66,7 @@ export async function runAutomationRule(rule: IAutomationRule): Promise<RuleRunR
     }
 
     // 2. Filter out recently contacted customers
-    const recentIds = await getRecentlySentIds(rule._id as Types.ObjectId, rule.cooldownDays);
+    const recentIds = await getRecentlySentIds(String(rule._id) as any, rule.cooldownDays);
     let eligible = segCustomers.filter((c) => !recentIds.has(c.customerId));
 
     // 3. Apply batch limit
@@ -86,7 +86,7 @@ export async function runAutomationRule(rule: IAutomationRule): Promise<RuleRunR
       .select('name mobileNumber')
       .lean();
 
-    const phoneMap = new Map(customers.map((c) => [String(c._id), c]));
+    const phoneMap = new Map<string, any>(customers.map((c: any) => [String(c._id), c]));
 
     // 5. Create a campaign record for traceability
     const campaign = await Campaign.create({

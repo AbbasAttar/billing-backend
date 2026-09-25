@@ -1,10 +1,10 @@
-import mongoose, { Schema, Document } from 'mongoose';
+import { createFirestoreModel, BaseDoc } from '../lib/firestoreModel';
 
-export interface IInvoiceItem extends Document {
-  frame?: mongoose.Types.ObjectId;
-  opticalLens?: mongoose.Types.ObjectId;
-  prescription?: mongoose.Types.ObjectId;
-  fragrance?: mongoose.Types.ObjectId;
+export interface IInvoiceItem extends BaseDoc {
+  frame?: string | any;
+  opticalLens?: string | any;
+  prescription?: string | any;
+  fragrance?: string | any;
   eye?: 'left' | 'right' | 'both';
   userName?: string;
   spherical?: number;
@@ -18,17 +18,13 @@ export interface IInvoiceItem extends Document {
   mrp?: number;
   storePrice?: number;
   tier?: string;
-  // Fragrance / Attar grade selection (e.g. Grade 1, Grade 2, etc.)
   fragranceGrade?: string;
-  // Lens product fields — denormalized
   lensBrand?: string;
   lensName?: string;
   lensCategory?: string;
   lensIndex?: string;
   lensCoating?: string;
-  // Frame variant (color) selection
   frameVariantLabel?: string;
-  // Simplified Prescription (legacy string format)
   rightEyeNumber?: string;
   leftEyeNumber?: string;
   lensCompany?: string;
@@ -37,7 +33,6 @@ export interface IInvoiceItem extends Document {
   lensColor?: string;
   isCustomLens?: boolean;
   isSameNumber?: boolean;
-  // Fulfillment tracking
   fulfillmentSource: 'stock' | 'ordered' | 'unfulfilled';
   requestedQty?: number | null;
   fulfilledQty?: number | null;
@@ -46,7 +41,6 @@ export interface IInvoiceItem extends Document {
   labStatus?: 'pending' | 'sent' | 'received' | 'fitted' | 'cancelled';
   labReceivedDate?: Date | null;
   labFittedDate?: Date | null;
-  // Structured prescription fields
   rightSpherical?: number | null;
   rightCylinder?: number | null;
   rightAxis?: number | null;
@@ -55,78 +49,8 @@ export interface IInvoiceItem extends Document {
   leftCylinder?: number | null;
   leftAxis?: number | null;
   leftAddition?: number | null;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
-const InvoiceItemSchema = new Schema<IInvoiceItem>(
-  {
-    frame: { type: Schema.Types.ObjectId, ref: 'Frame' },
-    opticalLens: { type: Schema.Types.ObjectId, ref: 'OpticalLens' },
-    prescription: { type: Schema.Types.ObjectId, ref: 'Prescription' },
-    fragrance: { type: Schema.Types.ObjectId, ref: 'Fragrance' },
-    eye: { type: String, enum: ['left', 'right', 'both'], required: false },
-    userName: { type: String, default: null },
-    spherical: { type: Number, default: null },
-    cylinder: { type: Number, default: null },
-    axis: { type: Number, default: null },
-    addition: { type: Number, default: null },
-    lensLabel: { type: String, default: null },
-    quantity: { type: Number, required: true, min: 0.0001 },
-    price: { type: Number, required: true, min: 0 },
-    costPrice: { type: Number, default: 0 },
-    mrp: { type: Number, default: null },
-    storePrice: { type: Number, default: null },
-    tier: { type: String, default: null },
-    fragranceGrade: { type: String, default: null },
-    // Lens product fields
-    lensBrand: { type: String, default: null },
-    lensName: { type: String, default: null },
-    lensCategory: { type: String, default: null },
-    lensIndex: { type: String, default: null },
-    lensCoating: { type: String, default: null },
-    // Frame variant colour
-    frameVariantLabel: { type: String, default: null },
-    // Simplified Prescription (legacy string format)
-    rightEyeNumber: { type: String, default: null },
-    leftEyeNumber: { type: String, default: null },
-    lensCompany: { type: String, default: null },
-    lensType: { type: String, default: null },
-    lensMaterial: { type: String, default: null },
-    lensColor: { type: String, default: null },
-    isCustomLens: { type: Boolean, default: false },
-    isSameNumber: { type: Boolean, default: false },
-    // Fulfillment tracking
-    fulfillmentSource: { type: String, enum: ['stock', 'ordered', 'unfulfilled'], required: true, default: 'stock' },
-    requestedQty: { type: Number, default: null },
-    fulfilledQty: { type: Number, default: null },
-    sentToWholesaler: { type: Boolean, default: false },
-    wholesalerOrderDate: { type: Date, default: null },
-    labStatus: { type: String, enum: ['pending', 'sent', 'received', 'fitted', 'cancelled'], default: 'pending' },
-    labReceivedDate: { type: Date, default: null },
-    labFittedDate: { type: Date, default: null },
-    // Structured prescription fields
-    rightSpherical: { type: Number, default: null },
-    rightCylinder: { type: Number, default: null },
-    rightAxis: { type: Number, default: null },
-    rightAddition: { type: Number, default: null },
-    leftSpherical: { type: Number, default: null },
-    leftCylinder: { type: Number, default: null },
-    leftAxis: { type: Number, default: null },
-    leftAddition: { type: Number, default: null },
-  },
-  { timestamps: true }
-);
-
-InvoiceItemSchema.pre('validate', function (this: IInvoiceItem) {
-  const refs = [this.frame, this.opticalLens, this.fragrance].filter(Boolean);
-  if (refs.length > 1) {
-    throw new Error('Each invoice item cannot reference more than one of: frame, opticalLens, fragrance');
-  }
-});
-
-InvoiceItemSchema.path('frame').validate(function (this: IInvoiceItem) {
-  const refs = [this.frame, this.opticalLens, this.fragrance].filter(Boolean);
-  return refs.length <= 1;
-}, 'Each invoice item cannot reference more than one of: frame, opticalLens, fragrance');
-
-export const InvoiceItem = mongoose.model<IInvoiceItem>('InvoiceItem', InvoiceItemSchema);
-
+export const InvoiceItem = createFirestoreModel<IInvoiceItem>('invoiceitems');

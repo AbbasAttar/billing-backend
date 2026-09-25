@@ -1,16 +1,10 @@
-import mongoose, { Schema, Document } from 'mongoose';
+import { createFirestoreModel, BaseDoc } from '../lib/firestoreModel';
 
-export interface IFrameCompany extends Document {
-  code:        string;  // e.g. "01"
-  name:        string;  // e.g. "Tulsi"
+export interface IFrameCompany extends BaseDoc {
+  code: string; // e.g. "01"
+  name: string; // e.g. "Tulsi"
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
-const FrameCompanySchema = new Schema<IFrameCompany>(
-  {
-    code: { type: String, required: true, unique: true, trim: true, maxlength: 2 },
-    name: { type: String, required: true, trim: true },
-  },
-  { timestamps: true }
-);
-
-export const FrameCompany = mongoose.model<IFrameCompany>('FrameCompany', FrameCompanySchema);
+export const FrameCompany = createFirestoreModel<IFrameCompany>('framecompanies');

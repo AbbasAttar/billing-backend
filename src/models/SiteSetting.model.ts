@@ -1,16 +1,10 @@
-import { Schema, model, Document } from 'mongoose';
+import { createFirestoreModel, BaseDoc } from '../lib/firestoreModel';
 
-export interface ISiteSetting extends Document {
+export interface ISiteSetting extends BaseDoc {
   key: string;
   value: any;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
-const SiteSettingSchema = new Schema<ISiteSetting>(
-  {
-    key: { type: String, required: true, unique: true, trim: true },
-    value: { type: Schema.Types.Mixed },
-  },
-  { timestamps: true }
-);
-
-export const SiteSetting = model<ISiteSetting>('SiteSetting', SiteSettingSchema);
+export const SiteSetting = createFirestoreModel<ISiteSetting>('sitesettings');

@@ -1,7 +1,7 @@
-import mongoose, { Schema, Document } from 'mongoose';
+import { createFirestoreModel, BaseDoc } from '../lib/firestoreModel';
 
-export interface IOpticalNumber extends Document {
-  customer: mongoose.Types.ObjectId;
+export interface IOpticalNumber extends BaseDoc {
+  customer: string | any;
   name: string;
   leftSpherical?: number;
   leftCylinder?: number;
@@ -12,25 +12,8 @@ export interface IOpticalNumber extends Document {
   rightAddition?: number;
   rightAxis?: number;
   lensType?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
-const OpticalNumberSchema = new Schema<IOpticalNumber>(
-  {
-    customer: { type: Schema.Types.ObjectId, ref: 'Customer', required: true },
-    name: { type: String, required: true, trim: true },
-    leftSpherical: { type: Number },
-    leftCylinder: { type: Number },
-    leftAddition: { type: Number },
-    leftAxis: { type: Number },
-    rightSpherical: { type: Number },
-    rightCylinder: { type: Number },
-    rightAddition: { type: Number },
-    rightAxis: { type: Number },
-    lensType: { type: String, trim: true },
-  },
-  { timestamps: true }
-);
-
-OpticalNumberSchema.index({ customer: 1 });
-
-export const OpticalNumber = mongoose.model<IOpticalNumber>('OpticalNumber', OpticalNumberSchema);
+export const OpticalNumber = createFirestoreModel<IOpticalNumber>('opticalnumbers');

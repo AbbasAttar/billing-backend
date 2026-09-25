@@ -1,13 +1,10 @@
-import mongoose, { Schema, Document } from 'mongoose';
+import { createFirestoreModel, BaseDoc } from '../lib/firestoreModel';
 
-interface IFcmToken extends Document {
+export interface IFcmToken extends BaseDoc {
   token: string;
   registeredAt: Date;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
-const FcmTokenSchema = new Schema<IFcmToken>({
-  token:          { type: String, required: true, unique: true },
-  registeredAt:   { type: Date, default: Date.now },
-});
-
-export const FcmToken = mongoose.model<IFcmToken>('FcmToken', FcmTokenSchema);
+export const FcmToken = createFirestoreModel<IFcmToken>('fcmtokens');

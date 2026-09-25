@@ -23,11 +23,13 @@ router.post('/direct-order', createDirectLabOrder);
 // POST /api/wholesaler-queue/send   — body: { ids: string[] }
 router.post('/send', markSentToWholesaler);
 
-// PATCH /api/wholesaler-queue/status — body: { ids: string[], status: string }
+// PATCH or PUT /api/wholesaler-queue/status — body: { ids: string[], status: string }
 router.patch('/status', updateLabOrderStatus);
+router.put('/status', updateLabOrderStatus);
 
-// PATCH /api/wholesaler-queue/item/:id — update lens details for an order
+// PATCH or PUT /api/wholesaler-queue/item/:id — update lens details for an order
 router.patch('/item/:id', updateLabOrderItem);
+router.put('/item/:id', updateLabOrderItem);
 
 // DELETE /api/wholesaler-queue/:id or DELETE /api/wholesaler-queue — delete/cancel orders
 router.delete('/:id', deleteLabOrder);

@@ -16,7 +16,7 @@ export const getFragranceRevenueSummary = async (req: Request, res: Response, ne
       };
     }
     if (customerId) {
-      invoiceMatch.customer = new mongoose.Types.ObjectId(customerId);
+      invoiceMatch.customer = customerId;
     }
 
     const rows = await Invoice.aggregate([

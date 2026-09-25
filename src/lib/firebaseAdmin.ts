@@ -34,3 +34,22 @@ export function getAdminAuth(): Auth | null {
   if (!app) return null;
   try { return getAuth(app); } catch { return null; }
 }
+
+export function getAdminFirestore() {
+  const app = getAdminApp();
+  if (!app) return null;
+  try {
+    const { getFirestore } = require('firebase-admin/firestore');
+    const db = getFirestore(app, 'attarwala');
+    try {
+      db.settings({ ignoreUndefinedProperties: true });
+    } catch {
+      // Ignore if settings were already initialized
+    }
+    return db;
+  } catch (err) {
+    console.error('Failed to initialize Firestore Admin:', err);
+    return null;
+  }
+}
+

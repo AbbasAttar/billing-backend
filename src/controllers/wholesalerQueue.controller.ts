@@ -205,7 +205,7 @@ export const getPendingOrderItems = async (
     // Reverse-lookup: find invoices that reference these items
     const itemIds = items.map((i) => i._id);
     const invoices = await Invoice.find({ items: { $in: itemIds } })
-      .populate<{ customer: { _id: mongoose.Types.ObjectId; name: string; mobileNumber: string } }>(
+      .populate(
         'customer',
         'name mobileNumber',
       )
@@ -588,7 +588,7 @@ export const markSentToWholesaler = async (
       return;
     }
 
-    const objectIds = ids.map((id) => new mongoose.Types.ObjectId(id as string));
+    const objectIds = ids.map((id) => String(id));
 
     const items = await InvoiceItem.find({
       _id: { $in: objectIds },
@@ -649,32 +649,19 @@ export const markSentToWholesaler = async (
       }
     }
 
-    const session = await mongoose.startSession();
-    try {
-      session.startTransaction();
-
-      await InvoiceItem.updateMany(
-        { _id: { $in: objectIds } },
-        {
-          $set: {
-            sentToWholesaler: true,
-            wholesalerOrderDate: now,
-            labStatus: 'sent',
-          },
+    await InvoiceItem.updateMany(
+      { _id: { $in: objectIds } },
+      {
+        $set: {
+          sentToWholesaler: true,
+          wholesalerOrderDate: now,
+          labStatus: 'sent',
         },
-        { session },
-      );
+      },
+    );
 
-      if (pendingEntries.length > 0) {
-        await PurchaseEntry.insertMany(pendingEntries, { session });
-      }
-
-      await session.commitTransaction();
-    } catch (txError) {
-      await session.abortTransaction();
-      throw txError;
-    } finally {
-      session.endSession();
+    if (pendingEntries.length > 0) {
+      await PurchaseEntry.insertMany(pendingEntries);
     }
 
     res.json({ count: objectIds.length, sentAt: now });
@@ -691,10 +678,16 @@ export const updateLabOrderStatus = async (
   next: NextFunction,
 ): Promise<void> => {
   try {
-    const { ids, status } = req.body as { ids?: string[]; status?: string };
+    const body = req.body || {};
+    const rawIds: string[] = Array.isArray(body.ids)
+      ? body.ids
+      : body.id
+      ? [body.id]
+      : [];
+    const status: string | undefined = body.status;
 
-    if (!Array.isArray(ids) || ids.length === 0 || !status) {
-      res.status(400).json({ message: 'ids array and status are required.' });
+    if (rawIds.length === 0 || !status) {
+      res.status(400).json({ message: 'Item id / ids array and status are required.' });
       return;
     }
 
@@ -703,13 +696,12 @@ export const updateLabOrderStatus = async (
       return;
     }
 
-    const objectIds = ids.map((id) => new mongoose.Types.ObjectId(id));
+    const cleanIds = rawIds.map((id) => (id && typeof id === 'object' ? String(id) : String(id)));
     const now = new Date();
     const updateDoc: Record<string, any> = { labStatus: status };
 
     if (status === 'received') {
       updateDoc.labReceivedDate = now;
-      // Mark linked PurchaseEntry as received
       await PurchaseEntry.updateMany(
         { status: 'pending' },
         { $set: { status: 'received' } },
@@ -722,12 +714,12 @@ export const updateLabOrderStatus = async (
       updateDoc.wholesalerOrderDate = now;
     }
 
-    await InvoiceItem.updateMany(
-      { _id: { $in: objectIds } },
+    const updateRes = await InvoiceItem.updateMany(
+      { _id: { $in: cleanIds } },
       { $set: updateDoc },
     );
 
-    res.json({ updatedCount: objectIds.length, status, updatedAt: now });
+    res.json({ updatedCount: updateRes.modifiedCount, status, updatedAt: now });
   } catch (error) {
     next(error);
   }
@@ -748,7 +740,7 @@ export const deleteLabOrder = async (
       return;
     }
 
-    const objectIds = ids.map((i) => new mongoose.Types.ObjectId(i));
+    const objectIds = ids.map((i) => String(i));
 
     // Find if any invoices reference these items
     const linkedInvoices = await Invoice.find({ items: { $in: objectIds } }).lean();

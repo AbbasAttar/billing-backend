@@ -20,7 +20,7 @@ export async function nextSequence(fy: string): Promise<number> {
     { $inc: { lastSeq: 1 } },
     { new: true, upsert: true }
   );
-  return counter.lastSeq;
+  return counter ? counter.lastSeq : 1;
 }
 
 /** Generates and returns the next invoice number for a given billDate. */

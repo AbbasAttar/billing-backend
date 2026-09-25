@@ -10,7 +10,7 @@ export const listPayments = async (req: Request, res: Response, next: NextFuncti
   try {
     const { obligationId } = req.query as { obligationId?: string };
     const filter: Record<string, unknown> = {};
-    if (obligationId) filter.obligationId = new mongoose.Types.ObjectId(obligationId);
+    if (obligationId) filter.obligationId = obligationId;
     const payments = await ObligationPayment.find(filter).sort({ date: -1 }).limit(200);
     return ok(res, payments);
   } catch (err) { next(err); }

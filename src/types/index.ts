@@ -102,7 +102,9 @@ export type ExpenseCategory =
   | 'maintenance'
   | 'transport'
   | 'marketing'
-  | 'miscellaneous';
+  | 'miscellaneous'
+  | 'vendor_order'
+  | 'home_expense';
 
 export type PaymentMethod = 'cash' | 'upi' | 'card' | 'bank_transfer';
 

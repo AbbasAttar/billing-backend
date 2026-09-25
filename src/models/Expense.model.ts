@@ -1,4 +1,4 @@
-import mongoose, { Document, Schema } from 'mongoose';
+import { createFirestoreModel, BaseDoc } from '../lib/firestoreModel';
 
 export const EXPENSE_CATEGORIES = [
   'staff_tea',
@@ -11,6 +11,8 @@ export const EXPENSE_CATEGORIES = [
   'stock',
   'transport',
   'marketing',
+  'vendor_order',
+  'home_expense',
 ] as const;
 
 export const EXPENSE_PAYMENT_METHODS = ['cash', 'upi', 'card', 'bank_transfer'] as const;
@@ -18,7 +20,7 @@ export const EXPENSE_PAYMENT_METHODS = ['cash', 'upi', 'card', 'bank_transfer'] 
 export type ExpenseCategory = typeof EXPENSE_CATEGORIES[number];
 export type ExpensePaymentMethod = typeof EXPENSE_PAYMENT_METHODS[number];
 
-export interface IExpense extends Document {
+export interface IExpense extends BaseDoc {
   date: Date;
   amount: number;
   category: ExpenseCategory;
@@ -27,31 +29,8 @@ export interface IExpense extends Document {
   paymentMethod: ExpensePaymentMethod;
   isVoid: boolean;
   voidReason?: string;
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
-const ExpenseSchema = new Schema<IExpense>(
-  {
-    date: { type: Date, required: true, default: Date.now },
-    amount: { type: Number, required: true, min: 0.01 },
-    category: { type: String, required: true, enum: EXPENSE_CATEGORIES },
-    note: { type: String, trim: true, maxlength: 300 },
-    vendorName: { type: String, trim: true },
-    paymentMethod: { type: String, required: true, enum: EXPENSE_PAYMENT_METHODS, default: 'cash' },
-    isVoid: { type: Boolean, default: false },
-    voidReason: { type: String, trim: true },
-  },
-  { timestamps: true }
-);
-
-ExpenseSchema.index({ date: -1 });
-ExpenseSchema.index({ category: 1 });
-
-ExpenseSchema.pre('validate', function (this: IExpense) {
-  if (this.isVoid && !this.voidReason?.trim()) {
-    throw new Error('voidReason is required when isVoid is true');
-  }
-});
-
-export const Expense = mongoose.model<IExpense>('Expense', ExpenseSchema);
+export const Expense = createFirestoreModel<IExpense>('expenses');
