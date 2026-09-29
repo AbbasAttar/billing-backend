@@ -163,6 +163,7 @@ export const getPendingOrderItems = async (
 
     const query: Record<string, any> = {
       $or: [
+        { type: 'opticalLens' },
         { fulfillmentSource: 'ordered' },
         { lensType: { $exists: true, $ne: null } },
         { opticalLens: { $exists: true, $ne: null } },
@@ -202,18 +203,56 @@ export const getPendingOrderItems = async (
       return;
     }
 
-    // Reverse-lookup: find invoices that reference these items
-    const itemIds = items.map((i) => i._id);
-    const invoices = await Invoice.find({ items: { $in: itemIds } })
-      .populate(
-        'customer',
-        'name mobileNumber',
-      )
-      .populate({
-        path: 'items',
-        populate: { path: 'frame', select: 'name companyName houseName frameCode' },
-      })
-      .lean();
+    // Reverse-lookup: resolve invoices that reference these items
+    const directInvoiceIds = Array.from(
+      new Set(
+        items
+          .map((i: any) => (i.invoice?._id || i.invoice?.id || i.invoice || i.invoiceId)?.toString())
+          .filter(Boolean),
+      ),
+    );
+
+    let invoices: any[] = [];
+    if (directInvoiceIds.length > 0) {
+      invoices = await Invoice.find({ _id: { $in: directInvoiceIds } })
+        .populate('customer', 'name mobileNumber')
+        .populate({
+          path: 'items',
+          populate: { path: 'frame', select: 'name companyName houseName frameCode' },
+        })
+        .lean();
+    }
+
+    // Build set of item IDs that have already been matched to an invoice
+    const matchedItemIds = new Set<string>();
+    for (const inv of invoices) {
+      for (const itemRef of inv.items || []) {
+        matchedItemIds.add((itemRef._id || itemRef.id || itemRef).toString());
+      }
+    }
+
+    // If any item is not yet matched to an invoice, fetch recent invoices to match
+    const hasUnmatched = items.some((i: any) => !matchedItemIds.has((i._id || i.id).toString()));
+    if (hasUnmatched) {
+      const recentInvoices = await Invoice.find({})
+        .sort({ createdAt: -1 })
+        .limit(250)
+        .populate('customer', 'name mobileNumber')
+        .populate({
+          path: 'items',
+          populate: { path: 'frame', select: 'name companyName houseName frameCode' },
+        })
+        .lean();
+
+      const existingInvIds = new Set(invoices.map((inv) => (inv._id || inv.id).toString()));
+      for (const inv of recentInvoices) {
+        const idStr = (inv._id || inv.id).toString();
+        if (!existingInvIds.has(idStr)) {
+          invoices.push(inv);
+          existingInvIds.add(idStr);
+        }
+      }
+    }
 
     // Map: itemId -> invoice & customer & paired frame context
     const itemCtx = new Map<
@@ -239,7 +278,7 @@ export const getPendingOrderItems = async (
       const pairedFrameCode = frameObj?.frameCode || null;
 
       for (const itemRef of inv.items) {
-        const key = (itemRef._id || itemRef).toString();
+        const key = (itemRef._id || itemRef.id || itemRef).toString();
         if (!itemCtx.has(key)) {
           itemCtx.set(key, {
             invoiceId: (inv._id as mongoose.Types.ObjectId).toString(),
@@ -488,86 +527,103 @@ export const getDailyWholesalerSummary = async (
 };
 
 // ── POST /api/wholesaler-queue/direct-order ──────────────────────────────────
-// Allows logging a custom customer lens directly into the wholesale lab queue without an invoice
+// Allows logging a custom customer lens directly into the wholesale lab queue without an invoice (supports single order or batch)
 export const createDirectLabOrder = async (
   req: Request,
   res: Response,
   next: NextFunction,
 ): Promise<void> => {
   try {
-    const {
-      customerName,
-      customerPhone,
-      frameName,
-      frameCode,
-      lensType,
-      lensCompany,
-      lensMaterial,
-      lensCoating,
-      lensColor,
-      lensIndex,
-      eye,
-      quantity,
-      price,
-      notes,
-      rightSpherical,
-      rightCylinder,
-      rightAxis,
-      rightAddition,
-      leftSpherical,
-      leftCylinder,
-      leftAxis,
-      leftAddition,
-      isSameNumber,
-    } = req.body;
+    const rawOrders = Array.isArray(req.body)
+      ? req.body
+      : Array.isArray(req.body?.orders)
+      ? req.body.orders
+      : [req.body];
 
-    const frameLabel = frameName
-      ? frameCode
-        ? `${frameName} (${frameCode})`
-        : frameName
-      : undefined;
+    const createdItems: any[] = [];
 
-    const itemDoc = new InvoiceItem({
-      userName: customerName?.trim() || 'Walk-in Client',
-      lensType: lensType || 'Single Vision',
-      lensCompany: lensCompany || 'Local',
-      lensMaterial: lensMaterial || 'Fiber',
-      lensCoating: lensCoating || 'Hard Coat',
-      lensColor: lensColor || 'White',
-      lensIndex: lensIndex || '',
-      frameVariantLabel: frameLabel,
-      eye: eye || 'both',
-      quantity: typeof quantity === 'number' && quantity > 0 ? quantity : 1,
-      price: typeof price === 'number' ? price : 0,
-      lensLabel: notes?.trim() || (customerPhone ? `Phone: ${customerPhone}` : undefined),
-      isCustomLens: true,
-      isSameNumber: !!isSameNumber,
-      fulfillmentSource: 'ordered',
-      sentToWholesaler: false,
-      labStatus: 'pending',
-      rightSpherical: rightSpherical !== undefined && rightSpherical !== '' ? Number(rightSpherical) : null,
-      rightCylinder: rightCylinder !== undefined && rightCylinder !== '' ? Number(rightCylinder) : null,
-      rightAxis: rightAxis !== undefined && rightAxis !== '' ? Number(rightAxis) : null,
-      rightAddition: rightAddition !== undefined && rightAddition !== '' ? Number(rightAddition) : null,
-      leftSpherical: isSameNumber
-        ? (rightSpherical !== undefined && rightSpherical !== '' ? Number(rightSpherical) : null)
-        : (leftSpherical !== undefined && leftSpherical !== '' ? Number(leftSpherical) : null),
-      leftCylinder: isSameNumber
-        ? (rightCylinder !== undefined && rightCylinder !== '' ? Number(rightCylinder) : null)
-        : (leftCylinder !== undefined && leftCylinder !== '' ? Number(leftCylinder) : null),
-      leftAxis: isSameNumber
-        ? (rightAxis !== undefined && rightAxis !== '' ? Number(rightAxis) : null)
-        : (leftAxis !== undefined && leftAxis !== '' ? Number(leftAxis) : null),
-      leftAddition: isSameNumber
-        ? (rightAddition !== undefined && rightAddition !== '' ? Number(rightAddition) : null)
-        : (leftAddition !== undefined && leftAddition !== '' ? Number(leftAddition) : null),
-    });
+    for (const orderData of rawOrders) {
+      const {
+        customerName,
+        customerPhone,
+        frameName,
+        frameCode,
+        lensType,
+        lensCompany,
+        lensMaterial,
+        lensCoating,
+        lensColor,
+        lensIndex,
+        eye,
+        quantity,
+        price,
+        notes,
+        rightSpherical,
+        rightCylinder,
+        rightAxis,
+        rightAddition,
+        leftSpherical,
+        leftCylinder,
+        leftAxis,
+        leftAddition,
+        isSameNumber,
+      } = orderData;
 
-    await itemDoc.save();
+      const frameLabel = frameName
+        ? frameCode
+          ? `${frameName} (${frameCode})`
+          : frameName
+        : undefined;
+
+      const itemDoc = new InvoiceItem({
+        type: 'opticalLens',
+        userName: customerName?.trim() || 'Walk-in Client',
+        lensType: lensType || 'Single Vision',
+        lensCompany: lensCompany || 'Local',
+        lensMaterial: lensMaterial || 'Fiber',
+        lensCoating: lensCoating || 'Hard Coat',
+        lensColor: lensColor || 'White',
+        lensIndex: lensIndex || '',
+        frameVariantLabel: frameLabel,
+        eye: eye || 'both',
+        quantity: typeof quantity === 'number' && quantity > 0 ? quantity : 1,
+        price: typeof price === 'number' ? price : 0,
+        lensLabel: notes?.trim() || (customerPhone ? `Phone: ${customerPhone}` : undefined),
+        isCustomLens: true,
+        isSameNumber: !!isSameNumber,
+        fulfillmentSource: 'ordered',
+        sentToWholesaler: false,
+        labStatus: 'pending',
+        rightSpherical: rightSpherical !== undefined && rightSpherical !== '' && rightSpherical !== null ? Number(rightSpherical) : null,
+        rightCylinder: rightCylinder !== undefined && rightCylinder !== '' && rightCylinder !== null ? Number(rightCylinder) : null,
+        rightAxis: rightAxis !== undefined && rightAxis !== '' && rightAxis !== null ? Number(rightAxis) : null,
+        rightAddition: rightAddition !== undefined && rightAddition !== '' && rightAddition !== null ? Number(rightAddition) : null,
+        leftSpherical: isSameNumber
+          ? (rightSpherical !== undefined && rightSpherical !== '' && rightSpherical !== null ? Number(rightSpherical) : null)
+          : (leftSpherical !== undefined && leftSpherical !== '' && leftSpherical !== null ? Number(leftSpherical) : null),
+        leftCylinder: isSameNumber
+          ? (rightCylinder !== undefined && rightCylinder !== '' && rightCylinder !== null ? Number(rightCylinder) : null)
+          : (leftCylinder !== undefined && leftCylinder !== '' && leftCylinder !== null ? Number(leftCylinder) : null),
+        leftAxis: isSameNumber
+          ? (rightAxis !== undefined && rightAxis !== '' && rightAxis !== null ? Number(rightAxis) : null)
+          : (leftAxis !== undefined && leftAxis !== '' && leftAxis !== null ? Number(leftAxis) : null),
+        leftAddition: isSameNumber
+          ? (rightAddition !== undefined && rightAddition !== '' && rightAddition !== null ? Number(rightAddition) : null)
+          : (leftAddition !== undefined && leftAddition !== '' && leftAddition !== null ? Number(leftAddition) : null),
+      });
+
+      await itemDoc.save();
+      createdItems.push(itemDoc);
+    }
 
     res.status(201).json({
-      message: 'Direct customer lab order logged successfully',
-      item: itemDoc,
+      message:
+        createdItems.length > 1
+          ? `${createdItems.length} direct customer lab orders logged successfully`
+          : 'Direct customer lab order logged successfully',
+      item: createdItems[0],
+      items: createdItems,
+      count: createdItems.length,
     });
   } catch (error) {
     next(error);

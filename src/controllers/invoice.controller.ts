@@ -387,6 +387,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       }
 
       const doc: any = {
+        type: item.type,
         quantity: item.quantity,
         price: item.price,
         costPrice,
@@ -394,15 +395,18 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       calculatedTotalCogs += costPrice * item.quantity;
 
       if (item.type === 'frame' && item.frame) {
+        doc.type = 'frame';
         doc.frame = item.frame;
         if ((item as any).frameVariantLabel) doc.frameVariantLabel = (item as any).frameVariantLabel;
       }
       if (item.type === 'fragrance' && item.fragrance) {
+        doc.type = 'fragrance';
         doc.fragrance = item.fragrance;
         const grade = (item as any).fragranceGrade || (item as any).fragranceVariantLabel;
         if (grade) doc.fragranceGrade = grade;
       }
       if (item.type === 'opticalLens') {
+        doc.type = 'opticalLens';
         doc.opticalLens = item._resolvedOpticalLens || item.opticalLens;
         doc.prescription = item._resolvedPrescription || item.prescription;
         doc.eye = item.eye;
@@ -594,6 +598,22 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       visitNumber,
       ...(billClearDate ? { billClearDate } : {}),
     });
+
+    // Link InvoiceItem documents to their parent Invoice
+    if (invoiceItemIds.length > 0) {
+      await InvoiceItem.updateMany(
+        { _id: { $in: invoiceItemIds } },
+        {
+          $set: {
+            invoice: invoice._id,
+            invoiceId: (invoice._id as any).toString(),
+            invoiceNumber: invoice.invoiceNumber,
+          },
+        }
+      ).catch((linkErr) => {
+        console.warn('[createInvoice] Non-blocking: failed to link invoice items to invoice:', linkErr);
+      });
+    }
 
     // ── 10. Auto-deduct lens stock (best-effort) ─────────────────────────────
     for (const item of resolvedItems) {

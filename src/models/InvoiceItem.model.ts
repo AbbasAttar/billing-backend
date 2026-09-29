@@ -1,6 +1,10 @@
 import { createFirestoreModel, BaseDoc } from '../lib/firestoreModel';
 
 export interface IInvoiceItem extends BaseDoc {
+  type?: string;
+  invoice?: string | any;
+  invoiceId?: string;
+  invoiceNumber?: string;
   frame?: string | any;
   opticalLens?: string | any;
   prescription?: string | any;
