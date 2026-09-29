@@ -2315,113 +2315,19 @@ export const getSalesDistributionAnalytics = async (req: Request, res: Response,
 
         // ── 3. Monthly Category Units (Fragrance, Frame, Lens) for Past 12 Months ──
         const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1, 0, 0, 0, 0);
-        const monthlyUnitsAgg = await InvoiceItem.aggregate([
-            {
-                $lookup: {
-                    from: 'invoices',
-                    localField: '_id',
-                    foreignField: 'items',
-                    as: 'invoice',
-                },
-            },
-            { $unwind: '$invoice' },
-            {
-                $match: {
-                    'invoice.billDate': { $gte: twelveMonthsAgo, $lte: now },
-                },
-            },
-            {
-                $project: {
-                    quantity: { $ifNull: ['$quantity', 1] },
-                    price: { $ifNull: ['$price', 0] },
-                    monthKey: {
-                        $dateToString: {
-                            format: '%Y-%m',
-                            date: '$invoice.billDate',
-                            timezone: '+05:30',
-                        },
-                    },
-                    isFrame: {
-                        $cond: [
-                            {
-                                $or: [
-                                    { $gt: ['$frame', null] },
-                                    { $eq: ['$type', 'frame'] },
-                                ],
-                            },
-                            1,
-                            0,
-                        ],
-                    },
-                    isFragrance: {
-                        $cond: [
-                            {
-                                $or: [
-                                    { $gt: ['$fragrance', null] },
-                                    { $eq: ['$type', 'fragrance'] },
-                                ],
-                            },
-                            1,
-                            0,
-                        ],
-                    },
-                    isLens: {
-                        $cond: [
-                            {
-                                $or: [
-                                    { $gt: ['$opticalLens', null] },
-                                    { $eq: ['$type', 'opticalLens'] },
-                                    { $eq: ['$isCustomLens', true] },
-                                    { $gt: ['$lensBrand', null] },
-                                    { $gt: ['$lensType', null] },
-                                ],
-                            },
-                            1,
-                            0,
-                        ],
-                    },
-                },
-            },
-            {
-                $group: {
-                    _id: '$monthKey',
-                    frameUnits: {
-                        $sum: {
-                            $cond: [{ $eq: ['$isFrame', 1] }, '$quantity', 0],
-                        },
-                    },
-                    fragranceUnits: {
-                        $sum: {
-                            $cond: [{ $eq: ['$isFragrance', 1] }, '$quantity', 0],
-                        },
-                    },
-                    lensUnits: {
-                        $sum: {
-                            $cond: [{ $eq: ['$isLens', 1] }, '$quantity', 0],
-                        },
-                    },
-                    frameRevenue: {
-                        $sum: {
-                            $cond: [{ $eq: ['$isFrame', 1] }, { $multiply: ['$quantity', '$price'] }, 0],
-                        },
-                    },
-                    fragranceRevenue: {
-                        $sum: {
-                            $cond: [{ $eq: ['$isFragrance', 1] }, { $multiply: ['$quantity', '$price'] }, 0],
-                        },
-                    },
-                    lensRevenue: {
-                        $sum: {
-                            $cond: [{ $eq: ['$isLens', 1] }, { $multiply: ['$quantity', '$price'] }, 0],
-                        },
-                    },
-                    totalRevenue: {
-                        $sum: { $multiply: ['$quantity', '$price'] },
-                    },
-                },
-            },
-            { $sort: { _id: 1 } },
+
+        const [recentInvoices, allItems] = await Promise.all([
+            Invoice.find({
+                billDate: { $gte: twelveMonthsAgo, $lte: now },
+            }).lean(),
+            InvoiceItem.find().lean(),
         ]);
+
+        const itemsMap = new Map<string, any>();
+        for (const item of allItems) {
+            const id = (item._id || item.id)?.toString();
+            if (id) itemsMap.set(id, item);
+        }
 
         const monthlyUnitsMap = new Map<string, {
             frameUnits: number;
@@ -2432,16 +2338,61 @@ export const getSalesDistributionAnalytics = async (req: Request, res: Response,
             lensRevenue: number;
             totalRevenue: number;
         }>();
-        for (const m of monthlyUnitsAgg) {
-            monthlyUnitsMap.set(m._id, {
-                frameUnits: m.frameUnits,
-                fragranceUnits: m.fragranceUnits,
-                lensUnits: m.lensUnits,
-                frameRevenue: m.frameRevenue || 0,
-                fragranceRevenue: m.fragranceRevenue || 0,
-                lensRevenue: m.lensRevenue || 0,
-                totalRevenue: m.totalRevenue || 0,
-            });
+
+        for (const inv of recentInvoices) {
+            if (!inv.billDate) continue;
+            const bDate = new Date(inv.billDate);
+            if (isNaN(bDate.getTime())) continue;
+            const mKey = formatLocalMonthKey(bDate);
+
+            if (!monthlyUnitsMap.has(mKey)) {
+                monthlyUnitsMap.set(mKey, {
+                    frameUnits: 0,
+                    fragranceUnits: 0,
+                    lensUnits: 0,
+                    frameRevenue: 0,
+                    fragranceRevenue: 0,
+                    lensRevenue: 0,
+                    totalRevenue: 0,
+                });
+            }
+
+            const stats = monthlyUnitsMap.get(mKey)!;
+            const itemRefs = Array.isArray(inv.items) ? inv.items : [];
+
+            for (const ref of itemRefs) {
+                const itemId = typeof ref === 'string' ? ref : (ref?.id || ref?._id)?.toString();
+                const item = itemId ? itemsMap.get(itemId) : (typeof ref === 'object' ? ref : null);
+                if (!item) continue;
+
+                const qty = typeof item.quantity === 'number' && item.quantity > 0 ? item.quantity : 1;
+                const price = typeof item.price === 'number' ? item.price : 0;
+                const lineTotal = qty * price;
+
+                const isFrame = Boolean(item.frame || item.type === 'frame');
+                const isFragrance = Boolean(item.fragrance || item.type === 'fragrance');
+                const isLens = Boolean(
+                    item.opticalLens ||
+                    item.type === 'opticalLens' ||
+                    item.isCustomLens ||
+                    item.lensBrand ||
+                    item.lensType
+                );
+
+                if (isFrame) {
+                    stats.frameUnits += qty;
+                    stats.frameRevenue += lineTotal;
+                }
+                if (isFragrance) {
+                    stats.fragranceUnits += qty;
+                    stats.fragranceRevenue += lineTotal;
+                }
+                if (isLens) {
+                    stats.lensUnits += qty;
+                    stats.lensRevenue += lineTotal;
+                }
+                stats.totalRevenue += lineTotal;
+            }
         }
 
         // Build 12-month array

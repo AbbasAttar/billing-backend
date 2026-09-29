@@ -609,6 +609,30 @@ export async function runMongoAggregatePipeline(
 
     if (stage.$match) {
       docs = docs.filter((d) => matchesMongoFilter(d, stage.$match));
+    } else if (stage.$lookup) {
+      const { from, localField, foreignField, as: asField } = stage.$lookup;
+      if (from && localField && foreignField && asField) {
+        const foreignDocs: any[] = await new FirestoreQuery(from, {}, false).exec();
+        for (const d of docs) {
+          const localVal = getValueByPath(d, localField);
+          const localStr = localVal && (localVal.id || localVal._id || localVal).toString();
+
+          const matches = foreignDocs.filter((fDoc) => {
+            const foreignVal = getValueByPath(fDoc, foreignField);
+            if (Array.isArray(foreignVal)) {
+              return foreignVal.some((item) => {
+                const itemStr = item && (item.id || item._id || item).toString();
+                return itemStr === localStr;
+              });
+            } else if (foreignVal !== undefined && foreignVal !== null) {
+              const foreignStr = (foreignVal.id || foreignVal._id || foreignVal).toString();
+              return foreignStr === localStr;
+            }
+            return false;
+          });
+          d[asField] = matches;
+        }
+      }
     } else if (stage.$unwind) {
       const fieldPath =
         typeof stage.$unwind === 'string'
