@@ -1719,36 +1719,51 @@ export const getExecutiveAnalytics = async (req: Request, res: Response, next: N
             });
         }
 
-        // 10. Timeline Mapping
-        const timelineMap = new Map<string, { label: string; date: string; revenue: number; collected: number; discount: number; count: number }>();
+        // 10. Timeline Mapping & Daily Cash Activity Breakdown
+        interface TimelineInternal {
+            label: string;
+            date: string;
+            revenue: number;
+            collected: number;
+            discount: number;
+            count: number;
+            payments: {
+                cash: number;
+                upi: number;
+                card: number;
+                other: number;
+                count: number;
+            };
+            expenses: {
+                total: number;
+                cash: number;
+                upi: number;
+                bank: number;
+                other: number;
+                count: number;
+                categoryMap: Record<string, number>;
+            };
+        }
+
+        const createEmptyTimelinePoint = (label: string, dateKey: string): TimelineInternal => ({
+            label,
+            date: dateKey,
+            revenue: 0,
+            collected: 0,
+            discount: 0,
+            count: 0,
+            payments: { cash: 0, upi: 0, card: 0, other: 0, count: 0 },
+            expenses: { total: 0, cash: 0, upi: 0, bank: 0, other: 0, count: 0, categoryMap: {} },
+        });
+
+        const timelineMap = new Map<string, TimelineInternal>();
         if (isMonthlyGrouping) {
             for (let i = 0; i < 12; i++) {
                 const d = new Date(windowStart);
                 d.setMonth(d.getMonth() + i);
                 const monthKey = formatLocalMonthKey(d);
                 const label = d.toLocaleString('en-US', { month: 'short' });
-                timelineMap.set(monthKey, { label, date: monthKey, revenue: 0, collected: 0, discount: 0, count: 0 });
-            }
-            for (const inv of currentInvoices) {
-                const monthKey = formatLocalMonthKey(inv.billDate);
-                const point = timelineMap.get(monthKey);
-                if (point) {
-                    point.revenue += (inv.total || 0);
-                    point.discount += (inv.discount || 0);
-                    point.count += 1;
-                }
-            }
-            for (const inv of currentPaymentsInvoices) {
-                if (Array.isArray(inv.payments)) {
-                    for (const p of inv.payments) {
-                        const pDate = p.date ? new Date(p.date) : new Date(inv.billDate);
-                        if (pDate >= windowStart && pDate <= windowEnd) {
-                            const monthKey = formatLocalMonthKey(pDate);
-                            const point = timelineMap.get(monthKey);
-                            if (point) point.collected += (p.amount || 0);
-                        }
-                    }
-                }
+                timelineMap.set(monthKey, createEmptyTimelinePoint(label, monthKey));
             }
         } else {
             for (let i = 0; i < days; i++) {
@@ -1756,37 +1771,103 @@ export const getExecutiveAnalytics = async (req: Request, res: Response, next: N
                 d.setDate(d.getDate() + i);
                 const dayKey = formatLocalDateKey(d);
                 const label = days <= 7 ? d.toLocaleString('en-US', { weekday: 'short' }) : `${d.getDate()} ${d.toLocaleString('en-US', { month: 'short' })}`;
-                timelineMap.set(dayKey, { label, date: dayKey, revenue: 0, collected: 0, discount: 0, count: 0 });
+                timelineMap.set(dayKey, createEmptyTimelinePoint(label, dayKey));
             }
-            for (const inv of currentInvoices) {
-                const dayKey = formatLocalDateKey(inv.billDate);
-                const point = timelineMap.get(dayKey);
-                if (point) {
-                    point.revenue += (inv.total || 0);
-                    point.discount += (inv.discount || 0);
-                    point.count += 1;
-                }
+        }
+
+        // Aggregate Invoiced Revenue per point
+        for (const inv of currentInvoices) {
+            const key = isMonthlyGrouping ? formatLocalMonthKey(inv.billDate) : formatLocalDateKey(inv.billDate);
+            const point = timelineMap.get(key);
+            if (point) {
+                point.revenue += (inv.total || 0);
+                point.discount += (inv.discount || 0);
+                point.count += 1;
             }
-            for (const inv of currentPaymentsInvoices) {
-                if (Array.isArray(inv.payments)) {
-                    for (const p of inv.payments) {
-                        const pDate = p.date ? new Date(p.date) : new Date(inv.billDate);
-                        if (pDate >= windowStart && pDate <= windowEnd) {
-                            const dayKey = formatLocalDateKey(pDate);
-                            const point = timelineMap.get(dayKey);
-                            if (point) point.collected += (p.amount || 0);
+        }
+
+        // Aggregate Payments Inflow per point (Cash vs UPI vs Card)
+        for (const inv of currentPaymentsInvoices) {
+            if (Array.isArray(inv.payments)) {
+                for (const p of inv.payments) {
+                    const pDate = p.date ? new Date(p.date) : new Date(inv.billDate);
+                    if (pDate >= windowStart && pDate <= windowEnd) {
+                        const key = isMonthlyGrouping ? formatLocalMonthKey(pDate) : formatLocalDateKey(pDate);
+                        const point = timelineMap.get(key);
+                        if (point) {
+                            const amt = Number(p.amount) || 0;
+                            point.collected += amt;
+                            point.payments.count += 1;
+                            const method = (p.method || 'cash').toLowerCase();
+                            if (method.includes('cash')) point.payments.cash += amt;
+                            else if (method.includes('upi') || method.includes('qr') || method.includes('gpay') || method.includes('phonepe') || method.includes('paytm')) point.payments.upi += amt;
+                            else if (method.includes('card') || method.includes('pos') || method.includes('swipe')) point.payments.card += amt;
+                            else point.payments.other += amt;
                         }
                     }
                 }
             }
         }
 
-        const timeline = Array.from(timelineMap.values()).map(p => ({
-            ...p,
-            revenue: Math.round(p.revenue),
-            collected: Math.round(p.collected),
-            discount: Math.round(p.discount),
-        }));
+        // Aggregate Expenses Outflow per point (Cash vs UPI vs Bank & Categories)
+        for (const exp of periodExpenses) {
+            const expDate = exp.date ? new Date(exp.date) : null;
+            if (expDate && expDate >= windowStart && expDate <= windowEnd) {
+                const key = isMonthlyGrouping ? formatLocalMonthKey(expDate) : formatLocalDateKey(expDate);
+                const point = timelineMap.get(key);
+                if (point) {
+                    const amt = Number(exp.amount) || 0;
+                    point.expenses.total += amt;
+                    point.expenses.count += 1;
+                    const method = (exp.paymentMethod || 'cash').toLowerCase();
+                    if (method.includes('cash')) point.expenses.cash += amt;
+                    else if (method.includes('upi') || method.includes('qr') || method.includes('gpay') || method.includes('phonepe')) point.expenses.upi += amt;
+                    else if (method.includes('bank') || method.includes('cheque') || method.includes('transfer') || method.includes('neft') || method.includes('rtgs')) point.expenses.bank += amt;
+                    else point.expenses.other += amt;
+
+                    const cat = exp.category || 'miscellaneous';
+                    point.expenses.categoryMap[cat] = (point.expenses.categoryMap[cat] || 0) + amt;
+                }
+            }
+        }
+
+        const timeline = Array.from(timelineMap.values()).map(p => {
+            const expTotal = Math.round(p.expenses.total);
+            const colTotal = Math.round(p.collected);
+            const netFlow = colTotal - expTotal;
+            const topCategoryEntry = Object.entries(p.expenses.categoryMap).sort((a, b) => b[1] - a[1])[0];
+            const categories = Object.entries(p.expenses.categoryMap).map(([category, amount]) => ({
+                category,
+                amount: Math.round(amount),
+            }));
+
+            return {
+                label: p.label,
+                date: p.date,
+                revenue: Math.round(p.revenue),
+                collected: colTotal,
+                discount: Math.round(p.discount),
+                count: p.count,
+                netFlow,
+                payments: {
+                    cash: Math.round(p.payments.cash),
+                    upi: Math.round(p.payments.upi),
+                    card: Math.round(p.payments.card),
+                    other: Math.round(p.payments.other),
+                    count: p.payments.count,
+                },
+                expenses: {
+                    total: expTotal,
+                    cash: Math.round(p.expenses.cash),
+                    upi: Math.round(p.expenses.upi),
+                    bank: Math.round(p.expenses.bank),
+                    other: Math.round(p.expenses.other),
+                    count: p.expenses.count,
+                    topCategory: topCategoryEntry ? topCategoryEntry[0] : undefined,
+                    categories,
+                },
+            };
+        });
 
         const topProducts = Array.from(productMap.values())
             .sort((a, b) => b.revenue - a.revenue)

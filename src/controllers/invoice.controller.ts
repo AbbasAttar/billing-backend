@@ -15,6 +15,8 @@ import { SiteSetting } from '../models/SiteSetting.model';
 import { deductLensStock } from './lensStock.controller';
 import { generateInvoiceNumber, financialYear, formatInvoiceNo } from '../utils/invoiceNumber';
 import { InvoiceCounter } from '../models/InvoiceCounter.model';
+import { PurchaseEntry } from '../models/PurchaseEntry.model';
+import { createPendingPurchasesForInvoice, invalidateInvoiceLookupCache } from './purchaseEntry.controller';
 import type { CreateInvoiceInput, CreateInvoiceItemInput, DemandLogInput } from '../types';
 
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -654,6 +656,13 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       }
     }
 
+    // ── 11. Auto-create pending purchase entries for lens items ──────────────
+    try {
+      await createPendingPurchasesForInvoice(invoice._id);
+    } catch (purchaseErr) {
+      console.warn('[createInvoice] Auto-create pending purchase error:', purchaseErr);
+    }
+
     const populated = await populateInvoice(Invoice.findById(invoice._id));
     res.status(201).json(populated);
   } catch (error) {
@@ -1018,6 +1027,8 @@ export const deleteInvoice = async (req: Request, res: Response, next: NextFunct
 
     await Invoice.findByIdAndDelete(req.params.id);
     await InvoiceItem.deleteMany({ _id: { $in: invoice.items } });
+    await PurchaseEntry.deleteMany({ purchaseInvoiceId: req.params.id, status: 'pending' }).catch(() => {});
+    invalidateInvoiceLookupCache();
     res.json({ message: 'Invoice deleted' });
   } catch (error) {
     next(error);
@@ -1166,6 +1177,13 @@ export const addItemToInvoice = async (req: Request, res: Response, next: NextFu
     }
     
     await invoice.save();
+
+    // Auto-create pending purchase entries if lens item was added
+    try {
+      await createPendingPurchasesForInvoice(invoice._id);
+    } catch (purchaseErr) {
+      console.warn('[addItemToInvoice] Auto-create pending purchase error:', purchaseErr);
+    }
 
     const populated = await populateInvoice(Invoice.findById(invoice._id));
     res.json(populated);

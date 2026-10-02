@@ -9,6 +9,7 @@ const ALLOWED_KEYS = [
   'instagram_limit',
   'default_collection_cycle_days',
   'allow_custom_collection_date',
+  'lens_suppliers',
 ] as const;
 type AllowedKey = (typeof ALLOWED_KEYS)[number];
 
@@ -17,6 +18,17 @@ function defaultValue(key: AllowedKey) {
   if (key === 'instagram_limit') return 6;
   if (key === 'default_collection_cycle_days') return 14;
   if (key === 'allow_custom_collection_date') return true;
+  if (key === 'lens_suppliers') {
+    return [
+      'Dayal Opticals Lab',
+      'GKB Lens Lab',
+      'Essilor India Lab',
+      'Enterprise Ophthalmics',
+      'Zeiss Vision Care',
+      'Hoya Vision Lab',
+      'Local Wholesale Lab',
+    ];
+  }
   return null;
 }
 

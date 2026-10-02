@@ -136,6 +136,200 @@ export const lookup = async (req: Request, res: Response, next: NextFunction) =>
   } catch (e) { next(e); }
 };
 
+// GET or POST /lens-pricing/match
+// Smart Pricing Matcher for procurement & POS
+export const matchPricingRule = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const data = req.method === 'POST' ? req.body : req.query;
+    const {
+      lensType,
+      material,
+      coating,
+      color = 'White',
+      brand,
+      sph: qSph,
+      cyl: qCyl,
+      add: qAdd,
+      axis: qAxis,
+    } = data as Record<string, any>;
+
+    const sph = qSph !== undefined && qSph !== '' && qSph !== null ? parseFloat(String(qSph)) : 0;
+    const cyl = qCyl !== undefined && qCyl !== '' && qCyl !== null ? parseFloat(String(qCyl)) : 0;
+    const addVal = qAdd !== undefined && qAdd !== '' && qAdd !== 'null' && qAdd !== null ? parseFloat(String(qAdd)) : null;
+    const axisVal = qAxis !== undefined && qAxis !== '' && qAxis !== null ? parseFloat(String(qAxis)) : null;
+
+    if (isNaN(sph)) return fail(res, 'sph must be a valid number', 400);
+    if (isNaN(cyl)) return fail(res, 'cyl must be a valid number', 400);
+
+    // Determine axisType (ready vs cross vs any)
+    let axisType = 'any';
+    if (Math.abs(cyl) >= 0.25 && axisVal !== null && !isNaN(axisVal)) {
+      if (cyl > 0) {
+        axisType = (axisVal >= 170 && axisVal <= 180) || (axisVal >= 0 && axisVal <= 10) ? 'ready' : 'cross';
+      } else {
+        axisType = axisVal >= 80 && axisVal <= 100 ? 'ready' : 'cross';
+      }
+    }
+
+    // Load candidates matching lensType and material
+    const query: Record<string, unknown> = {};
+    if (lensType) query.lensType = lensType;
+    if (material) query.material = material;
+    if (color) query.color = color;
+
+    // Fetch all pricing rules matching base criteria
+    const allRules = await LensPricing.find(query).lean();
+
+    // Score and filter candidates
+    interface ScoredRule {
+      rule: typeof allRules[0];
+      score: number;
+      matchedBy: Record<string, boolean>;
+    }
+
+    const matchedCandidates: ScoredRule[] = [];
+
+    for (const rule of allRules) {
+      let score = 0;
+      const matchedBy: Record<string, boolean> = {
+        type: Boolean(rule.lensType && (!lensType || rule.lensType.toLowerCase() === String(lensType).toLowerCase())),
+        material: Boolean(rule.material && (!material || rule.material.toLowerCase() === String(material).toLowerCase())),
+        coating: false,
+        brand: false,
+        sph: false,
+        cyl: false,
+        add: false,
+      };
+
+      // Coating match
+      if (coating && rule.coating) {
+        const cRule = rule.coating.toLowerCase().trim();
+        const cReq = String(coating).toLowerCase().trim();
+        if (cRule === cReq) {
+          matchedBy.coating = true;
+          score += 50;
+        } else if (cRule.includes(cReq) || cReq.includes(cRule)) {
+          matchedBy.coating = true;
+          score += 30;
+        }
+      } else if (!coating) {
+        matchedBy.coating = true;
+      }
+
+      // Brand match
+      if (brand && rule.brand) {
+        const bRule = rule.brand.toLowerCase().trim();
+        const bReq = String(brand).toLowerCase().trim();
+        if (bRule === bReq) {
+          matchedBy.brand = true;
+          score += 40;
+        } else if (bRule.includes(bReq) || bReq.includes(bRule)) {
+          matchedBy.brand = true;
+          score += 20;
+        }
+      } else if (!brand) {
+        matchedBy.brand = true;
+      }
+
+      // Axis match
+      if (rule.axisType === axisType) {
+        score += 15;
+      } else if (rule.axisType === 'any') {
+        score += 5;
+      }
+
+      // SPH power bracket: minSph <= sph <= maxSph
+      const minS = Math.min(rule.minSph, rule.maxSph);
+      const maxS = Math.max(rule.minSph, rule.maxSph);
+      if (sph >= minS - 0.001 && sph <= maxS + 0.001) {
+        matchedBy.sph = true;
+        score += 30;
+      }
+
+      // CYL power bracket: minCyl <= cyl <= maxCyl
+      const minC = Math.min(rule.minCyl, rule.maxCyl);
+      const maxC = Math.max(rule.minCyl, rule.maxCyl);
+      if (cyl >= minC - 0.001 && cyl <= maxC + 0.001) {
+        matchedBy.cyl = true;
+        score += 30;
+      }
+
+      // ADD power bracket (if applicable)
+      if (addVal !== null) {
+        if (rule.minAdd !== null && rule.minAdd !== undefined) {
+          const minA = rule.minAdd;
+          const maxA = rule.maxAdd ?? minA;
+          if (addVal >= minA - 0.001 && addVal <= maxA + 0.001) {
+            matchedBy.add = true;
+            score += 20;
+          }
+        }
+      } else {
+        if (rule.minAdd === null || rule.minAdd === undefined) {
+          matchedBy.add = true;
+          score += 10;
+        }
+      }
+
+      // Check if primary Rx criteria matched
+      if (matchedBy.sph && matchedBy.cyl && matchedBy.coating) {
+        // Narrower ranges get a tie-breaker bonus
+        const sphSpan = Math.abs(rule.maxSph - rule.minSph);
+        const cylSpan = Math.abs(rule.maxCyl - rule.minCyl);
+        score += Math.max(0, 20 - (sphSpan + cylSpan));
+
+        matchedCandidates.push({ rule, score, matchedBy });
+      }
+    }
+
+    // Sort by highest score first
+    matchedCandidates.sort((a, b) => b.score - a.score);
+
+    if (matchedCandidates.length > 0) {
+      const best = matchedCandidates[0];
+      const r = best.rule;
+
+      return ok(res, {
+        matched: true,
+        pricingId: r._id,
+        costPerLens: r.costPrice,
+        sellPerLens: r.price,
+        costPerPair: r.costPrice * 2,
+        sellPerPair: r.price * 2,
+        brand: r.brand ?? null,
+        matchedBy: best.matchedBy,
+        matrix: {
+          id: r._id,
+          brand: r.brand,
+          lensType: r.lensType,
+          material: r.material,
+          coating: r.coating,
+          minSph: r.minSph,
+          maxSph: r.maxSph,
+          minCyl: r.minCyl,
+          maxCyl: r.maxCyl,
+          minAdd: r.minAdd,
+          maxAdd: r.maxAdd,
+          costPrice: r.costPrice,
+          price: r.price,
+        },
+      });
+    }
+
+    // No match found
+    return ok(res, {
+      matched: false,
+      pricingId: null,
+      costPerLens: null,
+      sellPerLens: null,
+      costPerPair: null,
+      sellPerPair: null,
+      message: 'No matching rule found in LensPricing catalog for given specs.',
+    });
+  } catch (e) { next(e); }
+};
+
+
 // GET /lens-pricing/quote-history?sph=&cyl=&axis=&add=&lensType=&coating=&material=&color=&company=&limit=
 export const getQuoteHistory = async (req: Request, res: Response, next: NextFunction) => {
   try {

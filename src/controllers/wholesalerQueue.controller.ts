@@ -4,6 +4,7 @@ import { InvoiceItem } from '../models/InvoiceItem.model';
 import { Invoice } from '../models/Invoice.model';
 import { PurchaseEntry } from '../models/PurchaseEntry.model';
 import { Frame } from '../models/Frame.model';
+import { invalidateInvoiceLookupCache } from './purchaseEntry.controller';
 
 // Helper to format power values cleanly (+ for positive, - for negative, no sign for 0.00)
 function formatPowerVal(val: number): string {
@@ -171,15 +172,12 @@ export const getPendingOrderItems = async (
     };
 
     if (statusFilter === 'pending') {
-      query.$and = [
-        { $or: [{ sentToWholesaler: { $ne: true } }, { labStatus: 'pending' }] },
-        { labStatus: { $nin: ['received', 'fitted', 'cancelled'] } },
-      ];
+      query.labStatus = { $nin: ['received', 'fitted', 'cancelled'] };
     } else if (statusFilter === 'sent') {
       query.sentToWholesaler = true;
       query.labStatus = { $in: ['sent', 'pending'] };
     } else if (statusFilter === 'received') {
-      query.labStatus = 'received';
+      query.labStatus = { $in: ['received', 'fitted'] };
     } else if (statusFilter === 'fitted') {
       query.labStatus = 'fitted';
     }
@@ -658,18 +656,36 @@ export const markSentToWholesaler = async (
     const now = new Date();
     const pendingEntries: object[] = [];
 
+    const invoices = await Invoice.find({
+      items: { $in: objectIds },
+    }).lean();
+
     for (const item of items) {
       const eye = item.eye as string | null | undefined;
+      const itemIdStr = String(item._id || item.id);
+      const inv = invoices.find((iv: any) =>
+        Array.isArray(iv.items) && iv.items.some((itId: any) => String(itId) === itemIdStr)
+      );
+
+      const clientLabel = inv?.customerName || item.userName || item.lensLabel || 'Lens Order';
+      const supplierInvoiceRef = inv?.invoiceNumber || undefined;
+      const purchaseInvoiceId = inv?._id ? String(inv._id) : undefined;
+
+      const unitSellPrice = typeof item.price === 'number' && item.price > 0 ? item.price : undefined;
+
       const skuBase = {
         status: 'pending' as const,
-        qty: item.quantity,
-        notes: item.lensLabel ?? item.lensName ?? null,
+        qty: item.quantity || 1,
+        notes: clientLabel,
         lensType: item.lensType ?? null,
         material: item.lensMaterial ?? null,
         coating: item.lensCoating ?? null,
-        color: item.lensColor ?? null,
+        color: item.lensColor || 'White',
         purchaseDate: now,
         wholesalerOrderDate: now,
+        supplierInvoiceRef,
+        purchaseInvoiceId,
+        unitSellPrice,
       };
 
       const rightSph = item.rightSpherical ?? item.spherical ?? null;
@@ -678,6 +694,8 @@ export const markSentToWholesaler = async (
       if ((eye === 'both' || !eye) && rightSph !== null && leftSph !== null) {
         pendingEntries.push({
           ...skuBase,
+          notes: `${clientLabel} (RE)`,
+          importedFrom: `${itemIdStr}_re`,
           sph: rightSph,
           cyl: item.rightCylinder ?? item.cylinder ?? 0,
           add: item.rightAddition ?? item.addition ?? null,
@@ -685,6 +703,8 @@ export const markSentToWholesaler = async (
         });
         pendingEntries.push({
           ...skuBase,
+          notes: `${clientLabel} (LE)`,
+          importedFrom: `${itemIdStr}_le`,
           sph: leftSph,
           cyl: item.leftCylinder ?? (item.isSameNumber ? item.rightCylinder ?? 0 : 0),
           add: item.leftAddition ?? (item.isSameNumber ? item.rightAddition ?? null : null),
@@ -694,9 +714,12 @@ export const markSentToWholesaler = async (
         const sph = rightSph ?? leftSph ?? null;
         const cyl = item.rightCylinder ?? item.leftCylinder ?? item.cylinder ?? 0;
         const add = item.rightAddition ?? item.leftAddition ?? item.addition ?? null;
+        const eyeSuffix = eye === 'left' ? 'le' : eye === 'right' ? 're' : 'be';
 
         pendingEntries.push({
           ...skuBase,
+          notes: eye ? `${clientLabel} (${eye === 'left' ? 'LE' : 'RE'})` : clientLabel,
+          importedFrom: `${itemIdStr}_${eyeSuffix}`,
           sph,
           cyl,
           add,
@@ -718,6 +741,7 @@ export const markSentToWholesaler = async (
 
     if (pendingEntries.length > 0) {
       await PurchaseEntry.insertMany(pendingEntries);
+      invalidateInvoiceLookupCache();
     }
 
     res.json({ count: objectIds.length, sentAt: now });

@@ -463,7 +463,11 @@ export const deleteExpense = async (req: Request, res: Response, next: NextFunct
       return fail(res, 'Historical records created before today are locked. Manager PIN (1959) required to delete.', 403);
     }
 
-    await expense.deleteOne();
+    if (typeof (expense as any).deleteOne === 'function') {
+      await (expense as any).deleteOne();
+    } else {
+      await Expense.findByIdAndDelete(req.params.id);
+    }
     return ok(res, { _id: req.params.id }, 'Expense deleted');
   } catch (error) {
     next(error);

@@ -9,6 +9,7 @@ export interface BaseDoc {
   toObject?: () => Record<string, any>;
   toJSON?: () => Record<string, any>;
   save?: () => Promise<any>;
+  deleteOne?: () => Promise<any>;
   [key: string]: any;
 }
 
@@ -56,6 +57,21 @@ export function attachDocMethods(doc: any, modelObj?: any): any {
   if (!Object.prototype.hasOwnProperty.call(doc, 'toJSON')) {
     Object.defineProperty(doc, 'toJSON', {
       value: () => ({ ...doc }),
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    });
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(doc, 'deleteOne')) {
+    Object.defineProperty(doc, 'deleteOne', {
+      value: async function () {
+        const docId = doc.id || doc._id;
+        if (modelObj && docId) {
+          return modelObj.findByIdAndDelete(docId);
+        }
+        return null;
+      },
       enumerable: false,
       writable: true,
       configurable: true,
