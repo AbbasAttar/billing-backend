@@ -13,19 +13,24 @@ const MS_PER_DAY = 86_400_000;
 async function getRecentlySentIds(ruleId: Types.ObjectId, cooldownDays: number): Promise<Set<string>> {
   const since = new Date(Date.now() - cooldownDays * MS_PER_DAY);
 
-  // Find campaigns created by this rule (tagged via payload) after the cooldown window
-  const recentLogs = await AutomationLog.find({ ruleId, triggeredAt: { $gte: since } }).lean();
+  // Find campaigns created by this rule after the cooldown window
+  const recentLogs = await AutomationLog.find({ ruleId, triggeredAt: { $gte: since } })
+    .select('campaignId')
+    .limit(100)
+    .lean();
   if (!recentLogs.length) return new Set();
 
   const campaignIds = recentLogs.map((l) => l.campaignId).filter((id): id is Types.ObjectId => id != null);
   if (!campaignIds.length) return new Set();
 
-  // Get the customer IDs that were targeted in those campaigns
+  // Get the customer IDs that were targeted in those campaigns with date bound
   const events = await MarketingEvent.find({
     campaignId: { $in: campaignIds },
     eventType: 'message_sent',
+    createdAt: { $gte: since },
   })
     .select('customerId')
+    .limit(500)
     .lean();
 
   return new Set(events.map((e) => String(e.customerId)));
@@ -42,7 +47,7 @@ export interface RuleRunResult {
   errors: string[];
 }
 
-export async function runAutomationRule(rule: IAutomationRule): Promise<RuleRunResult> {
+export async function runAutomationRule(rule: IAutomationRule, prebuiltIntel?: any): Promise<RuleRunResult> {
   const errors: string[] = [];
   const result: RuleRunResult = {
     ruleId: String(rule._id),
@@ -55,9 +60,9 @@ export async function runAutomationRule(rule: IAutomationRule): Promise<RuleRunR
   };
 
   try {
-    // 1. Get current segment
-    const intel = await buildMarketingIntelligence();
-    const segCustomers = intel.segments[rule.triggerSegment];
+    // 1. Get current segment (reuse prebuilt intel if provided to eliminate redundant scans)
+    const intel = prebuiltIntel || (await buildMarketingIntelligence());
+    const segCustomers = intel.segments[rule.triggerSegment] || [];
     result.segmentSize = segCustomers.length;
 
     if (!segCustomers.length) {
@@ -180,10 +185,15 @@ export async function runAllActiveRules(): Promise<RuleRunResult[]> {
   const rules = await AutomationRule.find({ isActive: true }).lean();
   console.log(`[AutomationEngine] Running ${rules.length} active rule(s)`);
 
+  if (!rules.length) return [];
+
+  // Build marketing intelligence ONCE for all rules in this run
+  const intel = await buildMarketingIntelligence();
+
   const results: RuleRunResult[] = [];
   for (const rule of rules) {
-    // Run sequentially to avoid hammering the DB / external APIs
-    const result = await runAutomationRule(rule as IAutomationRule);
+    // Run sequentially with shared prebuilt intel
+    const result = await runAutomationRule(rule as IAutomationRule, intel);
     results.push(result);
   }
   return results;

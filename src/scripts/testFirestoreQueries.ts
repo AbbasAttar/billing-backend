@@ -26,6 +26,13 @@ async function testQueries() {
   const fragranceCount = await Fragrance.countDocuments();
   console.log(`✅ Fragrance.countDocuments(): ${fragranceCount}`);
 
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000);
+  const recentInvoiceCount = await Invoice.countDocuments({ billDate: { $gte: thirtyDaysAgo } });
+  console.log(`✅ Invoice.countDocuments({ billDate: { $gte: 30d } }): ${recentInvoiceCount}`);
+
+  const boundedInvoices = await Invoice.find({ billDate: { $gte: thirtyDaysAgo } }).limit(5).lean();
+  console.log(`✅ Invoice.find({ billDate: { $gte: 30d } }).limit(5): returned ${boundedInvoices.length} docs`);
+
   console.log('\n🎉 ALL FIRESTORE MODEL QUERIES WORKING PERFECTLY!');
   process.exit(0);
 }

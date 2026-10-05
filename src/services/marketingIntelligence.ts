@@ -91,19 +91,33 @@ function isProgressiveLens(item: any): boolean {
 
 // ── Main export ──────────────────────────────────────────────────────────────
 
-export const buildMarketingIntelligence = async () => {
-  const today = startOfDay(new Date());
+// In-memory TTL cache to prevent repeated scans across rules and requests
+let cachedIntel: { data: any; expiresAt: number } | null = null;
+const INTEL_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 
-  const invoices = await Invoice.find()
+export const invalidateMarketingIntelligenceCache = () => {
+  cachedIntel = null;
+};
+
+export const buildMarketingIntelligence = async (forceRefresh = false) => {
+  const now = Date.now();
+  if (!forceRefresh && cachedIntel && cachedIntel.expiresAt > now) {
+    return cachedIntel.data;
+  }
+
+  const today = startOfDay(new Date());
+  // Date bound: Look back max 540 days (18 months) which matches FRAME_REPLACEMENT_DAYS.
+  // Invoices older than 18 months do not affect active customer segmentation.
+  const cutoffDate = new Date(today.getTime() - FRAME_REPLACEMENT_DAYS * DAY);
+
+  const invoices = await Invoice.find({ billDate: { $gte: cutoffDate } })
+    .select('customer items billDate total discount')
     .populate('customer', 'name mobileNumber email tags dateOfBirth')
     .populate({
       path: 'items',
-      populate: [
-        { path: 'frame', select: 'name companyName' },
-        { path: 'opticalLens', select: 'name brand category addition' },
-        { path: 'fragrance', select: 'name companyName' },
-      ],
+      select: 'frame opticalLens fragrance lensBrand lensName lensCategory lensType lensCoating addition lensLabel frameVariantLabel type price mrp',
     })
+    .sort({ billDate: -1 })
     .lean();
 
   // ── 1. Aggregate per-customer ────────────────────────────────────────────────
@@ -734,7 +748,7 @@ export const buildMarketingIntelligence = async () => {
   // Sort by potential revenue descending
   opportunities.sort((a, b) => b.potentialRevenue - a.potentialRevenue);
 
-  return {
+  const result = {
     generatedAt: new Date().toISOString(),
     summary: {
       ...summary,
@@ -766,4 +780,11 @@ export const buildMarketingIntelligence = async () => {
       birthdayThisMonth: birthdayThisMonth.slice(0, 100),
     },
   };
+
+  cachedIntel = {
+    data: result,
+    expiresAt: now + INTEL_CACHE_TTL_MS,
+  };
+
+  return result;
 };

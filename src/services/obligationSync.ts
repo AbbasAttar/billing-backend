@@ -4,7 +4,11 @@ import { Cashflow, normalizePaymentMethod } from '../models/Cashflow.model';
 
 export async function syncObligationPaymentsToCashflow(): Promise<{ synced: number }> {
   try {
-    const payments = await ObligationPayment.find().lean();
+    // Bounded startup sync: only inspect recent obligation payments (last 45 days) to avoid full collection reads on boot
+    const lookbackDate = new Date(Date.now() - 45 * 86_400_000);
+    const payments = await ObligationPayment.find({ date: { $gte: lookbackDate } })
+      .limit(150)
+      .lean();
     let syncedCount = 0;
 
     for (const payment of payments) {
@@ -46,8 +50,8 @@ export async function syncObligationPaymentsToCashflow(): Promise<{ synced: numb
       syncedCount++;
     }
 
-    // Also check for any obligations with alreadyPaid > sum of recorded ObligationPayment
-    const obligations = await Obligation.find({ alreadyPaid: { $gt: 0 } }).lean();
+    // Also check for any obligations with alreadyPaid > sum of recorded ObligationPayment (bounded)
+    const obligations = await Obligation.find({ alreadyPaid: { $gt: 0 } }).limit(50).lean();
     for (const obl of obligations) {
       const existingPayments = await ObligationPayment.find({ obligationId: obl._id }).lean();
       const totalRecorded = existingPayments.reduce((sum, item) => sum + item.amountPaid, 0);

@@ -213,46 +213,12 @@ export const getPendingOrderItems = async (
     let invoices: any[] = [];
     if (directInvoiceIds.length > 0) {
       invoices = await Invoice.find({ _id: { $in: directInvoiceIds } })
+        .select('customer invoiceNumber billDate items')
         .populate('customer', 'name mobileNumber')
-        .populate({
-          path: 'items',
-          populate: { path: 'frame', select: 'name companyName houseName frameCode' },
-        })
         .lean();
     }
 
-    // Build set of item IDs that have already been matched to an invoice
-    const matchedItemIds = new Set<string>();
-    for (const inv of invoices) {
-      for (const itemRef of inv.items || []) {
-        matchedItemIds.add((itemRef._id || itemRef.id || itemRef).toString());
-      }
-    }
-
-    // If any item is not yet matched to an invoice, fetch recent invoices to match
-    const hasUnmatched = items.some((i: any) => !matchedItemIds.has((i._id || i.id).toString()));
-    if (hasUnmatched) {
-      const recentInvoices = await Invoice.find({})
-        .sort({ createdAt: -1 })
-        .limit(250)
-        .populate('customer', 'name mobileNumber')
-        .populate({
-          path: 'items',
-          populate: { path: 'frame', select: 'name companyName houseName frameCode' },
-        })
-        .lean();
-
-      const existingInvIds = new Set(invoices.map((inv) => (inv._id || inv.id).toString()));
-      for (const inv of recentInvoices) {
-        const idStr = (inv._id || inv.id).toString();
-        if (!existingInvIds.has(idStr)) {
-          invoices.push(inv);
-          existingInvIds.add(idStr);
-        }
-      }
-    }
-
-    // Map: itemId -> invoice & customer & paired frame context
+    // Map: itemId -> invoice & customer context
     const itemCtx = new Map<
       string,
       {
@@ -266,28 +232,24 @@ export const getPendingOrderItems = async (
       }
     >();
 
-    for (const inv of invoices) {
-      const cust = inv.customer as { name?: string; mobileNumber?: string } | null;
-      const invItems = (inv.items as any[]) || [];
-      // Find if there is a frame item in this invoice
-      const frameItem = invItems.find((it) => it.frame || it.type === 'frame');
-      const frameObj = frameItem?.frame as any;
-      const pairedFrameName = frameObj?.houseName || frameObj?.name || frameItem?.lensBrand || null;
-      const pairedFrameCode = frameObj?.frameCode || null;
+    const invoiceMap = new Map<string, any>(invoices.map((inv) => [(inv._id || inv.id).toString(), inv]));
 
-      for (const itemRef of inv.items) {
-        const key = (itemRef._id || itemRef.id || itemRef).toString();
-        if (!itemCtx.has(key)) {
-          itemCtx.set(key, {
-            invoiceId: (inv._id as mongoose.Types.ObjectId).toString(),
-            invoiceNumber: inv.invoiceNumber ?? null,
-            billDate: inv.billDate,
-            customerName: cust?.name ?? 'Walk-in Client',
-            customerPhone: cust?.mobileNumber ?? '',
-            pairedFrameName,
-            pairedFrameCode,
-          });
-        }
+    for (const item of items) {
+      const invId = (item.invoice?._id || item.invoice?.id || item.invoice || item.invoiceId)?.toString();
+      const itemId = (item._id || item.id).toString();
+
+      if (invId && invoiceMap.has(invId)) {
+        const inv = invoiceMap.get(invId)!;
+        const cust = inv.customer as { name?: string; mobileNumber?: string } | null;
+        itemCtx.set(itemId, {
+          invoiceId: invId,
+          invoiceNumber: inv.invoiceNumber ?? item.invoiceNumber ?? null,
+          billDate: inv.billDate || item.createdAt,
+          customerName: cust?.name ?? item.userName ?? 'Walk-in Client',
+          customerPhone: cust?.mobileNumber ?? '',
+          pairedFrameName: item.frameVariantLabel || null,
+          pairedFrameCode: null,
+        });
       }
     }
 

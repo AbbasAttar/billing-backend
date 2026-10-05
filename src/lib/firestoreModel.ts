@@ -695,6 +695,89 @@ export async function runMongoAggregatePipeline(
   return docs;
 }
 
+export function isMissingIndexError(err: any): boolean {
+  if (!err) return false;
+  const msg = `${err.message || ''} ${err.details || ''}`.toLowerCase();
+  return (
+    err.code === 9 ||
+    err.code === 'FAILED_PRECONDITION' ||
+    err.code === '9' ||
+    msg.includes('requires an index') ||
+    msg.includes('create_composite') ||
+    msg.includes('failed_precondition')
+  );
+}
+
+export function extractIndexUrl(err: any): string | null {
+  if (!err) return null;
+  const str = `${err.message || ''} ${err.details || ''}`;
+  const match = str.match(/https:\/\/console\.firebase\.google\.com[^\s)"']+/);
+  return match ? match[0] : null;
+}
+
+export function logMissingIndexError(colName: string, err: any, action: string = 'query'): string | null {
+  const url = extractIndexUrl(err);
+  console.error('\n' + '🚨'.repeat(40));
+  console.error(`[FIRESTORE MISSING COMPOSITE INDEX ERROR]`);
+  console.error(`Collection : "${colName}"`);
+  console.error(`Operation  : ${action}`);
+  if (url) {
+    console.error(`\n👉 DIRECT URL TO CREATE INDEX (Click or copy):\n   \x1b[36m\x1b[4m${url}\x1b[0m\n`);
+  } else {
+    console.error(`Error details:`, err?.message || err);
+  }
+  console.error('🚨'.repeat(40) + '\n');
+  return url;
+}
+
+const NATIVE_FIRESTORE_SUB_OPS = new Set(['$gte', '$gt', '$lte', '$lt', '$eq', '$ne', '$in']);
+
+export function isComplexFilter(filter: any): boolean {
+  if (!filter || typeof filter !== 'object') return false;
+  for (const [k, v] of Object.entries(filter)) {
+    if (k.startsWith('$')) {
+      return true;
+    }
+    if (v && typeof v === 'object' && !(v instanceof Date) && !Array.isArray(v)) {
+      for (const subKey of Object.keys(v)) {
+        if (subKey.startsWith('$') && !NATIVE_FIRESTORE_SUB_OPS.has(subKey)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+export function extractWhereFilters(filter: any): Array<[string, FirebaseFirestore.WhereFilterOp, any]> {
+  const whereFilters: Array<[string, FirebaseFirestore.WhereFilterOp, any]> = [];
+  if (!filter || typeof filter !== 'object') return whereFilters;
+
+  for (const [key, val] of Object.entries(filter)) {
+    if (key === '_id' || key === 'id' || key.startsWith('$') || val === undefined) continue;
+
+    if (
+      typeof val === 'string' ||
+      typeof val === 'number' ||
+      typeof val === 'boolean' ||
+      val instanceof Date
+    ) {
+      whereFilters.push([key, '==', val]);
+    } else if (val && typeof val === 'object' && !Array.isArray(val) && !(val instanceof Date)) {
+      if ((val as any).$in && Array.isArray((val as any).$in)) {
+        whereFilters.push([key, 'in', (val as any).$in.slice(0, 30)]);
+      }
+      if ((val as any).$eq !== undefined) whereFilters.push([key, '==', (val as any).$eq]);
+      if ((val as any).$ne !== undefined) whereFilters.push([key, '!=', (val as any).$ne]);
+      if ((val as any).$gte !== undefined) whereFilters.push([key, '>=', (val as any).$gte]);
+      if ((val as any).$gt !== undefined) whereFilters.push([key, '>', (val as any).$gt]);
+      if ((val as any).$lte !== undefined) whereFilters.push([key, '<=', (val as any).$lte]);
+      if ((val as any).$lt !== undefined) whereFilters.push([key, '<', (val as any).$lt]);
+    }
+  }
+  return whereFilters;
+}
+
 export class FirestoreQuery<T = any> implements PromiseLike<T[]> {
   private colName: string;
   private rawFilter: any;
@@ -740,20 +823,7 @@ export class FirestoreQuery<T = any> implements PromiseLike<T[]> {
       }
     }
 
-    for (const [key, val] of Object.entries(filter)) {
-      if (key === '_id' || key === 'id' || key.startsWith('$') || val === undefined) continue;
-
-      if (
-        typeof val === 'string' ||
-        typeof val === 'number' ||
-        typeof val === 'boolean' ||
-        val instanceof Date
-      ) {
-        this.simpleWhereFilters.push([key, '==', val]);
-      } else if (val && typeof val === 'object' && (val as any).$in && Array.isArray((val as any).$in)) {
-        this.simpleWhereFilters.push([key, 'in', (val as any).$in.slice(0, 30)]);
-      }
-    }
+    this.simpleWhereFilters = extractWhereFilters(filter);
   }
 
   sort(sortObj: any) {
@@ -854,16 +924,73 @@ export class FirestoreQuery<T = any> implements PromiseLike<T[]> {
       results = this.isSingleDoc ? (docs.length > 0 ? docs[0] : null) : docs;
     } else {
       let docs: any[] = [];
+      const hasComplexFilter = isComplexFilter(this.rawFilter);
+
       try {
         let query: FirebaseFirestore.Query = colRef;
         for (const [field, op, val] of this.simpleWhereFilters) {
           query = query.where(field, op, val);
         }
+
+        // Push ordering down to Firestore when no in-memory complex filter
+        if (this.orderBys.length > 0 && !hasComplexFilter) {
+          for (const [field, dir] of this.orderBys) {
+            query = query.orderBy(field, dir);
+          }
+        }
+
+        // Push skip/offset down to Firestore when no in-memory complex filter
+        if (this.offsetNum && this.offsetNum > 0 && !hasComplexFilter) {
+          query = query.offset(this.offsetNum);
+        }
+
+        // Push limit down to Firestore (stops full-collection reads)
+        if (this.limitNum && this.limitNum > 0 && !hasComplexFilter) {
+          query = query.limit(this.limitNum);
+        }
+
         const snap = await query.get();
         docs = snap.docs.map((d) => snapToData<T>(d)!);
-      } catch {
-        const snap = await colRef.get();
-        docs = snap.docs.map((d) => snapToData<T>(d)!);
+      } catch (err: any) {
+        if (isMissingIndexError(err)) {
+          const indexUrl = logMissingIndexError(this.colName, err, 'query');
+
+          // If strict index mode is enabled, fail loudly to mandate index creation
+          if (process.env.FAIL_ON_MISSING_INDEX === 'true' || process.env.STRICT_FIRESTORE_INDEXES === 'true') {
+            throw new Error(
+              `[Firestore Missing Index] Query on collection "${this.colName}" requires a composite index. Create it here: ${indexUrl || err.message}`
+            );
+          }
+
+          // Strict last-resort fallback:
+          // NEVER do colRef.get() unbounded, as that downloads the entire collection!
+          // We remove the Firestore orderBy (which triggered the composite index requirement)
+          // while retaining the where filters and a bounded limit.
+          console.warn(
+            `⚠️ [Firestore] Falling back to where-only query without Firestore orderBy for "${this.colName}". Documents will be sorted in-memory. PLEASE CREATE THE COMPOSITE INDEX VIA THE URL ABOVE TO RESTORE FULL QUERY PERFORMANCE.`
+          );
+
+          let safeFallbackQuery: FirebaseFirestore.Query = colRef;
+          for (const [field, op, val] of this.simpleWhereFilters) {
+            safeFallbackQuery = safeFallbackQuery.where(field, op, val);
+          }
+          // Cap the fallback read to avoid runaway billing spikes
+          const fallbackCap = this.limitNum && this.limitNum > 0 ? Math.max(this.limitNum * 2, 50) : 200;
+          safeFallbackQuery = safeFallbackQuery.limit(fallbackCap);
+
+          try {
+            const fallbackSnap = await safeFallbackQuery.get();
+            docs = fallbackSnap.docs.map((d) => snapToData<T>(d)!);
+          } catch (fallbackErr: any) {
+            console.error(
+              `❌ [Firestore] Safe fallback query also failed for collection "${this.colName}". Throwing error to prevent full collection scan.`
+            );
+            throw fallbackErr;
+          }
+        } else {
+          console.error(`❌ [Firestore] Query error in collection "${this.colName}":`, err.message || err);
+          throw err;
+        }
       }
 
       let filteredDocs = docs.filter((d) => matchesMongoFilter(d, this.rawFilter));
@@ -1138,6 +1265,36 @@ export function createFirestoreModel<T extends BaseDoc = any>(colName: string): 
     },
 
     async countDocuments(filter: any = {}, ...args: any[]): Promise<number> {
+      const db = getDb();
+      let query: FirebaseFirestore.Query = db.collection(colName);
+      const hasComplex = isComplexFilter(filter);
+
+      if (!hasComplex) {
+        const whereFilters = extractWhereFilters(filter);
+        for (const [key, op, val] of whereFilters) {
+          query = query.where(key, op, val);
+        }
+        try {
+          const snap = await query.count().get();
+          return snap.data().count;
+        } catch (err: any) {
+          if (isMissingIndexError(err)) {
+            const indexUrl = logMissingIndexError(colName, err, 'countDocuments');
+            if (process.env.FAIL_ON_MISSING_INDEX === 'true' || process.env.STRICT_FIRESTORE_INDEXES === 'true') {
+              throw new Error(
+                `[Firestore Missing Index] countDocuments on "${colName}" requires an index. Create it here: ${indexUrl || err.message}`
+              );
+            }
+            console.warn(
+              `⚠️ [Firestore] count() aggregation failed for "${colName}" due to missing index. Falling back to query execution. PLEASE CREATE THE INDEX VIA THE URL ABOVE.`
+            );
+          } else {
+            console.error(`❌ [Firestore] countDocuments error on "${colName}":`, err.message || err);
+            throw err;
+          }
+        }
+      }
+
       const docs = await new FirestoreQuery<T>(colName, filter, false, modelObj).exec();
       return docs.length;
     },

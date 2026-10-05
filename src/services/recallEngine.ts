@@ -62,18 +62,32 @@ const diffInDays = (d1: Date, d2: Date) => {
   return Math.floor((d1.getTime() - d2.getTime()) / (1000 * 60 * 60 * 24));
 };
 
-export const getCustomerRecalls = async (referenceDate: Date = new Date()): Promise<RecallTasksResponse> => {
-  const invoices: any[] = await Invoice.find()
+// In-memory cache for recalls with 30-min TTL
+let cachedRecalls: { data: RecallTasksResponse; expiresAt: number; refTime: number } | null = null;
+const RECALL_CACHE_TTL_MS = 30 * 60 * 1000;
+
+export const invalidateRecallCache = () => {
+  cachedRecalls = null;
+};
+
+export const getCustomerRecalls = async (referenceDate: Date = new Date(), forceRefresh = false): Promise<RecallTasksResponse> => {
+  const now = Date.now();
+  const refTime = referenceDate.getTime();
+  if (!forceRefresh && cachedRecalls && cachedRecalls.expiresAt > now && Math.abs(cachedRecalls.refTime - refTime) < 3600000) {
+    return cachedRecalls.data;
+  }
+
+  // Maximum recall lookback is 450 days (annual eye test window: 330 to 450 days).
+  // Strict date bound: NEVER load historical invoices older than 455 days.
+  const minDate = new Date(refTime - 455 * 86_400_000);
+
+  const invoices: any[] = await Invoice.find({ billDate: { $gte: minDate } })
+    .select('customer items billDate createdAt')
+    .populate('customer', 'name mobileNumber phone lastContactedAt lastContactType snoozedUntil')
     .populate({
       path: 'items',
-      populate: [
-        { path: 'frame' },
-        { path: 'opticalLens' },
-        { path: 'fragrance' },
-        { path: 'prescription' },
-      ]
+      select: 'frame opticalLens fragrance prescription lensBrand lensName frameVariantLabel type price spherical rightEyeNumber',
     })
-    .populate('customer')
     .sort({ billDate: -1 })
     .lean();
 
@@ -105,20 +119,20 @@ export const getCustomerRecalls = async (referenceDate: Date = new Date()): Prom
     let fragranceSummaryParts: string[] = [];
 
     for (const item of (inv.items || [])) {
-      if (item.frame) {
+      if (item.frame || item.type === 'frame') {
         hasOptical = true;
-        opticalSummaryParts.push(item.frame.name || item.frame.companyName || 'Frame');
+        opticalSummaryParts.push(item.frameVariantLabel || 'Frame');
       }
-      if (item.opticalLens || item.lensBrand || item.lensName) {
+      if (item.opticalLens || item.lensBrand || item.lensName || item.type === 'lens') {
         hasOptical = true;
         opticalSummaryParts.push(item.lensBrand || item.lensName || 'Lenses');
       }
-      if (item.prescription || item.spherical !== null && item.spherical !== undefined || item.rightEyeNumber) {
+      if (item.prescription || (item.spherical !== null && item.spherical !== undefined) || item.rightEyeNumber) {
         hasOptical = true;
       }
-      if (item.fragrance) {
+      if (item.fragrance || item.type === 'fragrance') {
         hasFragrance = true;
-        fragranceSummaryParts.push(item.fragrance.name || 'Perfume / Attar');
+        fragranceSummaryParts.push(item.fragranceVariantLabel || 'Perfume / Attar');
       }
     }
 
@@ -269,7 +283,7 @@ Your favorite bottle might be running low. Drop by this week to top up your bott
   annualEyeTestRecalls.sort((a, b) => b.daysElapsed - a.daysElapsed);
   fragranceRecalls.sort((a, b) => b.daysElapsed - a.daysElapsed);
 
-  return {
+  const response: RecallTasksResponse = {
     generatedAt: referenceDate.toISOString(),
     storeMapsLink: STORE_MAPS_LINK,
     tuneupRecalls,
@@ -286,6 +300,14 @@ Your favorite bottle might be running low. Drop by this week to top up your bott
       contactedThisMonthCount: contactedCount,
     }
   };
+
+  cachedRecalls = {
+    data: response,
+    expiresAt: now + RECALL_CACHE_TTL_MS,
+    refTime,
+  };
+
+  return response;
 };
 
 export const markCustomerRecallSent = async (
@@ -302,6 +324,7 @@ export const markCustomerRecallSent = async (
     customer.notes = customer.notes ? `${customer.notes} | ${notes}` : notes;
   }
   await customer.save();
+  invalidateRecallCache();
 
   await MarketingEvent.create({
     eventType: 'message_sent',
@@ -322,6 +345,7 @@ export const snoozeCustomerRecall = async (customerId: string, days = 14) => {
 
   customer.snoozedUntil = new Date(Date.now() + days * 86400000);
   await customer.save();
+  invalidateRecallCache();
 
   return { success: true, customerId, snoozedUntil: customer.snoozedUntil };
 };
