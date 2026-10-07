@@ -1,5 +1,6 @@
 import { getAdminFirestore } from './firebaseAdmin';
 import { Firestore, Timestamp } from 'firebase-admin/firestore';
+import { recordReads } from './readMeter';
 
 let dbInstance: Firestore | null = null;
 
@@ -87,6 +88,7 @@ export async function findDocs<T = any>(colName: string, options: QueryOptions =
   }
 
   const snap = await query.get();
+  recordReads(colName, Math.max(snap.size, 1));
   return snap.docs.map((doc) => snapToData<T>(doc)!);
 }
 
@@ -94,6 +96,7 @@ export async function getDocById<T = any>(colName: string, id: string): Promise<
   if (!id) return null;
   const db = getDb();
   const snap = await db.collection(colName).doc(id).get();
+  recordReads(colName, 1);
   return snapToData<T>(snap);
 }
 
@@ -110,8 +113,14 @@ export async function createDoc<T = any>(colName: string, data: any, customId?: 
   };
 
   await docRef.set(payload, { merge: true });
-  const snap = await docRef.get();
-  return snapToData<T>(snap)!;
+  if (customId) {
+    // Explicit id may have merged into an existing doc: read back the merged result.
+    const snap = await docRef.get();
+    recordReads(colName, 1);
+    return snapToData<T>(snap)!;
+  }
+  // New auto-id doc: the written payload is the stored doc, so no read-after-write is needed.
+  return { ...payload, id: docRef.id, _id: docRef.id } as T;
 }
 
 export async function updateDocById<T = any>(colName: string, id: string, updates: any): Promise<T | null> {
@@ -125,6 +134,7 @@ export async function updateDocById<T = any>(colName: string, id: string, update
 
   await docRef.update(payload);
   const snap = await docRef.get();
+  recordReads(colName, 1);
   return snapToData<T>(snap);
 }
 
@@ -147,5 +157,6 @@ export async function countDocs(colName: string, where?: Array<[string, Firebase
   }
 
   const snap = await query.count().get();
+  recordReads(colName, 1);
   return snap.data().count;
 }

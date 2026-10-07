@@ -19,21 +19,28 @@ import {
   getInvoiceById,
 } from '../controllers/public.controller';
 
+import { publicCache, publicRateLimit } from '../middleware/publicCache';
+
 const router = Router();
 
-router.get('/products', getProducts);
-router.get('/products/:category/:slug', getProductBySlug);
-router.get('/categories', getCategories);
-router.get('/search', searchPublic);
-router.get('/homepage', getHomepage);
-router.get('/blog', getBlogList);
-router.get('/blog/:slug', getBlogBySlug);
-router.get('/store', getStore);
-router.get('/instagram-posts', getInstagramPosts);
-router.get('/lens-catalog', getLensCatalog);
-router.get('/lens-pricing-lookup', getLensPricingLookup);
-router.get('/coatings', getPublicCoatings);
-router.get('/colors', getPublicColors);
+router.use(publicRateLimit);
+
+// Catalog endpoints are identical for every visitor, so the CDN may cache them.
+router.get('/products', publicCache(300, 600), getProducts);
+router.get('/products/:category/:slug', publicCache(300, 600), getProductBySlug);
+router.get('/categories', publicCache(3600, 7200), getCategories);
+router.get('/search', publicCache(60, 300), searchPublic);
+router.get('/homepage', publicCache(300, 600), getHomepage);
+router.get('/blog', publicCache(300, 600), getBlogList);
+router.get('/blog/:slug', publicCache(300, 600), getBlogBySlug);
+router.get('/store', publicCache(3600, 7200), getStore);
+router.get('/instagram-posts', publicCache(300, 600), getInstagramPosts);
+router.get('/lens-catalog', publicCache(300, 600), getLensCatalog);
+router.get('/lens-pricing-lookup', publicCache(300, 600), getLensPricingLookup);
+router.get('/coatings', publicCache(3600, 7200), getPublicCoatings);
+router.get('/colors', publicCache(3600, 7200), getPublicColors);
+
+// Per-user data: never cached.
 router.get('/my-orders', getMyOrders);
 router.get('/my-invoices', getMyInvoices);
 router.get('/orders/:id', getOrderById);

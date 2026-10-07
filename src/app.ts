@@ -3,6 +3,7 @@ import cors from 'cors';
 import { env } from './config/env';
 import { connectDB } from './config/database';
 import { errorHandler } from './middleware/errorHandler';
+import { readMeter } from './middleware/readMeter';
 
 import customerRoutes from './routes/customer.routes';
 import opticalNumberRoutes from './routes/opticalNumber.routes';
@@ -77,6 +78,9 @@ app.post('/api/razorpay/webhook', express.raw({ type: 'application/json' }), han
 app.post('/razorpay/webhook', express.raw({ type: 'application/json' }), handleWebhook);
 
 app.use(express.json());
+
+// Count Firestore document reads per request and log the expensive ones ([FS-READS])
+app.use(readMeter);
 
 // Ensure active database connection before processing queries (excluding lightweight health checks)
 app.use(async (req, res, next) => {

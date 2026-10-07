@@ -1,5 +1,6 @@
-import { getDb, snapToData } from './firestoreDb';
+import { convertTimestamps, getDb, snapToData } from './firestoreDb';
 import { FieldValue } from 'firebase-admin/firestore';
+import { flagExpensiveOp, recordReads } from './readMeter';
 
 export interface BaseDoc {
   id?: string;
@@ -17,9 +18,9 @@ const FIELD_TO_COLLECTION_MAP: Record<string, string> = {
   customer: 'customers',
   items: 'invoiceitems',
   frame: 'frames',
-  opticalLens: 'opticallenses',
+  opticalLens: 'opticallens',
   fragrance: 'fragrances',
-  contactLens: 'contactlenses',
+  contactLens: 'contactlens',
   optician: 'users',
   user: 'users',
 };
@@ -33,7 +34,9 @@ export function attachDocMethods(doc: any, modelObj?: any): any {
         const docId = doc.id || doc._id;
         if (modelObj) {
           if (docId) {
-            return modelObj.findByIdAndUpdate(docId, doc);
+            // save() writes the whole document, so the written payload is the result; skip the re-read.
+            const updated = await modelObj.findByIdAndUpdate(docId, doc, { returnDoc: false });
+            return attachDocMethods(updated, modelObj);
           }
           return modelObj.create(doc);
         }
@@ -423,6 +426,7 @@ export async function populateDocs(docs: any[], specs: any[]): Promise<void> {
       const refs = chunk.map((id) => colRef.doc(id));
       if (refs.length > 0) {
         const snaps = await getDb().getAll(...refs);
+        recordReads(targetCol, snaps.length);
         for (const snap of snaps) {
           const data = snapToData(snap);
           if (data) {
@@ -618,6 +622,10 @@ export async function runMongoAggregatePipeline(
   colName: string,
   pipeline: any[],
 ): Promise<any[]> {
+  flagExpensiveOp(
+    `aggregate:${colName}`,
+    `aggregate() downloads the whole "${colName}" collection and runs the pipeline in Node. Replace with stats docs or native count()/sum().`
+  );
   let docs: any[] = await new FirestoreQuery(colName, {}, false).exec();
 
   for (const stage of pipeline) {
@@ -628,6 +636,10 @@ export async function runMongoAggregatePipeline(
     } else if (stage.$lookup) {
       const { from, localField, foreignField, as: asField } = stage.$lookup;
       if (from && localField && foreignField && asField) {
+        flagExpensiveOp(
+          `lookup:${colName}->${from}`,
+          `$lookup downloads the whole "${from}" collection. Fetch only the referenced ids instead.`
+        );
         const foreignDocs: any[] = await new FirestoreQuery(from, {}, false).exec();
         for (const d of docs) {
           const localVal = getValueByPath(d, localField);
@@ -857,6 +869,36 @@ export class FirestoreQuery<T = any> implements PromiseLike<T[]> {
     return this;
   }
 
+  /**
+   * Field paths to push down to Firestore `select()`, or null when the projection is
+   * exclusion-only (Firestore cannot exclude fields; those are stripped in memory).
+   */
+  private projectionFieldPaths(): string[] | null {
+    const spec = this.selectSpec;
+    if (!spec) return null;
+
+    let includes: string[] = [];
+    if (typeof spec === 'string') {
+      includes = spec.trim().split(/\s+/).filter((t) => t && !t.startsWith('-'));
+    } else if (typeof spec === 'object') {
+      includes = Object.keys(spec).filter((k) => spec[k] === 1 || spec[k] === true);
+    }
+    if (includes.length === 0) return null;
+
+    const needed = new Set<string>(includes);
+    for (const key of Object.keys(this.rawFilter || {})) {
+      if (!key.startsWith('$')) needed.add(key);
+    }
+    for (const p of this.populateSpecs) {
+      if (p?.path) needed.add(p.path);
+    }
+    for (const [field] of this.orderBys) needed.add(field);
+
+    needed.delete('_id');
+    needed.delete('id');
+    return Array.from(needed);
+  }
+
   populate(...args: any[]) {
     if (args.length === 0) return this;
 
@@ -894,6 +936,7 @@ export class FirestoreQuery<T = any> implements PromiseLike<T[]> {
 
     if (this.targetId) {
       const snap = await colRef.doc(this.targetId).get();
+      recordReads(this.colName, 1);
       const data = snapToData<T>(snap);
       if (data && typeof data === 'object') {
         attachDocMethods(data, this.modelObj);
@@ -910,6 +953,7 @@ export class FirestoreQuery<T = any> implements PromiseLike<T[]> {
         const refs = chunk.map((id) => colRef.doc(id));
         if (refs.length > 0) {
           const snaps = await db.getAll(...refs);
+          recordReads(this.colName, snaps.length);
           for (const s of snaps) {
             const d = snapToData<T>(s);
             if (d && typeof d === 'object') {
@@ -926,10 +970,26 @@ export class FirestoreQuery<T = any> implements PromiseLike<T[]> {
       let docs: any[] = [];
       const hasComplexFilter = isComplexFilter(this.rawFilter);
 
+      if (hasComplexFilter) {
+        const nativeFilters = this.simpleWhereFilters.length;
+        const message = nativeFilters
+          ? `complex filter on "${this.colName}": orderBy/limit/offset are not pushed to Firestore, so every doc matching the native filters is downloaded.`
+          : `complex filter on "${this.colName}" with no native where clause: this is a FULL COLLECTION SCAN.`;
+        // Only a true full scan throws in strict mode; partially filtered scans just warn.
+        flagExpensiveOp(`complex:${this.colName}`, message, nativeFilters === 0);
+      }
+
       try {
         let query: FirebaseFirestore.Query = colRef;
         for (const [field, op, val] of this.simpleWhereFilters) {
           query = query.where(field, op, val);
+        }
+
+        // Fetch only the requested fields when the projection is include-style. Filter, populate and
+        // sort fields are kept because they are re-checked or used in memory after the fetch.
+        const projected = !hasComplexFilter ? this.projectionFieldPaths() : null;
+        if (projected && projected.length > 0) {
+          query = query.select(...projected);
         }
 
         // Push ordering down to Firestore when no in-memory complex filter
@@ -950,6 +1010,7 @@ export class FirestoreQuery<T = any> implements PromiseLike<T[]> {
         }
 
         const snap = await query.get();
+        recordReads(this.colName, Math.max(snap.size, 1));
         docs = snap.docs.map((d) => snapToData<T>(d)!);
       } catch (err: any) {
         if (isMissingIndexError(err)) {
@@ -980,6 +1041,7 @@ export class FirestoreQuery<T = any> implements PromiseLike<T[]> {
 
           try {
             const fallbackSnap = await safeFallbackQuery.get();
+            recordReads(this.colName, Math.max(fallbackSnap.size, 1));
             docs = fallbackSnap.docs.map((d) => snapToData<T>(d)!);
           } catch (fallbackErr: any) {
             console.error(
@@ -1055,6 +1117,154 @@ function withLeanPromise<T>(promise: Promise<T>): any {
   return p;
 }
 
+// ── Mongo-style update handling ──────────────────────────────────────────────
+
+export interface ParsedUpdate {
+  set: Record<string, any>;
+  inc: Record<string, number>;
+  unset: string[];
+  setOnInsert: Record<string, any>;
+}
+
+const SUPPORTED_UPDATE_OPS = new Set(['$set', '$inc', '$unset', '$setOnInsert']);
+
+/**
+ * Splits a Mongo update document into its operators. Operators are applied together,
+ * so `{ $inc, $set }` no longer drops the `$inc`. A plain object (no `$` keys) is a full set.
+ */
+export function parseUpdate(update: any): ParsedUpdate {
+  const parsed: ParsedUpdate = { set: {}, inc: {}, unset: [], setOnInsert: {} };
+  if (!update || typeof update !== 'object') return parsed;
+
+  const stripIds = (obj: Record<string, any>) => {
+    // Document ids live in the doc path, not in a field.
+    delete obj._id;
+    delete obj.id;
+    return obj;
+  };
+
+  const hasOperators = Object.keys(update).some((k) => k.startsWith('$'));
+  if (!hasOperators) {
+    parsed.set = stripIds(cleanPayload(update) ?? {});
+    return parsed;
+  }
+
+  for (const [key, body] of Object.entries(update)) {
+    if (!key.startsWith('$')) {
+      parsed.set[key] = cleanPayload(body);
+      continue;
+    }
+    if (!SUPPORTED_UPDATE_OPS.has(key)) {
+      throw new Error(`[Firestore] Unsupported update operator "${key}". Supported: ${[...SUPPORTED_UPDATE_OPS].join(', ')}`);
+    }
+    if (!body || typeof body !== 'object') continue;
+    if (key === '$set') Object.assign(parsed.set, stripIds(cleanPayload(body) ?? {}));
+    else if (key === '$setOnInsert') Object.assign(parsed.setOnInsert, stripIds(cleanPayload(body) ?? {}));
+    else if (key === '$inc') {
+      for (const [path, n] of Object.entries(body as Record<string, any>)) parsed.inc[path] = Number(n) || 0;
+    } else if (key === '$unset') parsed.unset.push(...Object.keys(body as Record<string, any>));
+  }
+  return parsed;
+}
+
+/** Firestore cannot address array elements by index, so such paths need read-modify-write. */
+export function hasArrayIndexPath(path: string): boolean {
+  return /(^|\.)\d+(\.|$)/.test(path);
+}
+
+export function updateTouchesArrayIndex(parsed: ParsedUpdate): boolean {
+  return [...Object.keys(parsed.set), ...Object.keys(parsed.inc), ...parsed.unset].some(hasArrayIndexPath);
+}
+
+/**
+ * Builds the object for `set(..., { merge: true })`. Dotted paths become nested maps
+ * (a literal `"web.viewCount"` key would create a flat field with a dot in its name),
+ * increments use FieldValue.increment and unsets use FieldValue.delete.
+ */
+export function toMergePayload(parsed: ParsedUpdate): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const [path, val] of Object.entries(parsed.set)) setNestedPath(out, path, val);
+  for (const [path, n] of Object.entries(parsed.inc)) setNestedPath(out, path, FieldValue.increment(n));
+  for (const path of parsed.unset) setNestedPath(out, path, FieldValue.delete());
+  return out;
+}
+
+/** Sets `value` at `path` inside plain data, walking into arrays by numeric index. */
+function setAtPath(data: any, path: string, value: any): void {
+  const parts = path.split('.');
+  let current = data;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const part = parts[i];
+    if (current[part] === null || typeof current[part] !== 'object') {
+      current[part] = /^\d+$/.test(parts[i + 1]) ? [] : {};
+    }
+    current = current[part];
+  }
+  const last = parts[parts.length - 1];
+  if (value === undefined) {
+    if (Array.isArray(current)) current.splice(Number(last), 1);
+    else delete current[last];
+  } else {
+    current[last] = value;
+  }
+}
+
+function getAtPath(data: any, path: string): any {
+  return path.split('.').reduce((cur, part) => (cur === null || cur === undefined ? undefined : cur[part]), data);
+}
+
+/**
+ * Applies a parsed update to an in-memory document (array-index aware) and returns the
+ * top-level keys that changed. `$setOnInsert` is only applied when `isInsert` is true.
+ */
+export function applyUpdateToData(data: Record<string, any>, parsed: ParsedUpdate, isInsert = false): string[] {
+  const touched = new Set<string>();
+  const touch = (path: string) => touched.add(path.split('.')[0]);
+
+  if (isInsert) {
+    for (const [path, val] of Object.entries(parsed.setOnInsert)) {
+      setAtPath(data, path, val);
+      touch(path);
+    }
+  }
+  for (const [path, val] of Object.entries(parsed.set)) {
+    setAtPath(data, path, val);
+    touch(path);
+  }
+  for (const [path, n] of Object.entries(parsed.inc)) {
+    const current = Number(getAtPath(data, path)) || 0;
+    setAtPath(data, path, current + n);
+    touch(path);
+  }
+  for (const path of parsed.unset) {
+    setAtPath(data, path, undefined);
+    touch(path);
+  }
+  return [...touched];
+}
+
+/** Builds the document an upsert inserts: filter equalities + $setOnInsert + $set + $inc applied to 0. */
+export function buildInsertDoc(filter: any, parsed: ParsedUpdate): Record<string, any> {
+  const doc: Record<string, any> = {};
+  for (const [key, val] of Object.entries(filter || {})) {
+    if (key.startsWith('$') || val === undefined) continue;
+    if (key === '_id' || key === 'id') {
+      doc._id = val;
+      continue;
+    }
+    if (val && typeof val === 'object' && !(val instanceof Date) && !Array.isArray(val) && !(val instanceof RegExp)) {
+      const ops = Object.keys(val);
+      if (ops.some((k) => k.startsWith('$'))) {
+        if ('$eq' in (val as any)) setAtPath(doc, key, (val as any).$eq);
+        continue; // range / membership operators say nothing about an inserted value
+      }
+    }
+    setAtPath(doc, key, val);
+  }
+  applyUpdateToData(doc, parsed, true);
+  return doc;
+}
+
 export interface IFirestoreModel<T extends BaseDoc = any> {
   new (data?: any): T & { save(): Promise<T> };
   collectionName: string;
@@ -1077,16 +1287,28 @@ export interface IFirestoreModel<T extends BaseDoc = any> {
   aggregate(pipeline: any[], ...args: any[]): Promise<any[]>;
 }
 
-export function createFirestoreModel<T extends BaseDoc = any>(colName: string): IFirestoreModel<T> {
+export interface FirestoreModelOptions {
+  /**
+   * Runs on the cleaned payload just before create() / findByIdAndUpdate() writes it.
+   * Use it to maintain derived fields (e.g. invoice balance) so queries can filter on them natively.
+   */
+  beforeWrite?: (payload: Record<string, any>) => void;
+}
+
+export function createFirestoreModel<T extends BaseDoc = any>(
+  colName: string,
+  options: FirestoreModelOptions = {},
+): IFirestoreModel<T> {
   const modelObj = {
     collectionName: colName,
 
     find(filter: any = {}, ...args: any[]): FirestoreQuery<T> {
-      return new FirestoreQuery<T>(colName, filter, false, modelObj);
+      // Mongoose signature: find(filter, projection, options)
+      return new FirestoreQuery<T>(colName, filter, false, modelObj).select(args[0]);
     },
 
     findOne(filter: any = {}, ...args: any[]): FirestoreQuery<T> {
-      return new FirestoreQuery<T>(colName, filter, true, modelObj);
+      return new FirestoreQuery<T>(colName, filter, true, modelObj).select(args[0]);
     },
 
     findById(id: string | any, ...args: any[]): FirestoreQuery<T> {
@@ -1100,6 +1322,10 @@ export function createFirestoreModel<T extends BaseDoc = any>(colName: string): 
     },
 
     async distinct(field: string, filter: any = {}): Promise<any[]> {
+      flagExpensiveOp(
+        `distinct:${colName}.${field}`,
+        `distinct() downloads every matching doc of "${colName}" to collect one field. Keep a lookup doc instead.`
+      );
       const docs = await new FirestoreQuery<T>(colName, filter, false, modelObj).exec();
       const set = new Set();
       for (const d of docs) {
@@ -1124,6 +1350,7 @@ export function createFirestoreModel<T extends BaseDoc = any>(colName: string): 
         const createdItems: any[] = [];
 
         for (const item of items) {
+          const hasExplicitId = Boolean(item._id || item.id);
           const customId = item._id ? item._id.toString() : item.id ? item.id.toString() : colRef.doc().id;
           const now = new Date();
           const cleaned = cleanPayload(item);
@@ -1131,11 +1358,21 @@ export function createFirestoreModel<T extends BaseDoc = any>(colName: string): 
           delete cleaned.id;
           cleaned.createdAt = cleaned.createdAt || now;
           cleaned.updatedAt = now;
+          options.beforeWrite?.(cleaned);
 
           const docRef = colRef.doc(customId);
           await docRef.set(cleaned, { merge: true });
-          const snap = await docRef.get();
-          const data = snapToData(snap);
+
+          let data: any;
+          if (hasExplicitId) {
+            // set(merge) may have merged into an existing doc, so read back the merged result.
+            const snap = await docRef.get();
+            recordReads(colName, 1);
+            data = snapToData(snap);
+          } else {
+            // Brand-new auto-id doc: the written payload IS the stored doc. No read-after-write.
+            data = { ...cleaned, id: customId, _id: customId };
+          }
           attachDocMethods(data, modelObj);
           createdItems.push(data);
         }
@@ -1156,21 +1393,49 @@ export function createFirestoreModel<T extends BaseDoc = any>(colName: string): 
         const db = getDb();
         const docRef = db.collection(colName).doc(docId);
 
-        let payload: Record<string, any> = {};
-        if (update.$set) {
-          payload = cleanPayload(update.$set);
-        } else if (update.$inc) {
-          for (const [key, incVal] of Object.entries(update.$inc)) {
-            payload[key] = FieldValue.increment(incVal as number);
-          }
-        } else {
-          payload = cleanPayload(update);
+        const parsed = parseUpdate(update);
+        const returnDoc = args[0]?.returnDoc !== false;
+
+        // Read-modify-write (in a transaction) when Firestore cannot express the update natively:
+        //  - array-index paths such as "web.frameVariants.0.stock"
+        //  - $inc when the caller needs the new value back (atomic, so concurrent counters stay unique)
+        const needsTransaction =
+          updateTouchesArrayIndex(parsed) || (returnDoc && Object.keys(parsed.inc).length > 0);
+
+        if (needsTransaction) {
+          const result = await db.runTransaction(async (tx) => {
+            const snap = await tx.get(docRef);
+            recordReads(colName, 1);
+            const data: Record<string, any> = snap.exists ? convertTimestamps(snap.data() || {}) : {};
+
+            const touched = applyUpdateToData(data, parsed, !snap.exists);
+            const writePayload: Record<string, any> = {};
+            for (const key of touched) {
+              writePayload[key] = data[key] === undefined ? FieldValue.delete() : data[key];
+            }
+            data.updatedAt = new Date();
+            writePayload.updatedAt = data.updatedAt;
+            options.beforeWrite?.(writePayload);
+            tx.set(docRef, writePayload, { merge: true });
+            return { ...data, id: docId, _id: docId };
+          });
+          attachDocMethods(result, modelObj);
+          return result;
         }
 
+        const payload = toMergePayload(parsed);
         payload.updatedAt = new Date();
+        options.beforeWrite?.(payload);
         await docRef.set(payload, { merge: true });
 
+        // Callers that ignore the result pass { returnDoc: false } to skip the read-after-write.
+        // Without it the full merged document is returned, as Mongoose { new: true } callers expect.
+        if (!returnDoc) {
+          return { ...payload, id: docId, _id: docId };
+        }
+
         const snap = await docRef.get();
+        recordReads(colName, 1);
         const data = snapToData(snap);
         attachDocMethods(data, modelObj);
         return data;
@@ -1183,7 +1448,8 @@ export function createFirestoreModel<T extends BaseDoc = any>(colName: string): 
       const p = (async () => {
         const existing = await this.findOne(filter).exec();
         if (!existing && options.upsert) {
-          const created = await (this as any).create({ ...filter, ...update });
+          // Apply the operators to a fresh doc instead of storing "$inc"/"$set" keys literally.
+          const created = await (this as any).create(buildInsertDoc(filter, parseUpdate(update)));
           return created;
         }
         if (!existing) return null;
@@ -1200,6 +1466,7 @@ export function createFirestoreModel<T extends BaseDoc = any>(colName: string): 
         const db = getDb();
         const docRef = db.collection(colName).doc(docId);
         const snap = await docRef.get();
+        recordReads(colName, 1);
         if (!snap.exists) return null;
         const data = snapToData(snap);
         attachDocMethods(data, modelObj);
@@ -1213,7 +1480,7 @@ export function createFirestoreModel<T extends BaseDoc = any>(colName: string): 
       const docs = await new FirestoreQuery<T>(colName, filter, false, modelObj).limit(1).exec();
       if (docs.length === 0) return { matchedCount: 0, modifiedCount: 0 };
       const docId = docs[0].id || docs[0]._id;
-      await (this as any).findByIdAndUpdate(docId, update);
+      await (this as any).findByIdAndUpdate(docId, update, { returnDoc: false });
       return { matchedCount: 1, modifiedCount: 1 };
     },
 
@@ -1222,7 +1489,7 @@ export function createFirestoreModel<T extends BaseDoc = any>(colName: string): 
       let modified = 0;
       for (const d of docs) {
         const docId = d.id || d._id;
-        await (this as any).findByIdAndUpdate(docId, update);
+        await (this as any).findByIdAndUpdate(docId, update, { returnDoc: false });
         modified++;
       }
       return { matchedCount: docs.length, modifiedCount: modified };
@@ -1232,15 +1499,22 @@ export function createFirestoreModel<T extends BaseDoc = any>(colName: string): 
       const docs = await new FirestoreQuery<T>(colName, filter, false, modelObj).limit(1).exec();
       if (docs.length === 0) return { deletedCount: 0 };
       const docId = docs[0].id || docs[0]._id;
-      await (this as any).findByIdAndDelete(docId);
+      // The doc was just read by the query above; delete directly instead of re-reading it.
+      await getDb().collection(colName).doc(docId).delete();
       return { deletedCount: 1 };
     },
 
     async deleteMany(filter: any, ...args: any[]): Promise<{ deletedCount: number }> {
       const docs = await new FirestoreQuery<T>(colName, filter, false, modelObj).exec();
-      for (const d of docs) {
-        const docId = d.id || d._id;
-        await (this as any).findByIdAndDelete(docId);
+      const db = getDb();
+      const colRef = db.collection(colName);
+      // Docs are already loaded: delete in batches of up to 500 with no per-doc re-read.
+      for (let i = 0; i < docs.length; i += 500) {
+        const batch = db.batch();
+        for (const d of docs.slice(i, i + 500)) {
+          batch.delete(colRef.doc(d.id || d._id));
+        }
+        await batch.commit();
       }
       return { deletedCount: docs.length };
     },
@@ -1255,8 +1529,11 @@ export function createFirestoreModel<T extends BaseDoc = any>(colName: string): 
           if (docs.length > 0) {
             const docId = docs[0].id || docs[0]._id;
             const ref = db.collection(colName).doc(docId);
-            const payload = cleanPayload(update.$set ? { ...update.$set } : { ...update });
-            batch.set(ref, payload, { merge: true });
+            const parsed = parseUpdate(update);
+            if (updateTouchesArrayIndex(parsed)) {
+              throw new Error('[Firestore] bulkWrite does not support array-index paths; use updateOne instead.');
+            }
+            batch.set(ref, toMergePayload(parsed), { merge: true });
           }
         }
       }
@@ -1276,6 +1553,7 @@ export function createFirestoreModel<T extends BaseDoc = any>(colName: string): 
         }
         try {
           const snap = await query.count().get();
+          recordReads(colName, 1); // count() bills 1 read per up to 1000 index entries
           return snap.data().count;
         } catch (err: any) {
           if (isMissingIndexError(err)) {
