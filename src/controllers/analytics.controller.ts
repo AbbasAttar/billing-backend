@@ -1602,7 +1602,9 @@ export const getExecutiveAnalytics = async (req: Request, res: Response, next: N
                 const matchingStock = allLensStocks.find(
                     (s) => Math.abs(s.sph - lp.sph) < 0.01 && Math.abs(s.cyl - lp.cyl) < 0.01
                 );
-                const currentStock = matchingStock ? matchingStock.quantity : 2;
+                const currentStock = matchingStock
+                    ? (Number.isFinite(matchingStock.quantity) ? matchingStock.quantity : 0)
+                    : 2;
                 const stockCoverMonths = monthlyVelocity > 0 ? Number((currentStock / monthlyVelocity).toFixed(2)) : 2.0;
 
                 let status: 'CRITICAL' | 'RESTOCK' | 'HEALTHY' = 'HEALTHY';
