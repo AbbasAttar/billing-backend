@@ -190,8 +190,12 @@ function contactLensToPublic(l: IContactLens): PublicProduct {
 }
 
 function baseFilter(query: PublicProductQuery, isFragrance = false) {
-  const filter: any = { 'web.isPublished': true, isArchived: { $ne: true } };
-  if (query.tag) filter['web.tags'] = query.tag;
+  const filter: any = { 'web.isPublished': true, $nor: [{ isArchived: true }] };
+  // web.tags is an array: Firestore's native `==` would compare the whole array, so match "contains" in memory.
+  if (query.tag) {
+    if (!filter.$and) filter.$and = [];
+    filter.$and.push({ 'web.tags': query.tag });
+  }
   if (query.gender) filter['web.gender'] = query.gender;
   if (query.shape) filter['web.shape'] = query.shape;
   if (query.material) filter['web.material'] = query.material;
@@ -304,7 +308,7 @@ export async function listPublicProducts(query: PublicProductQuery) {
 }
 
 export async function findPublicProductBySlug(category: string, slug: string) {
-  const filter = { 'web.slug': slug, 'web.isPublished': true, isArchived: { $ne: true } };
+  const filter = { 'web.slug': slug, 'web.isPublished': true, $nor: [{ isArchived: true }] };
   const opticalCats = ['frames', 'sunglasses', 'optical'];
   const lensCats = ['lenses', 'contact-lenses'];
   const fragranceCats = ['fragrances', 'attars', 'perfumes', 'bakhoor'];
@@ -344,12 +348,12 @@ export async function getCategoryTree() {
     perfumesCount,
     bakhoorCount,
   ] = await Promise.all([
-    Frame.countDocuments({ 'web.isPublished': true, isArchived: { $ne: true }, type: { $not: /sunglass/i } }),
-    Frame.countDocuments({ 'web.isPublished': true, isArchived: { $ne: true }, type: /sunglass/i }),
+    Frame.countDocuments({ 'web.isPublished': true, $nor: [{ isArchived: true }], type: { $not: /sunglass/i } }),
+    Frame.countDocuments({ 'web.isPublished': true, $nor: [{ isArchived: true }], type: /sunglass/i }),
     OpticalLens.countDocuments({ 'web.isPublished': true }),
-    Fragrance.countDocuments({ 'web.isPublished': true, isArchived: { $ne: true }, type: 'attar' }),
-    Fragrance.countDocuments({ 'web.isPublished': true, isArchived: { $ne: true }, type: 'perfume' }),
-    Fragrance.countDocuments({ 'web.isPublished': true, isArchived: { $ne: true }, type: 'bakhoor' }),
+    Fragrance.countDocuments({ 'web.isPublished': true, $nor: [{ isArchived: true }], type: 'attar' }),
+    Fragrance.countDocuments({ 'web.isPublished': true, $nor: [{ isArchived: true }], type: 'perfume' }),
+    Fragrance.countDocuments({ 'web.isPublished': true, $nor: [{ isArchived: true }], type: 'bakhoor' }),
   ]);
   return {
     optical: {
