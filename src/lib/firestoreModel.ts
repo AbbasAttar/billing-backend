@@ -35,7 +35,7 @@ export function attachDocMethods(doc: any, modelObj?: any): any {
         if (modelObj) {
           if (docId) {
             // save() writes the whole document, so the written payload is the result; skip the re-read.
-            const updated = await modelObj.findByIdAndUpdate(docId, doc, { returnDoc: false });
+            const updated = await modelObj.findByIdAndUpdate(docId, doc, { returnDoc: false, fullDocument: true });
             return attachDocMethods(updated, modelObj);
           }
           return modelObj.create(doc);
@@ -1287,12 +1287,19 @@ export interface IFirestoreModel<T extends BaseDoc = any> {
   aggregate(pipeline: any[], ...args: any[]): Promise<any[]>;
 }
 
+export interface BeforeWriteContext {
+  /** True when `payload` is the complete document (create / save), false for partial updates. */
+  full: boolean;
+  /** The stored document before this write, for partial updates that depend on other fields (null if none). */
+  getExisting: () => Promise<Record<string, any> | null>;
+}
+
 export interface FirestoreModelOptions {
   /**
    * Runs on the cleaned payload just before create() / findByIdAndUpdate() writes it.
-   * Use it to maintain derived fields (e.g. invoice balance) so queries can filter on them natively.
+   * Use it to maintain derived fields (e.g. invoice balance, lab-job flags) so queries can filter natively.
    */
-  beforeWrite?: (payload: Record<string, any>) => void;
+  beforeWrite?: (payload: Record<string, any>, ctx: BeforeWriteContext) => void | Promise<void>;
 }
 
 export function createFirestoreModel<T extends BaseDoc = any>(
@@ -1358,7 +1365,7 @@ export function createFirestoreModel<T extends BaseDoc = any>(
           delete cleaned.id;
           cleaned.createdAt = cleaned.createdAt || now;
           cleaned.updatedAt = now;
-          options.beforeWrite?.(cleaned);
+          await options.beforeWrite?.(cleaned, { full: true, getExisting: async () => null });
 
           const docRef = colRef.doc(customId);
           await docRef.set(cleaned, { merge: true });
@@ -1396,6 +1403,19 @@ export function createFirestoreModel<T extends BaseDoc = any>(
         const parsed = parseUpdate(update);
         const returnDoc = args[0]?.returnDoc !== false;
 
+        // Options for internal callers: `existing` is a copy of the doc they already read (avoids a re-read
+        // in beforeWrite) and `fullDocument` marks save()-style writes that carry every field.
+        const existingHint: Record<string, any> | undefined = args[0]?.existing;
+        const hookCtx: BeforeWriteContext = {
+          full: args[0]?.fullDocument === true,
+          getExisting: async () => {
+            if (existingHint) return existingHint;
+            const prior = await docRef.get();
+            recordReads(colName, 1);
+            return prior.exists ? snapToData<Record<string, any>>(prior) : null;
+          },
+        };
+
         // Read-modify-write (in a transaction) when Firestore cannot express the update natively:
         //  - array-index paths such as "web.frameVariants.0.stock"
         //  - $inc when the caller needs the new value back (atomic, so concurrent counters stay unique)
@@ -1407,6 +1427,7 @@ export function createFirestoreModel<T extends BaseDoc = any>(
             const snap = await tx.get(docRef);
             recordReads(colName, 1);
             const data: Record<string, any> = snap.exists ? convertTimestamps(snap.data() || {}) : {};
+            const before: Record<string, any> | null = snap.exists ? convertTimestamps(snap.data() || {}) : null;
 
             const touched = applyUpdateToData(data, parsed, !snap.exists);
             const writePayload: Record<string, any> = {};
@@ -1415,7 +1436,7 @@ export function createFirestoreModel<T extends BaseDoc = any>(
             }
             data.updatedAt = new Date();
             writePayload.updatedAt = data.updatedAt;
-            options.beforeWrite?.(writePayload);
+            await options.beforeWrite?.(writePayload, { full: false, getExisting: async () => before });
             tx.set(docRef, writePayload, { merge: true });
             return { ...data, id: docId, _id: docId };
           });
@@ -1425,7 +1446,7 @@ export function createFirestoreModel<T extends BaseDoc = any>(
 
         const payload = toMergePayload(parsed);
         payload.updatedAt = new Date();
-        options.beforeWrite?.(payload);
+        await options.beforeWrite?.(payload, hookCtx);
         await docRef.set(payload, { merge: true });
 
         // Callers that ignore the result pass { returnDoc: false } to skip the read-after-write.
@@ -1480,7 +1501,7 @@ export function createFirestoreModel<T extends BaseDoc = any>(
       const docs = await new FirestoreQuery<T>(colName, filter, false, modelObj).limit(1).exec();
       if (docs.length === 0) return { matchedCount: 0, modifiedCount: 0 };
       const docId = docs[0].id || docs[0]._id;
-      await (this as any).findByIdAndUpdate(docId, update, { returnDoc: false });
+      await (this as any).findByIdAndUpdate(docId, update, { returnDoc: false, existing: docs[0] });
       return { matchedCount: 1, modifiedCount: 1 };
     },
 
@@ -1489,7 +1510,7 @@ export function createFirestoreModel<T extends BaseDoc = any>(
       let modified = 0;
       for (const d of docs) {
         const docId = d.id || d._id;
-        await (this as any).findByIdAndUpdate(docId, update, { returnDoc: false });
+        await (this as any).findByIdAndUpdate(docId, update, { returnDoc: false, existing: d });
         modified++;
       }
       return { matchedCount: docs.length, modifiedCount: modified };

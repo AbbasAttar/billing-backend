@@ -5,6 +5,8 @@ import { Invoice } from '../models/Invoice.model';
 import { PurchaseEntry } from '../models/PurchaseEntry.model';
 import { Frame } from '../models/Frame.model';
 import { invalidateInvoiceLookupCache } from './purchaseEntry.controller';
+import { isBackfillDone } from '../lib/backfillMarker';
+import { flagExpensiveOp } from '../lib/readMeter';
 
 // Helper to format power values cleanly (+ for positive, - for negative, no sign for 0.00)
 function formatPowerVal(val: number): string {
@@ -152,6 +154,66 @@ function formatCompactLensSpecs(item: any): string {
   return parts.join(' ');
 }
 
+/**
+ * Filter for the lab queue. Uses the derived isLabItem / isOpenLabJob flags (native Firestore
+ * queries) once `backfillLabFlags` has run; until then it falls back to the legacy `$or` filter,
+ * which scans every invoice item.
+ */
+async function buildLabQueueQuery(statusFilter: string): Promise<Record<string, any>> {
+  if (await isBackfillDone('labFlagsBackfill')) {
+    const query: Record<string, any> = { isLabItem: true };
+    if (statusFilter === 'pending') {
+      query.isOpenLabJob = true;
+    } else if (statusFilter === 'sent') {
+      query.sentToWholesaler = true;
+      query.labStatus = { $in: ['sent', 'pending'] };
+    } else if (statusFilter === 'received') {
+      query.labStatus = { $in: ['received', 'fitted'] };
+    } else if (statusFilter === 'fitted') {
+      query.labStatus = 'fitted';
+    }
+    return query;
+  }
+
+  flagExpensiveOp(
+    'wholesaler:legacy-scan',
+    'lab flags are not backfilled; scanning all invoice items. Run src/scripts/backfillLabFlags.ts --apply.',
+    false,
+  );
+  const query: Record<string, any> = {
+    $or: [
+      { type: 'opticalLens' },
+      { fulfillmentSource: 'ordered' },
+      { lensType: { $exists: true, $ne: null } },
+      { opticalLens: { $exists: true, $ne: null } },
+    ],
+  };
+  if (statusFilter === 'pending') {
+    query.labStatus = { $nin: ['received', 'fitted', 'cancelled'] };
+  } else if (statusFilter === 'sent') {
+    query.sentToWholesaler = true;
+    query.labStatus = { $in: ['sent', 'pending'] };
+  } else if (statusFilter === 'received') {
+    query.labStatus = { $in: ['received', 'fitted'] };
+  } else if (statusFilter === 'fitted') {
+    query.labStatus = 'fitted';
+  }
+  return query;
+}
+
+// ── GET /api/wholesaler-queue/count ───────────────────────────────────────────
+// Count only (one aggregate read) for badges that don't need the item list.
+export const getLabQueueCount = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const statusFilter = (req.query.status as string) || 'pending';
+    const query = await buildLabQueueQuery(statusFilter);
+    const count = await InvoiceItem.countDocuments(query);
+    res.json({ count });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // ── GET /api/wholesaler-queue ─────────────────────────────────────────────────
 export const getPendingOrderItems = async (
   req: Request,
@@ -161,26 +223,9 @@ export const getPendingOrderItems = async (
   try {
     const statusFilter = (req.query.status as string) || 'all';
     const dateQuery = req.query.date as string | undefined;
+    const requestedLimit = parseInt(String(req.query.limit ?? ''), 10);
 
-    const query: Record<string, any> = {
-      $or: [
-        { type: 'opticalLens' },
-        { fulfillmentSource: 'ordered' },
-        { lensType: { $exists: true, $ne: null } },
-        { opticalLens: { $exists: true, $ne: null } },
-      ],
-    };
-
-    if (statusFilter === 'pending') {
-      query.labStatus = { $nin: ['received', 'fitted', 'cancelled'] };
-    } else if (statusFilter === 'sent') {
-      query.sentToWholesaler = true;
-      query.labStatus = { $in: ['sent', 'pending'] };
-    } else if (statusFilter === 'received') {
-      query.labStatus = { $in: ['received', 'fitted'] };
-    } else if (statusFilter === 'fitted') {
-      query.labStatus = 'fitted';
-    }
+    const query = await buildLabQueueQuery(statusFilter);
 
     if (dateQuery) {
       const startOfDay = new Date(dateQuery);
@@ -190,11 +235,16 @@ export const getPendingOrderItems = async (
       query.createdAt = { $gte: startOfDay, $lte: endOfDay };
     }
 
-    const items = await InvoiceItem.find(query)
+    // Open jobs (pending / sent) are naturally small. History views are capped so they stay cheap.
+    const isHistoryView = !['pending', 'sent'].includes(statusFilter);
+    const limit = requestedLimit > 0 ? Math.min(requestedLimit, 500) : isHistoryView && !dateQuery ? 200 : 0;
+
+    let itemQuery = InvoiceItem.find(query)
       .populate('frame', 'name companyName houseName frameCode web')
       .populate('opticalLens', 'name brand category coating index')
-      .sort({ createdAt: -1 })
-      .lean();
+      .sort({ createdAt: -1 });
+    if (limit > 0) itemQuery = itemQuery.limit(limit);
+    const items = await itemQuery.lean();
 
     if (items.length === 0) {
       res.json({ count: 0, items: [] });

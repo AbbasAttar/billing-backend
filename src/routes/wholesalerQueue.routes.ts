@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import {
   getPendingOrderItems,
+  getLabQueueCount,
   markSentToWholesaler,
   getDailyWholesalerSummary,
   updateLabOrderStatus,
@@ -13,6 +14,9 @@ const router = Router();
 
 // GET  /api/wholesaler-queue        — all items with status & customer context
 router.get('/', getPendingOrderItems);
+
+// GET  /api/wholesaler-queue/count?status=pending — count only (badges)
+router.get('/count', getLabQueueCount);
 
 // GET  /api/wholesaler-queue/summary — daily 7:00-7:30 PM summary
 router.get('/summary', getDailyWholesalerSummary);
