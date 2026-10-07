@@ -26,4 +26,4 @@ export interface IVendorBill extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const VendorBill = createFirestoreModel<IVendorBill>('vendorbills');
+export const VendorBill = createFirestoreModel<IVendorBill>('vendorbills', { mirror: true });

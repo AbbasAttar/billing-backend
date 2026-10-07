@@ -7,4 +7,4 @@ export interface IFrameColor extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const FrameColor = createFirestoreModel<IFrameColor>('framecolors');
+export const FrameColor = createFirestoreModel<IFrameColor>('framecolors', { mirror: true });

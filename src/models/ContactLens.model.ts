@@ -18,6 +18,7 @@ export interface IContactLens extends BaseDoc {
 }
 
 export const ContactLens = createFirestoreModel<IContactLens>('contactlens', {
+  mirror: true,
   hiddenFields: ['searchTokens'],
   beforeWrite: searchTokenHook(['name', 'brand'], (l) => ({
     text: [l.name, l.brand],

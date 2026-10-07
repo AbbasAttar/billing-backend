@@ -28,4 +28,4 @@ export interface ICustomerRequirement extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const CustomerRequirement = createFirestoreModel<ICustomerRequirement>('customerrequirements');
+export const CustomerRequirement = createFirestoreModel<ICustomerRequirement>('customerrequirements', { mirror: true });

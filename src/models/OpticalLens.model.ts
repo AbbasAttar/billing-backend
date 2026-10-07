@@ -19,6 +19,7 @@ export interface IOpticalLens extends BaseDoc {
 }
 
 export const OpticalLens = createFirestoreModel<IOpticalLens>('opticallens', {
+  mirror: true,
   hiddenFields: ['searchTokens'],
   beforeWrite: searchTokenHook(['name', 'brand', 'category'], (l) => ({
     text: [l.name, l.brand, l.category],

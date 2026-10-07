@@ -31,4 +31,4 @@ export interface IPersonalExpense extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const PersonalExpense = createFirestoreModel<IPersonalExpense>('personalexpenses');
+export const PersonalExpense = createFirestoreModel<IPersonalExpense>('personalexpenses', { mirror: true });

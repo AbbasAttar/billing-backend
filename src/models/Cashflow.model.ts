@@ -62,4 +62,4 @@ export interface ICashflow extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const Cashflow = createFirestoreModel<ICashflow>('cashflows');
+export const Cashflow = createFirestoreModel<ICashflow>('cashflows', { mirror: true });

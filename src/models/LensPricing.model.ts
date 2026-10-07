@@ -34,4 +34,4 @@ export interface ILensPricing extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const LensPricing = createFirestoreModel<ILensPricing>('lenspricings');
+export const LensPricing = createFirestoreModel<ILensPricing>('lenspricings', { mirror: true });

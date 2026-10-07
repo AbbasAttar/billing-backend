@@ -23,10 +23,17 @@ export interface IFrame extends BaseDoc {
   updatedAt?: Date;
 }
 
+const frameTokens = searchTokenHook(['name', 'companyName', 'houseName', 'frameCode'], (f) => ({
+  text: [f.name, f.companyName, f.houseName],
+  codes: [f.frameCode],
+}));
+
 export const Frame = createFirestoreModel<IFrame>('frames', {
+  mirror: true,
   hiddenFields: ['searchTokens'],
-  beforeWrite: searchTokenHook(['name', 'companyName', 'houseName', 'frameCode'], (f) => ({
-    text: [f.name, f.companyName, f.houseName],
-    codes: [f.frameCode],
-  })),
+  beforeWrite: async (payload, ctx) => {
+    // Always store the flag: a missing isArchived is invisible to Firestore `==` / `!=` queries.
+    if (ctx.full && payload.isArchived === undefined) payload.isArchived = false;
+    await frameTokens(payload, ctx);
+  },
 });

@@ -64,6 +64,7 @@ export function computeInvoiceDueFields(
 }
 
 export const Invoice = createFirestoreModel<IInvoice>('invoices', {
+  mirror: true,
   beforeWrite: (payload) => {
     const derived = computeInvoiceDueFields(payload);
     if (derived) Object.assign(payload, derived);

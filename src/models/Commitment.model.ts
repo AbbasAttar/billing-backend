@@ -10,4 +10,4 @@ export interface ICommitment extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const Commitment = createFirestoreModel<ICommitment>('commitments');
+export const Commitment = createFirestoreModel<ICommitment>('commitments', { mirror: true });

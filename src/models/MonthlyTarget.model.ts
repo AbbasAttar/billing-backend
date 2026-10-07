@@ -10,4 +10,4 @@ export interface IMonthlyTarget extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const MonthlyTarget = createFirestoreModel<IMonthlyTarget>('monthlytargets');
+export const MonthlyTarget = createFirestoreModel<IMonthlyTarget>('monthlytargets', { mirror: true });

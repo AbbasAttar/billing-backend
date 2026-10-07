@@ -24,4 +24,4 @@ export interface IDebt extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const Debt = createFirestoreModel<IDebt>('debts');
+export const Debt = createFirestoreModel<IDebt>('debts', { mirror: true });

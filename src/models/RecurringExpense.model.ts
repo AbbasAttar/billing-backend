@@ -43,4 +43,4 @@ export interface IRecurringExpense extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const RecurringExpense = createFirestoreModel<IRecurringExpense>('recurringexpenses');
+export const RecurringExpense = createFirestoreModel<IRecurringExpense>('recurringexpenses', { mirror: true });

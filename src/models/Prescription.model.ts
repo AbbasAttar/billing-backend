@@ -17,4 +17,4 @@ export interface IPrescription extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const Prescription = createFirestoreModel<IPrescription>('prescriptions');
+export const Prescription = createFirestoreModel<IPrescription>('prescriptions', { mirror: true });

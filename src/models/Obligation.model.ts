@@ -34,4 +34,4 @@ export interface IObligation extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const Obligation = createFirestoreModel<IObligation>('obligations');
+export const Obligation = createFirestoreModel<IObligation>('obligations', { mirror: true });

@@ -11,12 +11,16 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 interface ReadStore {
   total: number;
   byCollection: Record<string, number>;
+  /** When the request started (ms). */
+  startedAt: number;
+  /** Collection mirrors already synced with the source during this request. */
+  mirrorsSynced: Set<string>;
 }
 
 const als = new AsyncLocalStorage<ReadStore>();
 
 export function runWithReadMeter<T>(fn: () => T): T {
-  return als.run({ total: 0, byCollection: {} }, fn);
+  return als.run({ total: 0, byCollection: {}, startedAt: Date.now(), mirrorsSynced: new Set() }, fn);
 }
 
 export function getReadMeter(): ReadStore | undefined {

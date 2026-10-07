@@ -1,6 +1,14 @@
 import { convertTimestamps, getDb, snapToData } from './firestoreDb';
 import { FieldValue } from 'firebase-admin/firestore';
 import { flagExpensiveOp, recordReads } from './readMeter';
+import {
+  getMirrorDocs,
+  getMirrorDocsByIds,
+  isMirrored,
+  noteMirrorWrite,
+  recordMirrorDeletes,
+  registerMirror,
+} from './collectionMirror';
 
 export interface BaseDoc {
   id?: string;
@@ -190,6 +198,11 @@ export function matchesMongoFilter(doc: any, filter: any): boolean {
       continue;
     }
 
+    if (key === '$expr') {
+      if (!isTruthy(evalExpr(doc, val))) return false;
+      continue;
+    }
+
     const docId = doc.id || doc._id;
     let targetVal: any;
     if (key === '_id' || key === 'id') {
@@ -204,6 +217,20 @@ export function matchesMongoFilter(doc: any, filter: any): boolean {
   }
 
   return true;
+}
+
+/**
+ * Range comparison with Mongo's type bracketing: values of different types never match
+ * (a string date is not ">= " a Date). An array target matches when any element does.
+ */
+function rangeMatches(target: any, bound: any, test: (cmp: number) => boolean): boolean {
+  if (Array.isArray(target)) return target.some((t) => rangeMatches(t, bound, test));
+  if (target === undefined || target === null || bound === undefined || bound === null) return false;
+  if (target instanceof Date && bound instanceof Date) return test(target.getTime() - bound.getTime());
+  if (typeof target === 'number' && typeof bound === 'number') return test(target - bound);
+  if (typeof target === 'string' && typeof bound === 'string') return test(target < bound ? -1 : target > bound ? 1 : 0);
+  if (typeof target === 'boolean' && typeof bound === 'boolean') return test(Number(target) - Number(bound));
+  return false;
 }
 
 function matchValue(target: any, condition: any): boolean {
@@ -254,18 +281,10 @@ function matchValue(target: any, condition: any): boolean {
           if (ninVals.includes(strTarget)) return false;
         }
       }
-      if ('$gte' in condition) {
-        if (target === undefined || target === null || target < condition.$gte) return false;
-      }
-      if ('$lte' in condition) {
-        if (target === undefined || target === null || target > condition.$lte) return false;
-      }
-      if ('$gt' in condition) {
-        if (target === undefined || target === null || target <= condition.$gt) return false;
-      }
-      if ('$lt' in condition) {
-        if (target === undefined || target === null || target >= condition.$lt) return false;
-      }
+      if ('$gte' in condition && !rangeMatches(target, condition.$gte, (c) => c >= 0)) return false;
+      if ('$lte' in condition && !rangeMatches(target, condition.$lte, (c) => c <= 0)) return false;
+      if ('$gt' in condition && !rangeMatches(target, condition.$gt, (c) => c > 0)) return false;
+      if ('$lt' in condition && !rangeMatches(target, condition.$lt, (c) => c < 0)) return false;
       if ('$arrayContains' in condition) {
         if (!Array.isArray(target) || !target.includes(condition.$arrayContains)) return false;
       }
@@ -326,11 +345,13 @@ function sortDocs(docs: any[], orderBys: Array<[string, 'asc' | 'desc']>): any[]
       if (valA instanceof Date && valB instanceof Date) {
         cmp = valA.getTime() - valB.getTime();
       } else if (typeof valA === 'string' && typeof valB === 'string') {
-        cmp = valA.localeCompare(valB);
+        // Document ids compare bytewise, as Firestore orders them.
+        cmp = field === 'id' || field === '_id' ? (valA < valB ? -1 : 1) : valA.localeCompare(valB);
       } else {
         cmp = valA < valB ? -1 : 1;
       }
 
+      if (cmp === 0) continue;
       return dir === 'desc' ? -cmp : cmp;
     }
     return 0;
@@ -423,8 +444,17 @@ export async function populateDocs(docs: any[], specs: any[]): Promise<void> {
     const idsToFetch = Array.from(idSet);
     const fetchedDocsMap = new Map<string, any>();
 
+    // A handful of ids is cheapest as a direct getAll; more come from the target's mirror.
+    const fromMirror = isMirrored(targetCol) && idsToFetch.length > 3;
+    if (fromMirror) {
+      for (const [id, data] of await getMirrorDocsByIds(targetCol, idsToFetch)) {
+        attachDocMethods(data);
+        fetchedDocsMap.set(id, data);
+      }
+    }
+
     const colRef = getDb().collection(targetCol);
-    for (let i = 0; i < idsToFetch.length; i += 100) {
+    for (let i = 0; !fromMirror && i < idsToFetch.length; i += 100) {
       const chunk = idsToFetch.slice(i, i + 100);
       const refs = chunk.map((id) => colRef.doc(id));
       if (refs.length > 0) {
@@ -474,124 +504,447 @@ export async function populateDocs(docs: any[], specs: any[]): Promise<void> {
   }
 }
 
-function evalExpression(doc: any, expr: any): any {
-  if (expr === null || expr === undefined) return null;
+// ── Aggregation pipeline emulation ──────────────────────────────────────────
+// Mongo semantics for the stages and expression operators this codebase uses. Dates are UTC
+// unless an expression passes `timezone` (as in MongoDB).
 
-  if (typeof expr === 'number' || typeof expr === 'boolean') return expr;
-  if (typeof expr === 'string') {
-    if (expr.startsWith('$')) {
-      return getValueByPath(doc, expr.substring(1));
+type ExprVars = Record<string, any>;
+
+const warnedOperators = new Set<string>();
+
+function warnUnsupported(kind: string, name: string): void {
+  const key = `${kind}:${name}`;
+  if (warnedOperators.has(key)) return;
+  warnedOperators.add(key);
+  console.warn(`[aggregate] unsupported ${kind} "${name}" — result treated as null`);
+}
+
+function cloneDoc<D>(doc: D): D {
+  try {
+    return structuredClone(doc);
+  } catch {
+    return JSON.parse(JSON.stringify(doc));
+  }
+}
+
+const isNullish = (v: any) => v === null || v === undefined;
+
+/** Mongo truthiness: false, null, missing and 0 are false; everything else is true. */
+function isTruthy(v: any): boolean {
+  return !(v === false || v === 0 || isNullish(v));
+}
+
+function typeRank(v: any): number {
+  if (isNullish(v)) return 0;
+  if (typeof v === 'number') return 1;
+  if (typeof v === 'string') return 2;
+  if (Array.isArray(v)) return 4;
+  if (v instanceof Date) return 6;
+  if (typeof v === 'boolean') return 5;
+  return 3;
+}
+
+function compareValues(a: any, b: any): number {
+  const ra = typeRank(a);
+  const rb = typeRank(b);
+  if (ra !== rb) return ra - rb;
+  if (ra === 0) return 0;
+  if (a instanceof Date && b instanceof Date) return a.getTime() - b.getTime();
+  if (ra === 3 || ra === 4) {
+    const sa = JSON.stringify(a);
+    const sb = JSON.stringify(b);
+    return sa < sb ? -1 : sa > sb ? 1 : 0;
+  }
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function valuesEqual(a: any, b: any): boolean {
+  if (isNullish(a) && isNullish(b)) return true;
+  return compareValues(a, b) === 0;
+}
+
+function toNumber(v: any): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (v instanceof Date) return v.getTime();
+  return null;
+}
+
+function asDate(v: any): Date | null {
+  if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v;
+  if (typeof v === 'string' || typeof v === 'number') {
+    const d = new Date(v);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  return null;
+}
+
+function tzOffsetMinutes(tz: any): number {
+  if (!tz || typeof tz !== 'string') return 0;
+  const m = /^([+-])(\d{2}):?(\d{2})$/.exec(tz);
+  if (m) return (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3]));
+  if (tz === 'Asia/Kolkata' || tz === 'Asia/Calcutta') return 330;
+  if (tz !== 'UTC' && tz !== 'GMT' && tz !== 'Etc/UTC') warnUnsupported('timezone', tz);
+  return 0;
+}
+
+/** Date shifted so its UTC getters return wall-clock parts in `tz`. */
+function zoned(date: Date, tz: any): Date {
+  return new Date(date.getTime() + tzOffsetMinutes(tz) * 60_000);
+}
+
+function dateArg(doc: any, arg: any, vars: ExprVars): { date: Date | null; tz: any } {
+  if (arg && typeof arg === 'object' && !Array.isArray(arg) && !(arg instanceof Date) && 'date' in arg) {
+    return { date: asDate(evalExpr(doc, arg.date, vars)), tz: evalExpr(doc, arg.timezone, vars) };
+  }
+  return { date: asDate(evalExpr(doc, Array.isArray(arg) ? arg[0] : arg, vars)), tz: undefined };
+}
+
+const pad = (n: number, width = 2) => String(n).padStart(width, '0');
+
+function formatDate(format: string, d: Date): string {
+  return format.replace(/%([YmdHMSLjuw%])/g, (_m, code: string) => {
+    switch (code) {
+      case 'Y': return String(d.getUTCFullYear());
+      case 'm': return pad(d.getUTCMonth() + 1);
+      case 'd': return pad(d.getUTCDate());
+      case 'H': return pad(d.getUTCHours());
+      case 'M': return pad(d.getUTCMinutes());
+      case 'S': return pad(d.getUTCSeconds());
+      case 'L': return pad(d.getUTCMilliseconds(), 3);
+      case 'j': {
+        const start = Date.UTC(d.getUTCFullYear(), 0, 1);
+        return pad(Math.floor((d.getTime() - start) / 86_400_000) + 1, 3);
+      }
+      case 'u': return String(d.getUTCDay() === 0 ? 7 : d.getUTCDay());
+      case 'w': return String(d.getUTCDay());
+      default: return '%';
     }
+  });
+}
+
+/** Mongo $round: half to even. */
+function roundHalfEven(value: number, places: number): number {
+  const factor = 10 ** places;
+  const x = value * factor;
+  const r = Math.round(x);
+  const isHalf = Math.abs(x % 1) === 0.5;
+  const rounded = isHalf && r % 2 !== 0 ? r - 1 : r;
+  return rounded / factor;
+}
+
+function evalArgs(doc: any, arg: any, vars: ExprVars): any[] {
+  return Array.isArray(arg) ? arg.map((a) => evalExpr(doc, a, vars)) : [evalExpr(doc, arg, vars)];
+}
+
+function numericValues(values: any[]): number[] {
+  return values.filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+}
+
+function evalOperator(doc: any, op: string, arg: any, vars: ExprVars): any {
+  switch (op) {
+    case '$literal':
+      return arg;
+
+    // Arithmetic
+    case '$add': {
+      const values = evalArgs(doc, arg, vars);
+      if (values.some(isNullish)) return null;
+      const date = values.find((v) => v instanceof Date);
+      const total = values.reduce((sum, v) => sum + (toNumber(v) ?? 0), 0);
+      return date ? new Date(total) : total;
+    }
+    case '$subtract': {
+      const [a, b] = evalArgs(doc, arg, vars);
+      if (isNullish(a) || isNullish(b)) return null;
+      if (a instanceof Date && b instanceof Date) return a.getTime() - b.getTime();
+      if (a instanceof Date) return new Date(a.getTime() - (toNumber(b) ?? 0));
+      return (toNumber(a) ?? 0) - (toNumber(b) ?? 0);
+    }
+    case '$multiply': {
+      const values = evalArgs(doc, arg, vars);
+      if (values.some(isNullish)) return null;
+      return values.reduce((prod, v) => prod * (toNumber(v) ?? 0), 1);
+    }
+    case '$divide': {
+      const [a, b] = evalArgs(doc, arg, vars);
+      const na = toNumber(a);
+      const nb = toNumber(b);
+      if (na === null || nb === null || nb === 0) return null;
+      return na / nb;
+    }
+    case '$mod': {
+      const [a, b] = evalArgs(doc, arg, vars);
+      const na = toNumber(a);
+      const nb = toNumber(b);
+      if (na === null || nb === null || nb === 0) return null;
+      return na % nb;
+    }
+    case '$abs': case '$floor': case '$ceil': {
+      const n = toNumber(evalArgs(doc, arg, vars)[0]);
+      if (n === null) return null;
+      return op === '$abs' ? Math.abs(n) : op === '$floor' ? Math.floor(n) : Math.ceil(n);
+    }
+    case '$round': {
+      const [value, places] = evalArgs(doc, arg, vars);
+      const n = toNumber(value);
+      if (n === null) return null;
+      return roundHalfEven(n, Number(places) || 0);
+    }
+    case '$sum': case '$avg': case '$max': case '$min': {
+      const values = evalArgs(doc, arg, vars);
+      // A single array argument aggregates the array's elements.
+      const pool = values.length === 1 && Array.isArray(values[0]) ? values[0] : values;
+      if (op === '$sum') return numericValues(pool).reduce((s, v) => s + v, 0);
+      if (op === '$avg') {
+        const nums = numericValues(pool);
+        return nums.length ? nums.reduce((s, v) => s + v, 0) / nums.length : null;
+      }
+      const present = pool.filter((v: any) => !isNullish(v));
+      if (present.length === 0) return null;
+      return present.reduce((best: any, v: any) => {
+        const c = compareValues(v, best);
+        return (op === '$max' ? c > 0 : c < 0) ? v : best;
+      });
+    }
+
+    // Comparison & logic
+    case '$eq': case '$ne': case '$gt': case '$gte': case '$lt': case '$lte': {
+      const [a, b] = evalArgs(doc, arg, vars);
+      if (op === '$eq') return valuesEqual(a, b);
+      if (op === '$ne') return !valuesEqual(a, b);
+      const c = compareValues(a, b);
+      return op === '$gt' ? c > 0 : op === '$gte' ? c >= 0 : op === '$lt' ? c < 0 : c <= 0;
+    }
+    case '$cmp': {
+      const [a, b] = evalArgs(doc, arg, vars);
+      return Math.sign(compareValues(a, b));
+    }
+    case '$and':
+      return evalArgs(doc, arg, vars).every(isTruthy);
+    case '$or':
+      return evalArgs(doc, arg, vars).some(isTruthy);
+    case '$not':
+      return !isTruthy(evalArgs(doc, arg, vars)[0]);
+    case '$in': {
+      const [value, list] = evalArgs(doc, arg, vars);
+      return Array.isArray(list) && list.some((item) => valuesEqual(item, value) || String(item) === String(value));
+    }
+    case '$cond': {
+      const spec = Array.isArray(arg) ? { if: arg[0], then: arg[1], else: arg[2] } : arg;
+      return isTruthy(evalExpr(doc, spec.if, vars)) ? evalExpr(doc, spec.then, vars) : evalExpr(doc, spec.else, vars);
+    }
+    case '$ifNull': {
+      const list = Array.isArray(arg) ? arg : [arg];
+      for (let i = 0; i < list.length - 1; i++) {
+        const v = evalExpr(doc, list[i], vars);
+        if (!isNullish(v)) return v;
+      }
+      return evalExpr(doc, list[list.length - 1], vars);
+    }
+    case '$switch': {
+      for (const branch of arg?.branches ?? []) {
+        if (isTruthy(evalExpr(doc, branch.case, vars))) return evalExpr(doc, branch.then, vars);
+      }
+      return evalExpr(doc, arg?.default, vars);
+    }
+
+    // Arrays
+    case '$size': {
+      const v = evalArgs(doc, arg, vars)[0];
+      return Array.isArray(v) ? v.length : 0;
+    }
+    case '$arrayElemAt': {
+      const [list, index] = evalArgs(doc, arg, vars);
+      if (!Array.isArray(list)) return null;
+      const i = Number(index);
+      return i < 0 ? list[list.length + i] : list[i];
+    }
+    case '$first': case '$last': {
+      const v = evalArgs(doc, arg, vars)[0];
+      if (!Array.isArray(v)) return v;
+      return op === '$first' ? v[0] : v[v.length - 1];
+    }
+    case '$concatArrays': {
+      const values = evalArgs(doc, arg, vars);
+      if (values.some(isNullish)) return null;
+      return values.flatMap((v) => (Array.isArray(v) ? v : [v]));
+    }
+    case '$filter': {
+      const input = evalExpr(doc, arg?.input, vars);
+      if (!Array.isArray(input)) return null;
+      const name = arg?.as || 'this';
+      const out = input.filter((item) => isTruthy(evalExpr(doc, arg?.cond, { ...vars, [name]: item })));
+      return arg?.limit ? out.slice(0, Number(evalExpr(doc, arg.limit, vars))) : out;
+    }
+    case '$map': {
+      const input = evalExpr(doc, arg?.input, vars);
+      if (!Array.isArray(input)) return null;
+      const name = arg?.as || 'this';
+      return input.map((item) => evalExpr(doc, arg?.in, { ...vars, [name]: item }));
+    }
+    case '$reduce': {
+      const input = evalExpr(doc, arg?.input, vars);
+      if (!Array.isArray(input)) return null;
+      let value = evalExpr(doc, arg?.initialValue, vars);
+      for (const item of input) value = evalExpr(doc, arg?.in, { ...vars, value, this: item });
+      return value;
+    }
+
+    // Strings & types
+    case '$toString': {
+      const v = evalArgs(doc, arg, vars)[0];
+      if (isNullish(v)) return null;
+      return v instanceof Date ? v.toISOString() : String(v);
+    }
+    case '$toLower': case '$toUpper': {
+      const v = evalArgs(doc, arg, vars)[0];
+      if (isNullish(v)) return '';
+      return op === '$toLower' ? String(v).toLowerCase() : String(v).toUpperCase();
+    }
+    case '$concat': {
+      const values = evalArgs(doc, arg, vars);
+      if (values.some(isNullish)) return null;
+      return values.map(String).join('');
+    }
+    case '$strLenCP': {
+      const v = evalArgs(doc, arg, vars)[0];
+      return typeof v === 'string' ? [...v].length : 0;
+    }
+    case '$toInt': case '$toDouble': {
+      const v = evalArgs(doc, arg, vars)[0];
+      if (isNullish(v)) return null;
+      const n = v instanceof Date ? v.getTime() : Number(v);
+      if (Number.isNaN(n)) return null;
+      return op === '$toInt' ? Math.trunc(n) : n;
+    }
+    case '$toDate': {
+      return asDate(evalArgs(doc, arg, vars)[0]);
+    }
+
+    // Dates
+    case '$dateToString': {
+      const date = asDate(evalExpr(doc, arg?.date, vars));
+      if (!date) return arg && 'onNull' in arg ? evalExpr(doc, arg.onNull, vars) : null;
+      return formatDate(arg?.format ?? '%Y-%m-%dT%H:%M:%S.%LZ', zoned(date, evalExpr(doc, arg?.timezone, vars)));
+    }
+    case '$year': case '$month': case '$dayOfMonth': case '$dayOfWeek': case '$hour': case '$minute': case '$dayOfYear': {
+      const { date, tz } = dateArg(doc, arg, vars);
+      if (!date) return null;
+      const d = zoned(date, tz);
+      if (op === '$year') return d.getUTCFullYear();
+      if (op === '$month') return d.getUTCMonth() + 1;
+      if (op === '$dayOfMonth') return d.getUTCDate();
+      if (op === '$dayOfWeek') return d.getUTCDay() + 1;
+      if (op === '$hour') return d.getUTCHours();
+      if (op === '$minute') return d.getUTCMinutes();
+      return Math.floor((d.getTime() - Date.UTC(d.getUTCFullYear(), 0, 1)) / 86_400_000) + 1;
+    }
+
+    default:
+      warnUnsupported('operator', op);
+      return null;
+  }
+}
+
+/** Evaluates an aggregation expression against `doc` (`$field`, `$$var`, operators, literals). */
+function evalExpr(doc: any, expr: any, vars: ExprVars = {}): any {
+  if (expr === undefined) return undefined;
+  if (expr === null) return null;
+
+  if (typeof expr === 'string') {
+    if (expr.startsWith('$$')) {
+      const [name, ...rest] = expr.slice(2).split('.');
+      const base = name === 'ROOT' || name === 'CURRENT' ? doc : vars[name];
+      return rest.length ? getValueByPath(base, rest.join('.')) : base;
+    }
+    if (expr.startsWith('$')) return getValueByPath(doc, expr.slice(1));
     return expr;
   }
 
-  if (typeof expr === 'object' && !Array.isArray(expr)) {
-    if ('$subtract' in expr && Array.isArray(expr.$subtract)) {
-      const a = evalExpression(doc, expr.$subtract[0]) || 0;
-      const b = evalExpression(doc, expr.$subtract[1]) || 0;
-      return Number(a) - Number(b);
-    }
-    if ('$add' in expr && Array.isArray(expr.$add)) {
-      return expr.$add.reduce((sum: number, cur: any) => sum + (Number(evalExpression(doc, cur)) || 0), 0);
-    }
-    if ('$multiply' in expr && Array.isArray(expr.$multiply)) {
-      return expr.$multiply.reduce((prod: number, cur: any) => prod * (Number(evalExpression(doc, cur)) || 0), 1);
-    }
-    if ('$sum' in expr) {
-      const val = evalExpression(doc, expr.$sum);
-      if (Array.isArray(val)) {
-        return val.reduce((acc: number, c: any) => acc + (Number(c) || 0), 0);
-      }
-      return Number(val) || 0;
-    }
+  if (typeof expr !== 'object' || expr instanceof Date) return expr;
+  if (Array.isArray(expr)) return expr.map((e) => evalExpr(doc, e, vars));
+
+  const keys = Object.keys(expr);
+  if (keys.length === 1 && keys[0].startsWith('$')) {
+    return evalOperator(doc, keys[0], expr[keys[0]], vars);
   }
 
-  return expr;
+  // Expression object: evaluate each field.
+  const out: Record<string, any> = {};
+  for (const key of keys) {
+    const v = evalExpr(doc, expr[key], vars);
+    if (v !== undefined) out[key] = v;
+  }
+  return out;
 }
 
 function groupDocs(docs: any[], groupSpec: any): any[] {
   const { _id: idExpr, ...accumulators } = groupSpec;
-  const groups = new Map<string, { groupKeyVal: any; items: any[] }>();
+  const groups = new Map<string, { key: any; items: any[] }>();
 
   for (const doc of docs) {
-    let keyVal: any = null;
-    if (idExpr === null || idExpr === undefined) {
-      keyVal = null;
-    } else if (typeof idExpr === 'string' && idExpr.startsWith('$')) {
-      keyVal = getValueByPath(doc, idExpr.substring(1));
-    } else if (typeof idExpr === 'object') {
-      keyVal = evalExpression(doc, idExpr);
-    } else {
-      keyVal = idExpr;
+    let key = evalExpr(doc, idExpr);
+    if (key === undefined) key = null;
+    const keyStr = JSON.stringify(key);
+    let group = groups.get(keyStr);
+    if (!group) {
+      group = { key, items: [] };
+      groups.set(keyStr, group);
     }
-
-    const groupKeyStr = JSON.stringify(keyVal);
-    if (!groups.has(groupKeyStr)) {
-      groups.set(groupKeyStr, { groupKeyVal: keyVal, items: [] });
-    }
-    groups.get(groupKeyStr)!.items.push(doc);
+    group.items.push(doc);
   }
 
   const result: any[] = [];
-  for (const { groupKeyVal, items } of groups.values()) {
-    const groupedDoc: Record<string, any> = { _id: groupKeyVal };
+  for (const { key, items } of groups.values()) {
+    const groupedDoc: Record<string, any> = { _id: key };
 
-    for (const [accField, accExpr] of Object.entries(accumulators)) {
-      if (accExpr && typeof accExpr === 'object') {
-        if ('$sum' in accExpr) {
-          const expr = (accExpr as any).$sum;
-          if (expr === 1) {
-            groupedDoc[accField] = items.length;
-          } else {
-            let sum = 0;
-            for (const item of items) {
-              const val = evalExpression(item, expr);
-              if (typeof val === 'number' && !isNaN(val)) sum += val;
-            }
-            groupedDoc[accField] = sum;
-          }
-        } else if ('$avg' in accExpr) {
-          let sum = 0;
-          let count = 0;
-          for (const item of items) {
-            const val = evalExpression(item, (accExpr as any).$avg);
-            if (typeof val === 'number' && !isNaN(val)) {
-              sum += val;
-              count++;
-            }
-          }
-          groupedDoc[accField] = count > 0 ? sum / count : 0;
-        } else if ('$min' in accExpr) {
-          let min: any = undefined;
-          for (const item of items) {
-            const val = evalExpression(item, (accExpr as any).$min);
-            if (val !== undefined && val !== null) {
-              if (min === undefined || val < min) min = val;
-            }
-          }
-          groupedDoc[accField] = min ?? null;
-        } else if ('$max' in accExpr) {
-          let max: any = undefined;
-          for (const item of items) {
-            const val = evalExpression(item, (accExpr as any).$max);
-            if (val !== undefined && val !== null) {
-              if (max === undefined || val > max) max = val;
-            }
-          }
-          groupedDoc[accField] = max ?? null;
-        } else if ('$push' in accExpr) {
-          const list: any[] = [];
-          for (const item of items) {
-            list.push(evalExpression(item, (accExpr as any).$push));
-          }
-          groupedDoc[accField] = list;
-        } else if ('$addToSet' in accExpr) {
-          const set = new Set();
-          for (const item of items) {
-            set.add(JSON.stringify(evalExpression(item, (accExpr as any).$addToSet)));
-          }
-          groupedDoc[accField] = Array.from(set).map((s) => JSON.parse(s as string));
+    for (const [field, spec] of Object.entries(accumulators)) {
+      if (!spec || typeof spec !== 'object') continue;
+      const [op, expr] = Object.entries(spec as Record<string, any>)[0] ?? [];
+      const values = () => items.map((item) => evalExpr(item, expr));
+
+      switch (op) {
+        case '$sum':
+          groupedDoc[field] = expr === 1 ? items.length : numericValues(values()).reduce((s, v) => s + v, 0);
+          break;
+        case '$avg': {
+          const nums = numericValues(values());
+          groupedDoc[field] = nums.length ? nums.reduce((s, v) => s + v, 0) / nums.length : null;
+          break;
         }
+        case '$min': case '$max': {
+          const present = values().filter((v) => !isNullish(v));
+          groupedDoc[field] = present.length
+            ? present.reduce((best, v) => {
+                const c = compareValues(v, best);
+                return (op === '$max' ? c > 0 : c < 0) ? v : best;
+              })
+            : null;
+          break;
+        }
+        case '$first':
+          groupedDoc[field] = items.length ? evalExpr(items[0], expr) ?? null : null;
+          break;
+        case '$last':
+          groupedDoc[field] = items.length ? evalExpr(items[items.length - 1], expr) ?? null : null;
+          break;
+        case '$push':
+          groupedDoc[field] = values().filter((v) => v !== undefined);
+          break;
+        case '$addToSet': {
+          const seen = new Map<string, any>();
+          for (const v of values()) {
+            if (v !== undefined) seen.set(JSON.stringify(v), v);
+          }
+          groupedDoc[field] = [...seen.values()];
+          break;
+        }
+        case '$count':
+          groupedDoc[field] = items.length;
+          break;
+        default:
+          warnUnsupported('accumulator', String(op));
+          groupedDoc[field] = null;
       }
     }
 
@@ -604,110 +957,216 @@ function groupDocs(docs: any[], groupSpec: any): any[] {
 function projectDocs(docs: any[], projectSpec: any): any[] {
   if (!projectSpec || typeof projectSpec !== 'object') return docs;
 
+  const entries = Object.entries(projectSpec);
+  const excludesId = projectSpec._id === 0 || projectSpec._id === false;
+  const isExclusion = entries.every(([key, v]) => key === '_id' || v === 0 || v === false);
+
   return docs.map((doc) => {
-    const res: Record<string, any> = {};
-    for (const [key, expr] of Object.entries(projectSpec)) {
-      if (expr === 1 || expr === true) {
-        res[key] = getValueByPath(doc, key);
-      } else if (expr === 0 || expr === false) {
-        // Skip
-      } else {
-        res[key] = evalExpression(doc, expr);
+    if (isExclusion) {
+      const res = { ...doc };
+      for (const [key, v] of entries) {
+        if (v === 0 || v === false) {
+          delete res[key];
+          if (key === '_id') delete res.id;
+        }
       }
+      return res;
     }
-    if (res._id === undefined) res._id = doc._id || doc.id;
-    if (res.id === undefined) res.id = doc.id || doc._id;
+
+    const res: Record<string, any> = {};
+    for (const [key, expr] of entries) {
+      if (key === '_id' && excludesId) continue;
+      const value = expr === 1 || expr === true ? getValueByPath(doc, key) : evalExpr(doc, expr);
+      if (value !== undefined) setNestedPath(res, key, value);
+    }
+    if (!excludesId) {
+      if (res._id === undefined) res._id = doc._id ?? doc.id;
+      if (res.id === undefined) res.id = doc.id ?? doc._id;
+    }
     return res;
   });
+}
+
+const idString = (v: any): string | null => {
+  if (isNullish(v)) return null;
+  if (typeof v === 'object' && !(v instanceof Date)) return String(v.id ?? v._id ?? v);
+  return String(v);
+};
+
+async function lookupStage(docs: any[], spec: any): Promise<any[]> {
+  const { from, localField, foreignField, as: asField } = spec;
+  if (!from || !localField || !foreignField || !asField) {
+    warnUnsupported('$lookup form', JSON.stringify(Object.keys(spec)));
+    return docs;
+  }
+  if (!isMirrored(from)) {
+    flagExpensiveOp(
+      `lookup:${from}`,
+      `$lookup downloads the whole "${from}" collection. Fetch only the referenced ids instead.`
+    );
+  }
+  const foreignDocs: any[] = await new FirestoreQuery(from, {}, false).exec();
+
+  // Index the foreign side by the string form of foreignField (each element when it is an array).
+  const index = new Map<string, any[]>();
+  for (const fDoc of foreignDocs) {
+    const raw = foreignField === '_id' || foreignField === 'id' ? fDoc.id ?? fDoc._id : getValueByPath(fDoc, foreignField);
+    const keys = Array.isArray(raw) ? raw : [raw];
+    for (const k of new Set(keys.map(idString).filter((s): s is string => s !== null))) {
+      const bucket = index.get(k);
+      if (bucket) bucket.push(fDoc);
+      else index.set(k, [fDoc]);
+    }
+  }
+
+  for (const d of docs) {
+    const raw = localField === '_id' || localField === 'id' ? d.id ?? d._id : getValueByPath(d, localField);
+    const keys = (Array.isArray(raw) ? raw : [raw]).map(idString).filter((s): s is string => s !== null);
+    const matches = new Set<any>();
+    for (const k of keys) for (const m of index.get(k) ?? []) matches.add(m);
+    d[asField] = [...matches].map((m) => cloneDoc(m));
+  }
+  return docs;
+}
+
+function unwindStage(docs: any[], spec: any): any[] {
+  const path = (typeof spec === 'string' ? spec : spec.path).replace(/^\$/, '');
+  const preserve = typeof spec === 'object' && Boolean(spec.preserveNullAndEmptyArrays);
+  const indexField: string | undefined = typeof spec === 'object' ? spec.includeArrayIndex : undefined;
+
+  const out: any[] = [];
+  for (const d of docs) {
+    const value = getValueByPath(d, path);
+    if (Array.isArray(value) && value.length > 0) {
+      value.forEach((item, i) => {
+        const copy = cloneDoc(d);
+        setNestedPath(copy, path, item);
+        if (indexField) copy[indexField] = i;
+        out.push(copy);
+      });
+    } else if (!Array.isArray(value) && !isNullish(value)) {
+      // A non-array value unwinds to the document itself, as in MongoDB.
+      out.push(d);
+    } else if (preserve) {
+      const copy = cloneDoc(d);
+      if (Array.isArray(value)) setNestedPath(copy, path, null);
+      if (indexField) copy[indexField] = null;
+      out.push(copy);
+    }
+  }
+  return out;
+}
+
+async function runPipelineStages(input: any[], pipeline: any[]): Promise<any[]> {
+  let docs = input;
+
+  for (const stage of pipeline) {
+    if (!stage || typeof stage !== 'object') continue;
+    const [name, spec] = Object.entries(stage)[0] ?? [];
+
+    switch (name) {
+      case '$match':
+        docs = docs.filter((d) => matchesMongoFilter(d, spec));
+        break;
+      case '$lookup':
+        docs = await lookupStage(docs, spec);
+        break;
+      case '$unwind':
+        docs = unwindStage(docs, spec);
+        break;
+      case '$group':
+        docs = groupDocs(docs, spec);
+        break;
+      case '$sort': {
+        const orderBys: Array<[string, 'asc' | 'desc']> = Object.entries(spec as Record<string, any>).map(([f, d]) => [
+          f,
+          d === -1 || d === 'desc' ? 'desc' : 'asc',
+        ]);
+        docs = sortDocs(docs, orderBys);
+        break;
+      }
+      case '$limit': {
+        const n = Number(spec);
+        if (!Number.isNaN(n) && n >= 0) docs = docs.slice(0, n);
+        break;
+      }
+      case '$skip': {
+        const n = Number(spec);
+        if (!Number.isNaN(n) && n >= 0) docs = docs.slice(n);
+        break;
+      }
+      case '$project':
+        docs = projectDocs(docs, spec);
+        break;
+      case '$addFields':
+      case '$set': {
+        const fields = Object.entries(spec as Record<string, any>);
+        docs = docs.map((d) => {
+          // Every expression sees the input document, then all fields are written.
+          const computed = fields.map(([key, expr]) => [key, evalExpr(d, expr)] as const);
+          const copy = { ...d };
+          for (const [key, value] of computed) setNestedPath(copy, key, value);
+          return copy;
+        });
+        break;
+      }
+      case '$unset': {
+        const fields = Array.isArray(spec) ? spec : [spec];
+        docs = docs.map((d) => {
+          const copy = cloneDoc(d);
+          for (const f of fields) setNestedPath(copy, String(f), undefined);
+          return copy;
+        });
+        break;
+      }
+      case '$replaceRoot':
+      case '$replaceWith': {
+        const expr = name === '$replaceRoot' ? (spec as any).newRoot : spec;
+        docs = docs.map((d) => evalExpr(d, expr)).filter((d) => d && typeof d === 'object');
+        break;
+      }
+      case '$count':
+        docs = [{ [String(spec)]: docs.length }];
+        break;
+      case '$facet': {
+        const out: Record<string, any[]> = {};
+        for (const [facet, subPipeline] of Object.entries(spec as Record<string, any[]>)) {
+          out[facet] = await runPipelineStages(docs.map((d) => cloneDoc(d)), subPipeline);
+        }
+        docs = [out];
+        break;
+      }
+      case '$unionWith': {
+        const coll = typeof spec === 'string' ? spec : (spec as any).coll;
+        const subPipeline = typeof spec === 'string' ? [] : (spec as any).pipeline ?? [];
+        if (!isMirrored(coll)) {
+          flagExpensiveOp(`unionWith:${coll}`, `$unionWith downloads the whole "${coll}" collection.`);
+        }
+        const other: any[] = await new FirestoreQuery(coll, {}, false).exec();
+        docs = docs.concat(await runPipelineStages(other, subPipeline));
+        break;
+      }
+      default:
+        warnUnsupported('stage', String(name));
+    }
+  }
+
+  return docs;
 }
 
 export async function runMongoAggregatePipeline(
   colName: string,
   pipeline: any[],
 ): Promise<any[]> {
-  flagExpensiveOp(
-    `aggregate:${colName}`,
-    `aggregate() downloads the whole "${colName}" collection and runs the pipeline in Node. Replace with stats docs or native count()/sum().`
-  );
-  let docs: any[] = await new FirestoreQuery(colName, {}, false).exec();
-
-  for (const stage of pipeline) {
-    if (!stage || typeof stage !== 'object') continue;
-
-    if (stage.$match) {
-      docs = docs.filter((d) => matchesMongoFilter(d, stage.$match));
-    } else if (stage.$lookup) {
-      const { from, localField, foreignField, as: asField } = stage.$lookup;
-      if (from && localField && foreignField && asField) {
-        flagExpensiveOp(
-          `lookup:${colName}->${from}`,
-          `$lookup downloads the whole "${from}" collection. Fetch only the referenced ids instead.`
-        );
-        const foreignDocs: any[] = await new FirestoreQuery(from, {}, false).exec();
-        for (const d of docs) {
-          const localVal = getValueByPath(d, localField);
-          const localStr = localVal && (localVal.id || localVal._id || localVal).toString();
-
-          const matches = foreignDocs.filter((fDoc) => {
-            const foreignVal = getValueByPath(fDoc, foreignField);
-            if (Array.isArray(foreignVal)) {
-              return foreignVal.some((item) => {
-                const itemStr = item && (item.id || item._id || item).toString();
-                return itemStr === localStr;
-              });
-            } else if (foreignVal !== undefined && foreignVal !== null) {
-              const foreignStr = (foreignVal.id || foreignVal._id || foreignVal).toString();
-              return foreignStr === localStr;
-            }
-            return false;
-          });
-          d[asField] = matches;
-        }
-      }
-    } else if (stage.$unwind) {
-      const fieldPath =
-        typeof stage.$unwind === 'string'
-          ? stage.$unwind.replace(/^\$/, '')
-          : stage.$unwind.path.replace(/^\$/, '');
-      const preserveNullAndEmptyArrays =
-        typeof stage.$unwind === 'object' && stage.$unwind.preserveNullAndEmptyArrays;
-
-      const unwound: any[] = [];
-      for (const d of docs) {
-        const arr = getValueByPath(d, fieldPath);
-        if (Array.isArray(arr) && arr.length > 0) {
-          for (const item of arr) {
-            const copy = JSON.parse(JSON.stringify(d));
-            setNestedPath(copy, fieldPath, item);
-            unwound.push(copy);
-          }
-        } else if (preserveNullAndEmptyArrays) {
-          const copy = JSON.parse(JSON.stringify(d));
-          setNestedPath(copy, fieldPath, null);
-          unwound.push(copy);
-        }
-      }
-      docs = unwound;
-    } else if (stage.$group) {
-      docs = groupDocs(docs, stage.$group);
-    } else if (stage.$sort) {
-      const orderBys: Array<[string, 'asc' | 'desc']> = Object.entries(stage.$sort).map(([f, d]) => [
-        f,
-        d === -1 || d === 'desc' ? 'desc' : 'asc',
-      ]);
-      docs = sortDocs(docs, orderBys);
-    } else if (stage.$limit) {
-      const n = typeof stage.$limit === 'number' ? stage.$limit : parseInt(stage.$limit, 10);
-      if (!isNaN(n) && n >= 0) docs = docs.slice(0, n);
-    } else if (stage.$skip) {
-      const n = typeof stage.$skip === 'number' ? stage.$skip : parseInt(stage.$skip, 10);
-      if (!isNaN(n) && n >= 0) docs = docs.slice(n);
-    } else if (stage.$project) {
-      docs = projectDocs(docs, stage.$project);
-    }
+  if (!isMirrored(colName)) {
+    flagExpensiveOp(
+      `aggregate:${colName}`,
+      `aggregate() downloads the whole "${colName}" collection and runs the pipeline in Node. Mirror the collection or use native count()/sum().`
+    );
   }
-
-  return docs;
+  // For mirrored collections this reads the mirror (see collectionMirror.ts), not every document.
+  const docs: any[] = await new FirestoreQuery(colName, {}, false).exec();
+  return runPipelineStages(docs, pipeline);
 }
 
 export function isMissingIndexError(err: any): boolean {
@@ -990,7 +1449,16 @@ export class FirestoreQuery<T = any> implements PromiseLike<T[]> {
       let docs: any[] = [];
       const hasComplexFilter = isComplexFilter(this.rawFilter);
 
-      if (hasComplexFilter) {
+      // Mirrored collections answer multi-document queries from the mirror (a couple of reads per
+      // request) with Mongo filter semantics. Tiny limited queries stay native.
+      const useMirror =
+        isMirrored(this.colName) &&
+        !this.keepHiddenFields &&
+        (hasComplexFilter || !(this.limitNum && this.limitNum > 0 && this.limitNum <= 3));
+
+      if (useMirror) {
+        docs = await getMirrorDocs(this.colName, (d) => matchesMongoFilter(d, this.rawFilter));
+      } else if (hasComplexFilter) {
         const nativeFilters = this.simpleWhereFilters.length;
         const message = nativeFilters
           ? `complex filter on "${this.colName}": orderBy/limit/offset are not pushed to Firestore, so every doc matching the native filters is downloaded.`
@@ -999,7 +1467,7 @@ export class FirestoreQuery<T = any> implements PromiseLike<T[]> {
         flagExpensiveOp(`complex:${this.colName}`, message, nativeFilters === 0);
       }
 
-      try {
+      if (!useMirror) try {
         let query: FirebaseFirestore.Query = colRef;
         for (const [field, op, val] of this.simpleWhereFilters) {
           query = query.where(field, op, val);
@@ -1033,7 +1501,10 @@ export class FirestoreQuery<T = any> implements PromiseLike<T[]> {
         recordReads(this.colName, Math.max(snap.size, 1));
         docs = snap.docs.map((d) => snapToData<T>(d)!);
       } catch (err: any) {
-        if (isMissingIndexError(err)) {
+        if (isMissingIndexError(err) && isMirrored(this.colName)) {
+          // No composite index for this filter combination: the mirror answers it in memory.
+          docs = await getMirrorDocs(this.colName);
+        } else if (isMissingIndexError(err)) {
           const indexUrl = logMissingIndexError(this.colName, err, 'query');
 
           // If strict index mode is enabled, fail loudly to mandate index creation
@@ -1078,7 +1549,12 @@ export class FirestoreQuery<T = any> implements PromiseLike<T[]> {
       let filteredDocs = docs.filter((d) => matchesMongoFilter(d, this.rawFilter));
 
       if (this.orderBys.length > 0) {
-        filteredDocs = sortDocs(filteredDocs, this.orderBys);
+        // A native orderBy breaks ties by document id in the direction of the last orderBy;
+        // do the same when the mirror stands in for that query.
+        const orderBys = useMirror
+          ? [...this.orderBys, ['id', this.orderBys[this.orderBys.length - 1][1]] as [string, 'asc' | 'desc']]
+          : this.orderBys;
+        filteredDocs = sortDocs(filteredDocs, orderBys);
       }
 
       if (this.offsetNum && this.offsetNum > 0) {
@@ -1322,12 +1798,19 @@ export interface FirestoreModelOptions {
   beforeWrite?: (payload: Record<string, any>, ctx: BeforeWriteContext) => void | Promise<void>;
   /** Stored fields that are removed from returned documents (internal helpers such as searchTokens). */
   hiddenFields?: string[];
+  /**
+   * Keep a collection mirror (see collectionMirror.ts) so aggregate(), $lookup and unindexed
+   * full scans read a few snapshot docs instead of every document. For small collections only.
+   */
+  mirror?: boolean;
 }
 
 export function createFirestoreModel<T extends BaseDoc = any>(
   colName: string,
   options: FirestoreModelOptions = {},
 ): IFirestoreModel<T> {
+  if (options.mirror) registerMirror(colName, { hiddenFields: options.hiddenFields ?? [] });
+
   const modelObj = {
     collectionName: colName,
     hiddenFields: options.hiddenFields ?? [],
@@ -1392,6 +1875,7 @@ export function createFirestoreModel<T extends BaseDoc = any>(
 
           const docRef = colRef.doc(customId);
           await docRef.set(cleaned, { merge: true });
+          noteMirrorWrite(colName);
 
           let data: any;
           if (hasExplicitId) {
@@ -1464,6 +1948,7 @@ export function createFirestoreModel<T extends BaseDoc = any>(
             tx.set(docRef, writePayload, { merge: true });
             return { ...data, id: docId, _id: docId };
           });
+          noteMirrorWrite(colName);
           attachDocMethods(result, modelObj);
           return stripHiddenFields(result, options.hiddenFields);
         }
@@ -1472,6 +1957,7 @@ export function createFirestoreModel<T extends BaseDoc = any>(
         payload.updatedAt = new Date();
         await options.beforeWrite?.(payload, hookCtx);
         await docRef.set(payload, { merge: true });
+        noteMirrorWrite(colName);
 
         // Callers that ignore the result pass { returnDoc: false } to skip the read-after-write.
         // Without it the full merged document is returned, as Mongoose { new: true } callers expect.
@@ -1516,6 +2002,8 @@ export function createFirestoreModel<T extends BaseDoc = any>(
         const data = snapToData(snap);
         attachDocMethods(data, modelObj);
         await docRef.delete();
+        await recordMirrorDeletes(colName, [docId]);
+        noteMirrorWrite(colName);
         return data;
       })();
       return withLeanPromise(p);
@@ -1546,6 +2034,8 @@ export function createFirestoreModel<T extends BaseDoc = any>(
       const docId = docs[0].id || docs[0]._id;
       // The doc was just read by the query above; delete directly instead of re-reading it.
       await getDb().collection(colName).doc(docId).delete();
+      await recordMirrorDeletes(colName, [docId]);
+      noteMirrorWrite(colName);
       return { deletedCount: 1 };
     },
 
@@ -1561,6 +2051,8 @@ export function createFirestoreModel<T extends BaseDoc = any>(
         }
         await batch.commit();
       }
+      await recordMirrorDeletes(colName, docs.map((d) => d.id || d._id));
+      noteMirrorWrite(colName);
       return { deletedCount: docs.length };
     },
 
@@ -1578,11 +2070,13 @@ export function createFirestoreModel<T extends BaseDoc = any>(
             if (updateTouchesArrayIndex(parsed)) {
               throw new Error('[Firestore] bulkWrite does not support array-index paths; use updateOne instead.');
             }
-            batch.set(ref, toMergePayload(parsed), { merge: true });
+            // updatedAt lets collection mirrors pick the change up.
+            batch.set(ref, { ...toMergePayload(parsed), updatedAt: new Date() }, { merge: true });
           }
         }
       }
       await batch.commit();
+      noteMirrorWrite(colName);
       return { ok: 1 };
     },
 

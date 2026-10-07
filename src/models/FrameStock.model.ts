@@ -14,4 +14,4 @@ export interface IFrameStock extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const FrameStock = createFirestoreModel<IFrameStock>('framestocks');
+export const FrameStock = createFirestoreModel<IFrameStock>('framestocks', { mirror: true });

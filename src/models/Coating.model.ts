@@ -7,4 +7,4 @@ export interface ICoating extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const Coating = createFirestoreModel<ICoating>('coatings');
+export const Coating = createFirestoreModel<ICoating>('coatings', { mirror: true });

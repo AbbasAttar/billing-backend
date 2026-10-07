@@ -10,4 +10,4 @@ export interface IDebtPayment extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const DebtPayment = createFirestoreModel<IDebtPayment>('debtpayments');
+export const DebtPayment = createFirestoreModel<IDebtPayment>('debtpayments', { mirror: true });

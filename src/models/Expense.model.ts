@@ -33,4 +33,4 @@ export interface IExpense extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const Expense = createFirestoreModel<IExpense>('expenses');
+export const Expense = createFirestoreModel<IExpense>('expenses', { mirror: true });

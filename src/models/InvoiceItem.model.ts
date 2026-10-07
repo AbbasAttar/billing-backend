@@ -89,6 +89,7 @@ export function computeLabFlags(item: {
 const LAB_FIELDS = ['type', 'fulfillmentSource', 'lensType', 'opticalLens'];
 
 export const InvoiceItem = createFirestoreModel<IInvoiceItem>('invoiceitems', {
+  mirror: true,
   beforeWrite: async (payload, ctx) => {
     if (ctx.full) {
       Object.assign(payload, computeLabFlags(payload));

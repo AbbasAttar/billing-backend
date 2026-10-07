@@ -18,6 +18,7 @@ export interface ICustomer extends BaseDoc {
 }
 
 export const Customer = createFirestoreModel<ICustomer>('customers', {
+  mirror: true,
   hiddenFields: ['searchTokens'],
   beforeWrite: searchTokenHook(['name', 'mobileNumber'], (c) => ({
     text: [c.name],

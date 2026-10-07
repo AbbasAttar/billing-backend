@@ -11,4 +11,4 @@ export interface IObligationPayment extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const ObligationPayment = createFirestoreModel<IObligationPayment>('obligationpayments');
+export const ObligationPayment = createFirestoreModel<IObligationPayment>('obligationpayments', { mirror: true });

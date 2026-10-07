@@ -15,4 +15,4 @@ export interface ISavingTransaction extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const SavingTransaction = createFirestoreModel<ISavingTransaction>('savingtransactions');
+export const SavingTransaction = createFirestoreModel<ISavingTransaction>('savingtransactions', { mirror: true });

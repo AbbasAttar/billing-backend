@@ -25,9 +25,16 @@ export interface IFragrance extends BaseDoc {
   updatedAt?: Date;
 }
 
+const fragranceTokens = searchTokenHook(['name', 'companyName'], (f) => ({
+  text: [f.name, f.companyName],
+}));
+
 export const Fragrance = createFirestoreModel<IFragrance>('fragrances', {
+  mirror: true,
   hiddenFields: ['searchTokens'],
-  beforeWrite: searchTokenHook(['name', 'companyName'], (f) => ({
-    text: [f.name, f.companyName],
-  })),
+  beforeWrite: async (payload, ctx) => {
+    // Always store the flag: a missing isArchived is invisible to Firestore `==` / `!=` queries.
+    if (ctx.full && payload.isArchived === undefined) payload.isArchived = false;
+    await fragranceTokens(payload, ctx);
+  },
 });

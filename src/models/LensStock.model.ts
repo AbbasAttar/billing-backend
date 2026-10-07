@@ -17,4 +17,4 @@ export interface ILensStock extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const LensStock = createFirestoreModel<ILensStock>('lensstocks');
+export const LensStock = createFirestoreModel<ILensStock>('lensstocks', { mirror: true });

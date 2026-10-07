@@ -12,4 +12,4 @@ export interface ILostSale extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const LostSale = createFirestoreModel<ILostSale>('lostsales');
+export const LostSale = createFirestoreModel<ILostSale>('lostsales', { mirror: true });

@@ -21,4 +21,4 @@ export interface IAdSpend extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const AdSpend = createFirestoreModel<IAdSpend>('adspends');
+export const AdSpend = createFirestoreModel<IAdSpend>('adspends', { mirror: true });

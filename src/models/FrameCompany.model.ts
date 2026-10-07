@@ -7,4 +7,4 @@ export interface IFrameCompany extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const FrameCompany = createFirestoreModel<IFrameCompany>('framecompanies');
+export const FrameCompany = createFirestoreModel<IFrameCompany>('framecompanies', { mirror: true });

@@ -24,4 +24,4 @@ export interface ISavingGoal extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const SavingGoal = createFirestoreModel<ISavingGoal>('savinggoals');
+export const SavingGoal = createFirestoreModel<ISavingGoal>('savinggoals', { mirror: true });
