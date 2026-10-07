@@ -6,6 +6,8 @@ import { OpticalLens } from '../models/OpticalLens.model';
 import { Fragrance } from '../models/Fragrance.model';
 import { Prescription } from '../models/Prescription.model';
 import { MarketingEvent } from '../models/MarketingEvent.model';
+import { getDb } from '../lib/firestoreDb';
+import { recordReads } from '../lib/readMeter';
 
 // Ensure models are registered
 const _m = [Invoice, Customer, InvoiceItem, Frame, OpticalLens, Fragrance, Prescription, MarketingEvent];
@@ -62,20 +64,133 @@ const diffInDays = (d1: Date, d2: Date) => {
   return Math.floor((d1.getTime() - d2.getTime()) / (1000 * 60 * 60 * 24));
 };
 
-// In-memory cache for recalls with 30-min TTL
+// ── Snapshot ─────────────────────────────────────────────────────────────────
+//
+// Recalls need every invoice of the last 455 days plus its items and customer (about 2,700 reads),
+// and an in-memory cache is lost on every Cloud Function cold start. The computed result is
+// therefore stored in Firestore (snapshots/recalls) and reused for the rest of the day: one read
+// per request instead of a full recompute. "Mark sent" and "snooze" patch the stored copy in place.
+
+const SNAPSHOT_COLLECTION = 'snapshots';
+const SNAPSHOT_DOC = 'recalls';
+const SNAPSHOT_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+const SNAPSHOT_MAX_BYTES = 900_000;
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+const istDay = (ms: number) => new Date(ms + IST_OFFSET_MS).toISOString().slice(0, 10);
+
+// Short in-memory layer on top of the stored snapshot, to absorb repeated calls on one instance.
 let cachedRecalls: { data: RecallTasksResponse; expiresAt: number; refTime: number } | null = null;
-const RECALL_CACHE_TTL_MS = 30 * 60 * 1000;
+const RECALL_CACHE_TTL_MS = 5 * 60 * 1000;
 
 export const invalidateRecallCache = () => {
   cachedRecalls = null;
 };
 
+async function loadSnapshot(): Promise<{ data: RecallTasksResponse; computedAt: number } | null> {
+  const snap = await getDb().collection(SNAPSHOT_COLLECTION).doc(SNAPSHOT_DOC).get();
+  recordReads(SNAPSHOT_COLLECTION, 1);
+  if (!snap.exists) return null;
+  const doc = snap.data() as { payload?: string; computedAt?: { toMillis?: () => number } | Date } | undefined;
+  if (!doc?.payload) return null;
+  const computedAt =
+    doc.computedAt instanceof Date ? doc.computedAt.getTime() : (doc.computedAt as any)?.toMillis?.() ?? 0;
+  try {
+    return { data: JSON.parse(doc.payload) as RecallTasksResponse, computedAt };
+  } catch {
+    return null;
+  }
+}
+
+async function saveSnapshot(data: RecallTasksResponse, computedAt = Date.now()): Promise<void> {
+  const payload = JSON.stringify(data);
+  if (Buffer.byteLength(payload) > SNAPSHOT_MAX_BYTES) {
+    console.warn('[recalls] snapshot too large to store; serving computed result only');
+    return;
+  }
+  await getDb()
+    .collection(SNAPSHOT_COLLECTION)
+    .doc(SNAPSHOT_DOC)
+    .set({ payload, computedAt: new Date(computedAt) });
+}
+
 export const getCustomerRecalls = async (referenceDate: Date = new Date(), forceRefresh = false): Promise<RecallTasksResponse> => {
   const now = Date.now();
   const refTime = referenceDate.getTime();
-  if (!forceRefresh && cachedRecalls && cachedRecalls.expiresAt > now && Math.abs(cachedRecalls.refTime - refTime) < 3600000) {
-    return cachedRecalls.data;
+  const isLiveRequest = Math.abs(refTime - now) < 3_600_000; // a custom ?date= bypasses the snapshot
+
+  if (!forceRefresh && isLiveRequest) {
+    if (cachedRecalls && cachedRecalls.expiresAt > now && Math.abs(cachedRecalls.refTime - refTime) < 3_600_000) {
+      return cachedRecalls.data;
+    }
+    const stored = await loadSnapshot();
+    if (stored && now - stored.computedAt < SNAPSHOT_MAX_AGE_MS && istDay(stored.computedAt) === istDay(now)) {
+      cachedRecalls = { data: stored.data, expiresAt: now + RECALL_CACHE_TTL_MS, refTime };
+      return stored.data;
+    }
   }
+
+  const response = await computeRecalls(referenceDate);
+  if (isLiveRequest) {
+    cachedRecalls = { data: response, expiresAt: now + RECALL_CACHE_TTL_MS, refTime };
+    await saveSnapshot(response, now).catch((err) => console.warn('[recalls] could not store snapshot:', err?.message));
+  }
+  return response;
+};
+
+const countsFor = (
+  tuneup: RecallCustomerItem[],
+  annual: RecallCustomerItem[],
+  fragrance: RecallCustomerItem[],
+  contactedThisMonthCount: number,
+): RecallTasksResponse['counts'] => {
+  const open = (list: RecallCustomerItem[]) => list.filter((r) => !r.isContacted).length;
+  return {
+    tuneupCount: open(tuneup),
+    annualEyeTestCount: open(annual),
+    fragranceCount: open(fragrance),
+    totalDue: open(tuneup) + open(annual) + open(fragrance),
+    contactedThisMonthCount,
+  };
+};
+
+/** Applies a "mark sent" or "snooze" to the stored snapshot without recomputing it. */
+async function patchSnapshot(customerId: string, change: { contacted?: { type: RecallType; at: Date }; snoozed?: boolean }) {
+  try {
+    const stored = await loadSnapshot();
+    if (!stored) return;
+    const data = stored.data;
+    const lists = [data.tuneupRecalls, data.annualEyeTestRecalls, data.fragranceRecalls];
+    let contactedThisMonthCount = data.counts.contactedThisMonthCount;
+
+    if (change.snoozed) {
+      data.tuneupRecalls = data.tuneupRecalls.filter((r) => r.customerId !== customerId);
+      data.annualEyeTestRecalls = data.annualEyeTestRecalls.filter((r) => r.customerId !== customerId);
+      data.fragranceRecalls = data.fragranceRecalls.filter((r) => r.customerId !== customerId);
+    }
+    if (change.contacted) {
+      const { type, at } = change.contacted;
+      const mine = lists.flat().filter((r) => r.customerId === customerId);
+      const wasRecentlyContacted = mine.some(
+        (r) => r.lastContactedAt && Date.now() - new Date(r.lastContactedAt).getTime() <= 30 * 86_400_000,
+      );
+      for (const r of mine) {
+        r.lastContactedAt = at.toISOString();
+        r.lastContactType = type;
+        r.isContacted = r.recallType === type;
+      }
+      if (mine.length > 0 && !wasRecentlyContacted) contactedThisMonthCount++;
+    }
+
+    data.counts = countsFor(data.tuneupRecalls, data.annualEyeTestRecalls, data.fragranceRecalls, contactedThisMonthCount);
+    await saveSnapshot(data, stored.computedAt);
+  } catch (err: any) {
+    console.warn('[recalls] could not patch snapshot:', err?.message);
+  }
+}
+
+const computeRecalls = async (referenceDate: Date): Promise<RecallTasksResponse> => {
+  const refTime = referenceDate.getTime();
 
   // Maximum recall lookback is 450 days (annual eye test window: 330 to 450 days).
   // Strict date bound: NEVER load historical invoices older than 455 days.
@@ -301,12 +416,6 @@ Your favorite bottle might be running low. Drop by this week to top up your bott
     }
   };
 
-  cachedRecalls = {
-    data: response,
-    expiresAt: now + RECALL_CACHE_TTL_MS,
-    refTime,
-  };
-
   return response;
 };
 
@@ -325,6 +434,7 @@ export const markCustomerRecallSent = async (
   }
   await customer.save();
   invalidateRecallCache();
+  await patchSnapshot(customerId, { contacted: { type: recallType, at: customer.lastContactedAt as Date } });
 
   await MarketingEvent.create({
     eventType: 'message_sent',
@@ -346,6 +456,7 @@ export const snoozeCustomerRecall = async (customerId: string, days = 14) => {
   customer.snoozedUntil = new Date(Date.now() + days * 86400000);
   await customer.save();
   invalidateRecallCache();
+  await patchSnapshot(customerId, { snoozed: true });
 
   return { success: true, customerId, snoozedUntil: customer.snoozedUntil };
 };
