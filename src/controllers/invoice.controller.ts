@@ -10,7 +10,6 @@ import { OpticalNumber } from '../models/OpticalNumber.model';
 import { Customer } from '../models/Customer.model';
 import { Frame } from '../models/Frame.model';
 import { Fragrance } from '../models/Fragrance.model';
-import { Order } from '../models/Order.model';
 import { SiteSetting } from '../models/SiteSetting.model';
 import { deductLensStock } from './lensStock.controller';
 import { generateInvoiceNumber, financialYear, formatInvoiceNo } from '../utils/invoiceNumber';
@@ -88,7 +87,8 @@ function validateItems(items: CreateInvoiceItemInput[]): string | null {
 
 export const getAllInvoices = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const invoices = await populateInvoice(Invoice.find().sort({ billDate: -1, _id: -1 }));
+    // Bounded: this used to return every invoice. Use /invoices/merged/page for full history.
+    const invoices = await populateInvoice(Invoice.find().sort({ billDate: -1 }).limit(100));
     res.json(invoices);
   } catch (error) {
     next(error);
@@ -275,7 +275,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
 
           if (lensDoc) {
             // Update sell price even for existing lenses
-            await OpticalLens.findByIdAndUpdate(lensDoc._id, { sellPrice: item.price });
+            await OpticalLens.findByIdAndUpdate(lensDoc._id, { sellPrice: item.price }, { returnDoc: false });
             enhancedItem._resolvedOpticalLens = lensDoc._id;
           }
         }
@@ -284,7 +284,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         resolvedItems.push(enhancedItem);
       } else if (item.type === 'frame') {
         if (isValidId(item.frame)) {
-          await Frame.findByIdAndUpdate(item.frame, { sellPrice: item.price });
+          await Frame.findByIdAndUpdate(item.frame, { sellPrice: item.price }, { returnDoc: false });
 
           // Deduct variant stock when a specific colour is selected
           if (item.frameVariantLabel) {
@@ -308,7 +308,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         resolvedItems.push({ ...(item as any) });
       } else if (item.type === 'fragrance') {
         if (isValidId(item.fragrance)) {
-          await Fragrance.findByIdAndUpdate(item.fragrance, { sellPrice: item.price });
+          await Fragrance.findByIdAndUpdate(item.fragrance, { sellPrice: item.price }, { returnDoc: false });
 
           // Deduct variant stock when a specific grade / variant is selected
           const selectedGrade = (item as any).fragranceGrade || (item as any).fragranceVariantLabel;
@@ -1324,7 +1324,7 @@ export const updateItemInInvoice = async (req: Request, res: Response, next: Nex
     if (fragranceGrade !== undefined) {
       updateItemPayload.fragranceGrade = fragranceGrade;
     }
-    await InvoiceItem.findByIdAndUpdate(itemId, updateItemPayload);
+    await InvoiceItem.findByIdAndUpdate(itemId, updateItemPayload, { returnDoc: false });
     
     // Recalc total
     const allItems = await InvoiceItem.find({ _id: { $in: invoice.items } });
@@ -1345,81 +1345,6 @@ export const updateItemInInvoice = async (req: Request, res: Response, next: Nex
     
     const populated = await populateInvoice(Invoice.findById(invoice._id));
     res.json(populated);
-  } catch (error) {
-    next(error);
-  }
-};
-
-// ── GET merged in-store + online invoices ─────────────────────────────────────
-
-const PAID_STATUSES = ['paid', 'preparing', 'ready', 'dispatched', 'fulfilled'] as const;
-
-export const getAllMerged = async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const [invoices, orders] = await Promise.all([
-      Invoice.find()
-        .sort({ billDate: -1 })
-        .populate('customer', 'name mobileNumber mobile address')
-        .populate({
-          path: 'items',
-          populate: [
-            { path: 'frame', select: 'name companyName houseName' },
-            { path: 'opticalLens', select: 'name brand category' },
-            { path: 'fragrance', select: 'name companyName type' },
-          ],
-        })
-        .lean(),
-      Order.find({ status: { $in: PAID_STATUSES } }).sort({ createdAt: 1 }).lean(),
-    ]);
-
-    // Auto-assign INV numbers to paid orders that don't have one yet (oldest first)
-    for (const ord of orders) {
-      if (!ord.invoiceNumber) {
-        const invNo = await generateInvoiceNumber(new Date(ord.createdAt as Date));
-        await Order.updateOne({ _id: ord._id, invoiceNumber: null }, { invoiceNumber: invNo });
-        ord.invoiceNumber = invNo;
-      }
-    }
-
-    const merged = [
-      ...invoices.map(inv => ({
-        _id:           inv._id,
-        source:        'in-store' as const,
-        invoiceNumber: inv.invoiceNumber,
-        customer:      inv.customer,
-        items:         inv.items ?? [],
-        total:         inv.total,
-        subtotal:      inv.subtotal,
-        discount:      inv.discount,
-        payments:      inv.payments ?? [],
-        billDate:      inv.billDate,
-        createdAt:     (inv as any).createdAt ?? inv.billDate,
-      })),
-      ...orders.map(ord => {
-        const paid =
-          ord.status === 'paid' || ord.status === 'fulfilled'
-            ? ord.total
-            : (ord.tokenAmount ?? 0);
-        return {
-          _id:           ord._id,
-          source:        'online' as const,
-          invoiceNumber: ord.invoiceNumber,
-          customer:      { name: ord.customerName, mobile: ord.customerPhone, mobileNumber: ord.customerPhone, address: ord.address },
-          items:         ord.items ?? [],
-          total:         ord.total,
-          subtotal:      ord.subtotal,
-          discount:      0,
-          payments:      [{ amount: paid, method: 'online' as const, date: (ord.updatedAt as Date).toISOString() }],
-          billDate:      (ord.createdAt as Date).toISOString(),
-          createdAt:     ord.createdAt,
-          orderStatus:   ord.status,
-        };
-      }),
-    ].sort((a, b) =>
-      new Date(b.billDate as string).getTime() - new Date(a.billDate as string).getTime()
-    );
-
-    res.json(merged);
   } catch (error) {
     next(error);
   }

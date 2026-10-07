@@ -1,7 +1,6 @@
 import { Router } from 'express';
 import {
   getAllInvoices,
-  getAllMerged,
   getInvoiceById,
   getInvoicesByCustomer,
   createInvoice,
@@ -18,13 +17,20 @@ import {
   downloadTodayExcel,
   logDemand,
 } from '../controllers/invoice.controller';
+import {
+  getMergedInvoices,
+  getMergedInvoicesPage,
+  searchInvoices,
+} from '../controllers/invoiceList.controller';
 
 const router = Router();
 
 router.post('/renumber', renumberAllInvoices);
 router.post('/demand', logDemand);
 router.get('/today-excel', downloadTodayExcel);
-router.get('/merged', getAllMerged);
+router.get('/merged/page', getMergedInvoicesPage);
+router.get('/merged', getMergedInvoices);
+router.get('/search', searchInvoices);
 router.get('/customer/:customerId', getInvoicesByCustomer);
 router.get('/', getAllInvoices);
 router.get('/:id', getInvoiceById);

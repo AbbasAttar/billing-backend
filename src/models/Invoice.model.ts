@@ -39,8 +39,33 @@ export interface IInvoice extends BaseDoc {
   contributionMarginPct?: number;
   isNewCustomer?: boolean;
   visitNumber?: number;
+  /** Derived on every write (see computeInvoiceDueFields): sum of payments[].amount. */
+  paidAmount?: number;
+  /** Derived: max(0, total - paidAmount). Matches the admin UI's balance rule. */
+  balance?: number;
+  /** Derived: balance > 0.01. Lets "pending dues" be a native Firestore query. */
+  hasDue?: boolean;
   createdAt?: Date;
   updatedAt?: Date;
 }
 
-export const Invoice = createFirestoreModel<IInvoice>('invoices');
+/**
+ * Derives paidAmount / balance / hasDue from payments and total.
+ * Returns null when the data needed is not present (e.g. a partial update that
+ * touches neither payments nor total), so callers can skip the write.
+ */
+export function computeInvoiceDueFields(
+  inv: { payments?: unknown; total?: unknown },
+): { paidAmount: number; balance: number; hasDue: boolean } | null {
+  if (!Array.isArray(inv.payments) || typeof inv.total !== 'number') return null;
+  const paidAmount = inv.payments.reduce((sum: number, p: any) => sum + (Number(p?.amount) || 0), 0);
+  const balance = Math.max(0, inv.total - paidAmount);
+  return { paidAmount, balance, hasDue: balance > 0.01 };
+}
+
+export const Invoice = createFirestoreModel<IInvoice>('invoices', {
+  beforeWrite: (payload) => {
+    const derived = computeInvoiceDueFields(payload);
+    if (derived) Object.assign(payload, derived);
+  },
+});
