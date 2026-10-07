@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import { Fragrance } from '../models/Fragrance.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
 import { Invoice } from '../models/Invoice.model';
+import { tokenSearch, SEARCH_MARKERS } from '../services/tokenSearch';
 
 export const getFragranceRevenueSummary = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -56,6 +57,19 @@ export const getAllFragrances = async (req: Request, res: Response, next: NextFu
   try {
     const q = (req.query.q as string) || '';
     const archivedOnly = req.query.archived === '1';
+    if (q) {
+      const found = await tokenSearch(Fragrance, q, {
+        marker: SEARCH_MARKERS.fragrances,
+        limit: 100,
+        predicate: (f) => (archivedOnly ? f.isArchived === true : f.isArchived !== true),
+      });
+      if (found) {
+        res.json(
+          found.sort((a, b) => String(a.companyName ?? '').localeCompare(String(b.companyName ?? '')) || String(a.name ?? '').localeCompare(String(b.name ?? ''))),
+        );
+        return;
+      }
+    }
     const baseFilter = archivedOnly ? { isArchived: true } : { isArchived: { $ne: true } };
     const textFilter = q
       ? { $or: [{ name: { $regex: q, $options: 'i' } }, { companyName: { $regex: q, $options: 'i' } }] }
@@ -70,6 +84,13 @@ export const getAllFragrances = async (req: Request, res: Response, next: NextFu
 export const searchFragrances = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const q = (req.query.q as string) || '';
+    const found = q
+      ? await tokenSearch(Fragrance, q, { marker: SEARCH_MARKERS.fragrances, limit: 15, predicate: (f) => f.isArchived !== true })
+      : null;
+    if (found) {
+      res.json(found);
+      return;
+    }
     const fragrances = await Fragrance.find({
       isArchived: { $ne: true },
       $or: [

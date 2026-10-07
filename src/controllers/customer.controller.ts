@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { Customer } from '../models/Customer.model';
 import { Invoice } from '../models/Invoice.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
+import { tokenSearch, SEARCH_MARKERS } from '../services/tokenSearch';
 
 export const getAllCustomers = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -21,6 +22,11 @@ export const getAllCustomers = async (req: Request, res: Response, next: NextFun
 export const searchCustomers = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const q = (req.query.q as string) || '';
+    const found = await tokenSearch(Customer, q, { marker: SEARCH_MARKERS.customers, limit: 10 });
+    if (found) {
+      res.json(found);
+      return;
+    }
     const customers = await Customer.find({
       $or: [
         { name: { $regex: q, $options: 'i' } },

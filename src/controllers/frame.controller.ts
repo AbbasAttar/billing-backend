@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { Frame } from '../models/Frame.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
 import { calculateDefaultFramePricing } from '../utils/pricing.utils';
+import { tokenSearch, SEARCH_MARKERS } from '../services/tokenSearch';
 
 function buildFrameQuery(q: string) {
   if (!q) return {};
@@ -17,10 +18,34 @@ function buildFrameQuery(q: string) {
   ]};
 }
 
+/** Token search for the POS / admin frame pickers (exact frame code first). Null until tokens are backfilled. */
+async function searchFramesByToken(q: string, limit: number, archivedOnly = false) {
+  if (/^d{10,16}$/.test(q)) {
+    const exact = await Frame.find({ frameCode: q }).limit(5).lean();
+    const visible = (exact as any[]).filter((f) => (archivedOnly ? f.isArchived === true : f.isArchived !== true));
+    if (visible.length > 0) return visible;
+  }
+  const found = await tokenSearch(Frame, q, {
+    marker: SEARCH_MARKERS.frames,
+    limit,
+    predicate: (f) => (archivedOnly ? f.isArchived === true : f.isArchived !== true),
+  });
+  return found
+    ? found.sort((a, b) => String(a.companyName ?? '').localeCompare(String(b.companyName ?? '')) || String(a.name ?? '').localeCompare(String(b.name ?? '')))
+    : null;
+}
+
 export const getAllFrames = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const q = (req.query.q as string) || '';
     const archivedOnly = req.query.archived === '1';
+    if (q) {
+      const found = await searchFramesByToken(q, 100, archivedOnly);
+      if (found) {
+        res.json(found);
+        return;
+      }
+    }
     const baseFilter = archivedOnly ? { isArchived: true } : { isArchived: { $ne: true } };
     const query = q ? { ...baseFilter, ...buildFrameQuery(q) } : baseFilter;
     const frames = await Frame.find(query).sort({ companyName: 1, name: 1 });
@@ -33,6 +58,11 @@ export const getAllFrames = async (req: Request, res: Response, next: NextFuncti
 export const searchFrames = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const q = (req.query.q as string) || '';
+    const found = q ? await searchFramesByToken(q, 15) : null;
+    if (found) {
+      res.json(found);
+      return;
+    }
     const frames = await Frame.find({ isArchived: { $ne: true }, ...buildFrameQuery(q) }).limit(15);
     res.json(frames);
   } catch (error) {

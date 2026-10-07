@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { OpticalLens } from '../models/OpticalLens.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
+import { tokenSearch, SEARCH_MARKERS } from '../services/tokenSearch';
 
 export const getAllOpticalLenses = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -27,6 +28,14 @@ export const searchOpticalLenses = async (req: Request, res: Response, next: Nex
         const name = (req.query.name as string);
 
         const filter: any = {};
+
+        if (q && !(brand && name)) {
+            const found = await tokenSearch(OpticalLens, q, { marker: SEARCH_MARKERS.opticallens, limit: 15 });
+            if (found) {
+                res.json(found);
+                return;
+            }
+        }
 
         if (brand && name) {
             filter.brand = { $regex: new RegExp(`^${brand}$`, 'i') };

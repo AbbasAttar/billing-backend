@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { ContactLens } from '../models/ContactLens.model';
+import { tokenSearch, SEARCH_MARKERS } from '../services/tokenSearch';
 
 export const getAllContactLenses = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -13,6 +14,11 @@ export const getAllContactLenses = async (req: Request, res: Response, next: Nex
 export const searchContactLenses = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const q = (req.query.q as string) || '';
+    const found = q ? await tokenSearch(ContactLens, q, { marker: SEARCH_MARKERS.contactlens, limit: 20 }) : null;
+    if (found) {
+      res.json(found);
+      return;
+    }
     const filter: any = q
       ? { $or: [{ name: { $regex: q, $options: 'i' } }, { brand: { $regex: q, $options: 'i' } }] }
       : {};

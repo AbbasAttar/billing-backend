@@ -1,4 +1,5 @@
 import { createFirestoreModel, BaseDoc } from '../lib/firestoreModel';
+import { searchTokenHook } from '../lib/searchTokens';
 import { IWebFields } from './webFields.schema';
 
 export interface IOpticalLens extends BaseDoc {
@@ -17,4 +18,9 @@ export interface IOpticalLens extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const OpticalLens = createFirestoreModel<IOpticalLens>('opticallens');
+export const OpticalLens = createFirestoreModel<IOpticalLens>('opticallens', {
+  hiddenFields: ['searchTokens'],
+  beforeWrite: searchTokenHook(['name', 'brand', 'category'], (l) => ({
+    text: [l.name, l.brand, l.category],
+  })),
+});

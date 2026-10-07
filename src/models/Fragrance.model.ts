@@ -1,4 +1,5 @@
 import { createFirestoreModel, BaseDoc } from '../lib/firestoreModel';
+import { searchTokenHook } from '../lib/searchTokens';
 import { IWebFields } from './webFields.schema';
 
 export interface IFragranceVariant {
@@ -24,4 +25,9 @@ export interface IFragrance extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const Fragrance = createFirestoreModel<IFragrance>('fragrances');
+export const Fragrance = createFirestoreModel<IFragrance>('fragrances', {
+  hiddenFields: ['searchTokens'],
+  beforeWrite: searchTokenHook(['name', 'companyName'], (f) => ({
+    text: [f.name, f.companyName],
+  })),
+});

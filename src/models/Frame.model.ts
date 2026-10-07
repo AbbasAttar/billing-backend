@@ -1,4 +1,5 @@
 import { createFirestoreModel, BaseDoc } from '../lib/firestoreModel';
+import { searchTokenHook } from '../lib/searchTokens';
 import { IWebFields } from './webFields.schema';
 
 export interface IFrame extends BaseDoc {
@@ -22,4 +23,10 @@ export interface IFrame extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const Frame = createFirestoreModel<IFrame>('frames');
+export const Frame = createFirestoreModel<IFrame>('frames', {
+  hiddenFields: ['searchTokens'],
+  beforeWrite: searchTokenHook(['name', 'companyName', 'houseName', 'frameCode'], (f) => ({
+    text: [f.name, f.companyName, f.houseName],
+    codes: [f.frameCode],
+  })),
+});

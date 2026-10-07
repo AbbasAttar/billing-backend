@@ -1,4 +1,5 @@
 import { createFirestoreModel, BaseDoc } from '../lib/firestoreModel';
+import { searchTokenHook } from '../lib/searchTokens';
 import { IWebFields } from './webFields.schema';
 
 export interface IContactLens extends BaseDoc {
@@ -16,4 +17,9 @@ export interface IContactLens extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const ContactLens = createFirestoreModel<IContactLens>('contactlens');
+export const ContactLens = createFirestoreModel<IContactLens>('contactlens', {
+  hiddenFields: ['searchTokens'],
+  beforeWrite: searchTokenHook(['name', 'brand'], (l) => ({
+    text: [l.name, l.brand],
+  })),
+});

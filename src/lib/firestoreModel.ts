@@ -266,6 +266,9 @@ function matchValue(target: any, condition: any): boolean {
       if ('$lt' in condition) {
         if (target === undefined || target === null || target >= condition.$lt) return false;
       }
+      if ('$arrayContains' in condition) {
+        if (!Array.isArray(target) || !target.includes(condition.$arrayContains)) return false;
+      }
       if ('$regex' in condition) {
         const pattern =
           typeof condition.$regex === 'object' && 'source' in condition.$regex
@@ -742,7 +745,7 @@ export function logMissingIndexError(colName: string, err: any, action: string =
   return url;
 }
 
-const NATIVE_FIRESTORE_SUB_OPS = new Set(['$gte', '$gt', '$lte', '$lt', '$eq', '$ne', '$in']);
+const NATIVE_FIRESTORE_SUB_OPS = new Set(['$gte', '$gt', '$lte', '$lt', '$eq', '$ne', '$in', '$arrayContains']);
 
 export function isComplexFilter(filter: any): boolean {
   if (!filter || typeof filter !== 'object') return false;
@@ -785,9 +788,19 @@ export function extractWhereFilters(filter: any): Array<[string, FirebaseFiresto
       if ((val as any).$gt !== undefined) whereFilters.push([key, '>', (val as any).$gt]);
       if ((val as any).$lte !== undefined) whereFilters.push([key, '<=', (val as any).$lte]);
       if ((val as any).$lt !== undefined) whereFilters.push([key, '<', (val as any).$lt]);
+      if ((val as any).$arrayContains !== undefined) whereFilters.push([key, 'array-contains', (val as any).$arrayContains]);
     }
   }
   return whereFilters;
+}
+
+function stripHiddenFields(result: any, hidden?: string[]): any {
+  if (!hidden || hidden.length === 0 || !result) return result;
+  const strip = (doc: any) => {
+    if (doc && typeof doc === 'object') for (const f of hidden) delete doc[f];
+    return doc;
+  };
+  return Array.isArray(result) ? result.map(strip) : strip(result);
 }
 
 export class FirestoreQuery<T = any> implements PromiseLike<T[]> {
@@ -803,6 +816,7 @@ export class FirestoreQuery<T = any> implements PromiseLike<T[]> {
   private isSingleDoc: boolean = false;
   private targetId?: string;
   private targetIds?: string[];
+  private keepHiddenFields = false;
 
   constructor(colName: string, initialFilter: any = {}, single: boolean = false, modelObj?: any) {
     this.colName = colName;
@@ -859,6 +873,12 @@ export class FirestoreQuery<T = any> implements PromiseLike<T[]> {
 
   skip(n: number) {
     this.offsetNum = n;
+    return this;
+  }
+
+  /** Return hidden helper fields (e.g. searchTokens) too; used by search code that verifies them. */
+  withHiddenFields() {
+    this.keepHiddenFields = true;
     return this;
   }
 
@@ -1093,7 +1113,7 @@ export class FirestoreQuery<T = any> implements PromiseLike<T[]> {
       }
     }
 
-    return results;
+    return this.keepHiddenFields ? results : stripHiddenFields(results, this.modelObj?.hiddenFields);
   }
 
   then<TResult1 = any, TResult2 = never>(
@@ -1300,6 +1320,8 @@ export interface FirestoreModelOptions {
    * Use it to maintain derived fields (e.g. invoice balance, lab-job flags) so queries can filter natively.
    */
   beforeWrite?: (payload: Record<string, any>, ctx: BeforeWriteContext) => void | Promise<void>;
+  /** Stored fields that are removed from returned documents (internal helpers such as searchTokens). */
+  hiddenFields?: string[];
 }
 
 export function createFirestoreModel<T extends BaseDoc = any>(
@@ -1308,6 +1330,7 @@ export function createFirestoreModel<T extends BaseDoc = any>(
 ): IFirestoreModel<T> {
   const modelObj = {
     collectionName: colName,
+    hiddenFields: options.hiddenFields ?? [],
 
     find(filter: any = {}, ...args: any[]): FirestoreQuery<T> {
       // Mongoose signature: find(filter, projection, options)
@@ -1384,7 +1407,8 @@ export function createFirestoreModel<T extends BaseDoc = any>(
           createdItems.push(data);
         }
 
-        return isArray ? createdItems : createdItems[0];
+        const visible = stripHiddenFields(createdItems, options.hiddenFields);
+        return isArray ? visible : visible[0];
       })();
       return withLeanPromise(p);
     },
@@ -1441,7 +1465,7 @@ export function createFirestoreModel<T extends BaseDoc = any>(
             return { ...data, id: docId, _id: docId };
           });
           attachDocMethods(result, modelObj);
-          return result;
+          return stripHiddenFields(result, options.hiddenFields);
         }
 
         const payload = toMergePayload(parsed);
@@ -1452,14 +1476,14 @@ export function createFirestoreModel<T extends BaseDoc = any>(
         // Callers that ignore the result pass { returnDoc: false } to skip the read-after-write.
         // Without it the full merged document is returned, as Mongoose { new: true } callers expect.
         if (!returnDoc) {
-          return { ...payload, id: docId, _id: docId };
+          return stripHiddenFields({ ...payload, id: docId, _id: docId }, options.hiddenFields);
         }
 
         const snap = await docRef.get();
         recordReads(colName, 1);
         const data = snapToData(snap);
         attachDocMethods(data, modelObj);
-        return data;
+        return stripHiddenFields(data, options.hiddenFields);
       })();
       return withLeanPromise(p);
     },

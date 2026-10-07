@@ -1,4 +1,5 @@
 import { createFirestoreModel, BaseDoc } from '../lib/firestoreModel';
+import { searchTokenHook } from '../lib/searchTokens';
 
 export interface ICustomer extends BaseDoc {
   name: string;
@@ -16,4 +17,10 @@ export interface ICustomer extends BaseDoc {
   updatedAt?: Date;
 }
 
-export const Customer = createFirestoreModel<ICustomer>('customers');
+export const Customer = createFirestoreModel<ICustomer>('customers', {
+  hiddenFields: ['searchTokens'],
+  beforeWrite: searchTokenHook(['name', 'mobileNumber'], (c) => ({
+    text: [c.name],
+    numbers: [c.mobileNumber],
+  })),
+});
