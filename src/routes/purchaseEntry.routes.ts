@@ -4,6 +4,7 @@ import {
   createPendingEntries,
   markReceived,
   getPurchaseHistory,
+  getPurchaseCount,
   updatePurchaseEntry,
   deletePurchaseEntry,
   clearAllPurchases,
@@ -41,6 +42,9 @@ router.put('/:id', updatePurchaseEntry);
 
 // DELETE /api/purchases/:id    — delete entry or paired entries
 router.delete('/:id', deletePurchaseEntry);
+
+// GET  /api/purchases/count?status=pending — badge count (one aggregate read)
+router.get('/count', getPurchaseCount);
 
 // GET  /api/purchases          — ?from=&to=&lensType=&material=&coating=&color=&sph=&status=&page=&limit=
 router.get('/', getPurchaseHistory);

@@ -41,9 +41,44 @@ export interface IPurchaseEntry extends BaseDoc {
     brand?: string | null;
   } | null;
 
+  /** Derived on every write (see computePurchaseFlags): shows in the procurement ledger. */
+  isLedger?: boolean;
+  /** Derived: still pending, or missing a valid cost. */
+  isPending?: boolean;
+
   createdAt?: Date;
   updatedAt?: Date;
 }
 
-export const PurchaseEntry = createFirestoreModel<IPurchaseEntry>('purchaseentries');
+/**
+ * Ledger / pending flags so both pages are native Firestore queries instead of a full scan
+ * with an OR over cost fields. Mirrors the rules the history endpoint used to apply.
+ */
+export function computePurchaseFlags(e: {
+  status?: unknown;
+  costPerPair?: unknown;
+  unitCost?: unknown;
+}): { isLedger: boolean; isPending: boolean } {
+  const hasPairCost = Number(e.costPerPair) > 0;
+  const hasUnitCost = Number(e.unitCost) > 0;
+  return {
+    isLedger: e.status === 'received' && (hasPairCost || hasUnitCost),
+    isPending: e.status === 'pending' || !hasPairCost || !hasUnitCost,
+  };
+}
+
+const COST_FIELDS = ['status', 'costPerPair', 'unitCost'];
+
+export const PurchaseEntry = createFirestoreModel<IPurchaseEntry>('purchaseentries', {
+  beforeWrite: async (payload, ctx) => {
+    if (ctx.full) {
+      Object.assign(payload, computePurchaseFlags(payload));
+      return;
+    }
+    if (!COST_FIELDS.some((f) => f in payload)) return;
+    // The flags depend on all three fields, so merge the update with the stored entry.
+    const merged = { ...((await ctx.getExisting()) ?? {}), ...payload };
+    Object.assign(payload, computePurchaseFlags(merged));
+  },
+});
 

@@ -6,7 +6,15 @@ import { Invoice } from '../models/Invoice.model';
 import { Customer } from '../models/Customer.model';
 import { Prescription } from '../models/Prescription.model';
 import { LensPricing, LENS_TYPES, LENS_MATERIALS, LENS_COLORS } from '../models/LensPricing.model';
-import { getDb } from '../lib/firestoreDb';
+import { getDb, snapToData } from '../lib/firestoreDb';
+import { isBackfillDone } from '../lib/backfillMarker';
+import { isMissingIndexError } from '../lib/firestoreModel';
+import { recordReads } from '../lib/readMeter';
+import {
+  buildInvoiceLookupForEntries,
+  getLensPricingRulesCached,
+  invalidateLensPricingCache,
+} from '../services/purchaseLookup';
 
 // ── Validation ────────────────────────────────────────────────────────────────
 
@@ -1112,115 +1120,14 @@ export const populateAllLensSources = async (
   }
 };
 
-// ── Invoice Lookup Cache & Relative Invoice Enrichment ─────────────────────────
+// ── Relative Invoice Enrichment ────────────────────────────────────────────────
 
-let invoiceLookupCache: {
-  expiresAt: number;
-  invoicesByNumber: Map<string, any>;
-  invoicesById: Map<string, any>;
-  invoicesByItemId: Map<string, any>;
-  customerMap: Map<string, string>;
-  invoiceItemsMap: Map<string, any>;
-} | null = null;
-
+/**
+ * Kept for callers that used to flush the invoice cache. Invoices are now looked up per request
+ * (only the ones a page of entries refers to), so only the small lens-pricing table is cached.
+ */
 export function invalidateInvoiceLookupCache(): void {
-  invoiceLookupCache = null;
-}
-
-async function getInvoiceLookupCache() {
-  const now = Date.now();
-  if (invoiceLookupCache && invoiceLookupCache.expiresAt > now) {
-    return invoiceLookupCache;
-  }
-
-  const [invoices, customers, invoiceItems] = await Promise.all([
-    Invoice.find({}).lean(),
-    Customer.find({}).lean(),
-    InvoiceItem.find({}).lean(),
-  ]);
-
-  const customerMap = new Map<string, string>();
-  for (const c of customers) {
-    const cid = String(c._id || c.id);
-    if (cid) customerMap.set(cid, c.name || 'Customer');
-  }
-
-  const invoiceItemsMap = new Map<string, any>();
-  for (const it of invoiceItems) {
-    const itId = String(it._id || it.id);
-    if (itId) invoiceItemsMap.set(itId, it);
-  }
-
-  const invoicesByNumber = new Map<string, any>();
-  const invoicesById = new Map<string, any>();
-  const invoicesByItemId = new Map<string, any>();
-
-  for (const inv of invoices) {
-    const invId = String(inv._id || inv.id);
-    const invNum = inv.invoiceNumber || `INV-${invId.slice(-6)}`;
-    const custId = inv.customer ? String(inv.customer) : '';
-    const customerName = customerMap.get(custId) || 'Customer';
-
-    const resolvedItems = Array.isArray(inv.items)
-      ? inv.items
-          .map((itId: any) => {
-            const it = invoiceItemsMap.get(String(itId));
-            if (!it) return null;
-            return {
-              id: String(itId),
-              type: it.type || (it.lensType ? 'lens' : 'item'),
-              lensType: it.lensType,
-              lensMaterial: it.lensMaterial,
-              lensCoating: it.lensCoating,
-              lensColor: it.lensColor || 'White',
-              lensLabel: it.lensLabel,
-              userName: it.userName,
-              sph: it.spherical ?? it.rightSpherical ?? it.leftSpherical ?? null,
-              cyl: it.cylinder ?? it.rightCylinder ?? it.leftCylinder ?? null,
-              add: it.addition ?? it.rightAddition ?? it.leftAddition ?? null,
-              rSph: it.rightSpherical ?? it.spherical ?? null,
-              rCyl: it.rightCylinder ?? it.cylinder ?? null,
-              rAdd: it.rightAddition ?? it.addition ?? null,
-              lSph: it.leftSpherical ?? it.spherical ?? null,
-              lCyl: it.leftCylinder ?? it.cylinder ?? null,
-              lAdd: it.leftAddition ?? it.addition ?? null,
-              price: it.price,
-            };
-          })
-          .filter(Boolean)
-      : [];
-
-    const invData = {
-      id: invId,
-      invoiceNumber: invNum,
-      customerName,
-      billDate: inv.billDate || inv.createdAt,
-      total: inv.total,
-      items: resolvedItems,
-    };
-
-    invoicesById.set(invId, invData);
-    invoicesByNumber.set(invNum.toLowerCase().trim(), invData);
-    const cleanNum = invNum.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
-    if (cleanNum) invoicesByNumber.set(cleanNum, invData);
-
-    if (Array.isArray(inv.items)) {
-      for (const itId of inv.items) {
-        invoicesByItemId.set(String(itId), invData);
-      }
-    }
-  }
-
-  invoiceLookupCache = {
-    expiresAt: now + 3 * 60 * 1000,
-    invoicesByNumber,
-    invoicesById,
-    invoicesByItemId,
-    customerMap,
-    invoiceItemsMap,
-  };
-
-  return invoiceLookupCache;
+  invalidateLensPricingCache();
 }
 
 // ── Auto-create Pending Purchases on Invoice Creation ─────────────────────────
@@ -1509,8 +1416,8 @@ function matchPricingRuleFast(allRules: any[], lens: {
 export async function enrichPurchaseEntriesWithInvoices(entries: any[]): Promise<any[]> {
   try {
     const [cache, allPricingRules] = await Promise.all([
-      getInvoiceLookupCache(),
-      LensPricing.find({}).lean(),
+      buildInvoiceLookupForEntries(entries),
+      getLensPricingRulesCached(),
     ]);
 
     return entries.map((entry) => {
@@ -1630,6 +1537,101 @@ export async function enrichPurchaseEntriesWithInvoices(entries: any[]): Promise
   }
 }
 
+// Cap for filtered ledger views, which are narrowed in memory after one native base query.
+const MAX_FILTERED_SCAN = 1500;
+
+/**
+ * Native ledger / pending query using the derived isLedger / isPending flags.
+ * Date range and ordering run in Firestore. Without extra filters the page is fetched with
+ * offset/limit and counted with count(); with extra filters (lens type, material, ...) the base
+ * set is fetched once and narrowed in memory. Returns null when the needed index is missing,
+ * so the caller can fall back to the legacy path.
+ */
+async function queryPurchasesNative(
+  kind: 'ledger' | 'pending',
+  filter: Record<string, any>,
+  page: number,
+  limit: number,
+): Promise<{ total: number; rawEntries: any[] } | null> {
+  const range = (filter.purchaseDate ?? {}) as { $gte?: Date; $lte?: Date };
+  let base: FirebaseFirestore.Query = getDb()
+    .collection('purchaseentries')
+    .where(kind === 'ledger' ? 'isLedger' : 'isPending', '==', true);
+  if (range.$gte) base = base.where('purchaseDate', '>=', range.$gte);
+  if (range.$lte) base = base.where('purchaseDate', '<=', range.$lte);
+  const ordered = base.orderBy('purchaseDate', 'desc').orderBy('createdAt', 'desc');
+
+  const coating = filter.coating instanceof RegExp ? filter.coating : null;
+  const hasExtra =
+    filter.lensType !== undefined || filter.material !== undefined || filter.color !== undefined ||
+    filter.sph !== undefined || coating !== null;
+
+  try {
+    if (!hasExtra) {
+      const skip = (page - 1) * limit;
+      const [countSnap, snap] = await Promise.all([
+        base.count().get(),
+        ordered.offset(skip).limit(limit).get(),
+      ]);
+      recordReads('purchaseentries', 1 + Math.max(skip + snap.size, 1));
+      return { total: countSnap.data().count, rawEntries: snap.docs.map((d) => snapToData<any>(d)!) };
+    }
+
+    const snap = await ordered.limit(MAX_FILTERED_SCAN).get();
+    recordReads('purchaseentries', Math.max(snap.size, 1));
+    const matches = snap.docs
+      .map((d) => snapToData<any>(d)!)
+      .filter(
+        (e) =>
+          (filter.lensType === undefined || e.lensType === filter.lensType) &&
+          (filter.material === undefined || e.material === filter.material) &&
+          (filter.color === undefined || e.color === filter.color) &&
+          (filter.sph === undefined || e.sph === filter.sph) &&
+          (!coating || coating.test(String(e.coating ?? ''))),
+      );
+    const start = (page - 1) * limit;
+    return { total: matches.length, rawEntries: matches.slice(start, start + limit) };
+  } catch (err: any) {
+    if (isMissingIndexError(err)) {
+      console.warn('[purchases] flag index is not ready yet; using the legacy query.', err?.message?.slice(0, 120));
+      return null;
+    }
+    throw err;
+  }
+}
+
+// ── GET /api/purchases/count?status=pending — badge count, one aggregate read ──
+
+export const getPurchaseCount = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const kind = req.query.status === 'pending' ? 'pending' : 'ledger';
+    if (await isBackfillDone('purchaseFlagsBackfill')) {
+      try {
+        const snap = await getDb()
+          .collection('purchaseentries')
+          .where(kind === 'ledger' ? 'isLedger' : 'isPending', '==', true)
+          .count()
+          .get();
+        recordReads('purchaseentries', 1);
+        res.json({ count: snap.data().count });
+        return;
+      } catch (err: any) {
+        if (!isMissingIndexError(err)) throw err;
+      }
+    }
+    // Legacy: count with the original OR filter (scans the collection until the backfill has run).
+    const all: any[] = await PurchaseEntry.find({}).lean();
+    const count = all.filter((e) =>
+      kind === 'pending'
+        ? e.status === 'pending' || !(Number(e.costPerPair) > 0) || !(Number(e.unitCost) > 0)
+        : e.status === 'received' && (Number(e.costPerPair) > 0 || Number(e.unitCost) > 0),
+    ).length;
+    res.json({ count });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // ── GET /api/purchases — history with optional filters ────────────────────────
 
 export const getPurchaseHistory = async (
@@ -1698,6 +1700,15 @@ export const getPurchaseHistory = async (
       const sphNum = parseFloat(sph);
       if (isNaN(sphNum)) { res.status(400).json({ message: 'sph must be a number.' }); return; }
       filter.sph = sphNum;
+    }
+
+    if (await isBackfillDone('purchaseFlagsBackfill')) {
+      const native = await queryPurchasesNative(status === 'pending' ? 'pending' : 'ledger', filter, page, limit);
+      if (native) {
+        const entries = await enrichPurchaseEntriesWithInvoices(native.rawEntries);
+        res.json({ total: native.total, page, pages: Math.ceil(native.total / limit), limit, entries });
+        return;
+      }
     }
 
     const [total, rawEntries] = await Promise.all([
