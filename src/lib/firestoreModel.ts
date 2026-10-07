@@ -1814,6 +1814,7 @@ export function createFirestoreModel<T extends BaseDoc = any>(
   const modelObj = {
     collectionName: colName,
     hiddenFields: options.hiddenFields ?? [],
+    beforeWrite: options.beforeWrite,
 
     find(filter: any = {}, ...args: any[]): FirestoreQuery<T> {
       // Mongoose signature: find(filter, projection, options)
@@ -2019,13 +2020,31 @@ export function createFirestoreModel<T extends BaseDoc = any>(
 
     async updateMany(filter: any, update: any, ...args: any[]): Promise<{ matchedCount: number; modifiedCount: number }> {
       const docs = await new FirestoreQuery<T>(colName, filter, false, modelObj).exec();
-      let modified = 0;
-      for (const d of docs) {
-        const docId = d.id || d._id;
-        await (this as any).findByIdAndUpdate(docId, update, { returnDoc: false, existing: d });
-        modified++;
+      const parsed = parseUpdate(update);
+
+      // $inc and array-index paths need a per-document read-modify-write.
+      if (Object.keys(parsed.inc).length > 0 || updateTouchesArrayIndex(parsed)) {
+        for (const d of docs) {
+          await (this as any).findByIdAndUpdate(d.id || d._id, update, { returnDoc: false, existing: d });
+        }
+        return { matchedCount: docs.length, modifiedCount: docs.length };
       }
-      return { matchedCount: docs.length, modifiedCount: modified };
+
+      // Plain merges: run the hook per doc, then commit in batches of up to 400 writes.
+      const db = getDb();
+      const colRef = db.collection(colName);
+      for (let i = 0; i < docs.length; i += 400) {
+        const batch = db.batch();
+        for (const d of docs.slice(i, i + 400)) {
+          const payload = toMergePayload(parsed);
+          payload.updatedAt = new Date();
+          await options.beforeWrite?.(payload, { full: false, getExisting: async () => d });
+          batch.set(colRef.doc(d.id || d._id), payload, { merge: true });
+        }
+        await batch.commit();
+      }
+      if (docs.length > 0) noteMirrorWrite(colName);
+      return { matchedCount: docs.length, modifiedCount: docs.length };
     },
 
     async deleteOne(filter: any, ...args: any[]): Promise<{ deletedCount: number }> {
@@ -2128,4 +2147,135 @@ export function createFirestoreModel<T extends BaseDoc = any>(
   };
   Object.assign(ModelConstructor, modelObj);
   return ModelConstructor as IFirestoreModel<T>;
+}
+
+// ── Transactions ────────────────────────────────────────────────────────────
+
+type TxModel = { collectionName: string; hiddenFields?: string[]; beforeWrite?: FirestoreModelOptions['beforeWrite'] };
+
+/**
+ * Model-aware wrapper around a Firestore transaction: writes run the model's beforeWrite hook and
+ * stamp createdAt/updatedAt like the non-transactional methods. Firestore requires every read
+ * (get/getMany/query) to happen before the first write in the callback.
+ */
+export class ModelTx {
+  readonly touched = new Set<string>();
+  readonly deleted = new Map<string, string[]>();
+
+  constructor(readonly tx: FirebaseFirestore.Transaction) {}
+
+  private ref(model: TxModel, id: string) {
+    return getDb().collection(model.collectionName).doc(id);
+  }
+
+  /** A new auto id for `model`, e.g. to link child docs before the parent is written. */
+  newId(model: TxModel): string {
+    return getDb().collection(model.collectionName).doc().id;
+  }
+
+  async get<D = any>(model: TxModel, id: string): Promise<D | null> {
+    const snap = await this.tx.get(this.ref(model, id));
+    recordReads(model.collectionName, 1);
+    return snapToData<D>(snap);
+  }
+
+  async getMany<D = any>(model: TxModel, ids: string[]): Promise<Map<string, D>> {
+    const out = new Map<string, D>();
+    const unique = [...new Set(ids.filter(Boolean))];
+    if (unique.length === 0) return out;
+    const snaps = await this.tx.getAll(...unique.map((id) => this.ref(model, id)));
+    recordReads(model.collectionName, snaps.length);
+    for (const snap of snaps) {
+      const data = snapToData<D>(snap);
+      if (data) out.set(snap.id, data);
+    }
+    return out;
+  }
+
+  /** Native equality/range query inside the transaction (no in-memory filters). */
+  async query<D = any>(model: TxModel, filter: Record<string, any>, limit?: number): Promise<D[]> {
+    let q: FirebaseFirestore.Query = getDb().collection(model.collectionName);
+    for (const [field, op, val] of extractWhereFilters(filter)) q = q.where(field, op, val);
+    for (const [field, val] of Object.entries(filter)) {
+      if (val === null) q = q.where(field, '==', null);
+    }
+    if (limit) q = q.limit(limit);
+    const snap = await this.tx.get(q);
+    recordReads(model.collectionName, Math.max(snap.size, 1));
+    return snap.docs.map((d) => snapToData<D>(d)!);
+  }
+
+  /** Creates a document (full write). Returns the stored data with id/_id. */
+  async create<D = any>(model: TxModel, data: Record<string, any>, id?: string): Promise<D> {
+    const docId = id ?? data._id?.toString() ?? data.id?.toString() ?? this.newId(model);
+    const payload = cleanPayload(data);
+    delete payload._id;
+    delete payload.id;
+    const now = new Date();
+    payload.createdAt = payload.createdAt || now;
+    payload.updatedAt = now;
+    await model.beforeWrite?.(payload, { full: true, getExisting: async () => null });
+    this.tx.set(this.ref(model, docId), payload);
+    this.touched.add(model.collectionName);
+    return stripHiddenFields({ ...payload, id: docId, _id: docId }, model.hiddenFields) as D;
+  }
+
+  /**
+   * Merges `$set` / plain fields (and `$unset`) into an existing document. `existing` is the doc as
+   * read in this transaction; hooks use it instead of re-reading. `$inc` and array-index paths are
+   * not supported here: compute the new value from `existing` instead.
+   */
+  async update(model: TxModel, id: string, update: Record<string, any>, existing: Record<string, any> | null): Promise<void> {
+    const parsed = parseUpdate(update);
+    if (Object.keys(parsed.inc).length > 0 || updateTouchesArrayIndex(parsed)) {
+      throw new Error(`[ModelTx] update on "${model.collectionName}" must not use $inc or array-index paths`);
+    }
+    const payload = toMergePayload(parsed);
+    payload.updatedAt = new Date();
+    await model.beforeWrite?.(payload, { full: false, getExisting: async () => existing });
+    this.tx.set(this.ref(model, id), payload, { merge: true });
+    this.touched.add(model.collectionName);
+  }
+
+  /** Replaces a whole document (save()-style full write). */
+  async replace(model: TxModel, id: string, data: Record<string, any>): Promise<void> {
+    const payload = cleanPayload(data);
+    delete payload._id;
+    delete payload.id;
+    payload.updatedAt = new Date();
+    await model.beforeWrite?.(payload, { full: true, getExisting: async () => null });
+    this.tx.set(this.ref(model, id), payload);
+    this.touched.add(model.collectionName);
+  }
+
+  delete(model: TxModel, id: string): void {
+    this.tx.delete(this.ref(model, id));
+    const list = this.deleted.get(model.collectionName) ?? [];
+    list.push(id);
+    this.deleted.set(model.collectionName, list);
+  }
+}
+
+/**
+ * Runs `fn` in a Firestore transaction (retried on contention) and, after it commits, tells the
+ * collection mirrors about the writes. All-or-nothing: if `fn` throws, nothing is written.
+ */
+export async function runModelTransaction<R>(fn: (t: ModelTx) => Promise<R>): Promise<R> {
+  let last: ModelTx | null = null;
+  const result = await getDb().runTransaction(async (tx) => {
+    last = new ModelTx(tx);
+    return fn(last);
+  });
+  const done = last as ModelTx | null;
+  if (done) {
+    for (const [col, ids] of done.deleted) await recordMirrorDeletes(col, ids);
+    for (const col of new Set([...done.touched, ...done.deleted.keys()])) noteMirrorWrite(col);
+  }
+  return result;
+}
+
+/** `base` (or now) plus `days`, for TTL `expireAt` fields. */
+export function expireAfterDays(base: unknown, days: number): Date {
+  const start = base instanceof Date && !Number.isNaN(base.getTime()) ? base.getTime() : Date.now();
+  return new Date(start + days * 86_400_000);
 }

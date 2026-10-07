@@ -1,19 +1,18 @@
 import { Request, Response, NextFunction } from 'express';
-import mongoose from 'mongoose';
 import * as XLSX from 'xlsx';
 import { Coating } from '../models/Coating.model';
 import { Invoice, IPayment } from '../models/Invoice.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
 import { OpticalLens } from '../models/OpticalLens.model';
 import { Prescription } from '../models/Prescription.model';
-import { OpticalNumber } from '../models/OpticalNumber.model';
 import { Customer } from '../models/Customer.model';
 import { Frame } from '../models/Frame.model';
 import { Fragrance } from '../models/Fragrance.model';
 import { SiteSetting } from '../models/SiteSetting.model';
-import { deductLensStock } from './lensStock.controller';
-import { generateInvoiceNumber, financialYear, formatInvoiceNo } from '../utils/invoiceNumber';
+import { financialYear, formatInvoiceNo } from '../utils/invoiceNumber';
 import { InvoiceCounter } from '../models/InvoiceCounter.model';
+import { LensStock } from '../models/LensStock.model';
+import { ModelTx, runModelTransaction } from '../lib/firestoreModel';
 import { PurchaseEntry } from '../models/PurchaseEntry.model';
 import { createPendingPurchasesForInvoice, invalidateInvoiceLookupCache } from './purchaseEntry.controller';
 import type { CreateInvoiceInput, CreateInvoiceItemInput, DemandLogInput } from '../types';
@@ -123,20 +122,110 @@ export const getInvoicesByCustomer = async (req: Request, res: Response, next: N
   }
 };
 
-// ── CREATE invoice (unified — atomic) ────────────────────────────────────────
+// ── Transaction helpers ──────────────────────────────────────────────────────
+
+/** A validation failure detected inside a transaction; aborts it and becomes an HTTP response. */
+class InvoiceHttpError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+  }
+}
+
+function sendHttpError(error: unknown, res: Response): boolean {
+  if (error instanceof InvoiceHttpError) {
+    res.status(error.status).json({ message: error.message });
+    return true;
+  }
+  return false;
+}
+
+const idOf = (v: any): string => (v && typeof v === 'object' ? String(v._id ?? v.id) : String(v));
+
+const sumSettled = (payments: IPayment[]) => payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
+
+/** Same label rule as the admin UI uses to name a frame colour variant. */
+const frameVariantName = (v: any) => v.label || (v.colors ?? []).map((c: any) => c.name).join(' + ');
+
+interface CatalogLensFilter {
+  brand: string;
+  name: string;
+  category: any;
+  index: any;
+  coating: any;
+  spherical: any;
+  cylinder: any;
+  addition: any;
+}
+
+/** Existing catalog lens matching brand/name (case-insensitive) and the exact spec, if any. */
+async function findCatalogLens(filter: CatalogLensFilter) {
+  return OpticalLens.findOne({
+    brand: { $regex: new RegExp(`^${escapeRegExp(filter.brand)}$`, 'i') },
+    name: { $regex: new RegExp(`^${escapeRegExp(filter.name)}$`, 'i') },
+    category: filter.category,
+    index: filter.index,
+    coating: filter.coating,
+    spherical: filter.spherical,
+    cylinder: filter.cylinder,
+    addition: filter.addition,
+  } as any);
+}
+
+/**
+ * Loads an invoice and its items inside a transaction, lets `mutate` change them, then writes the
+ * invoice back with recalculated totals. Everything commits together or not at all.
+ */
+async function mutateInvoice(
+  invoiceId: string,
+  mutate: (invoice: any, items: Map<string, any>, t: ModelTx) => Promise<void> | void,
+  opts: { loadItems?: boolean } = {},
+): Promise<void> {
+  await runModelTransaction(async (t) => {
+    const invoice = await t.get<any>(Invoice, invoiceId);
+    if (!invoice) throw new InvoiceHttpError(404, 'Invoice not found');
+    invoice.payments = invoice.payments ?? [];
+    invoice.items = (invoice.items ?? []).map(idOf);
+    const items = opts.loadItems ? await t.getMany<any>(InvoiceItem, invoice.items) : new Map<string, any>();
+    await mutate(invoice, items, t);
+    await t.replace(Invoice, invoiceId, invoice);
+  });
+}
+
+/** Recomputes subtotal/total from the invoice's items and re-derives billClearDate. */
+function recalcFromItems(invoice: any, items: Map<string, any>): void {
+  const subtotal = invoice.items.reduce((sum: number, id: string) => {
+    const item = items.get(id);
+    return item ? sum + item.quantity * item.price : sum;
+  }, 0);
+  invoice.subtotal = subtotal;
+  invoice.total = subtotal - (invoice.discount ?? 0);
+  if (sumSettled(invoice.payments) >= invoice.total) invoice.billClearDate = new Date();
+  else delete invoice.billClearDate;
+}
+
+async function respondWithInvoice(res: Response, invoiceId: string, status = 200) {
+  const populated = await populateInvoice(Invoice.findById(invoiceId));
+  res.status(status).json(populated);
+}
+
+// ── CREATE invoice (one transaction) ─────────────────────────────────────────
+
+interface StockDeduction {
+  lensType: string;
+  material: string;
+  coating: string;
+  color: string;
+  sph: number;
+  cyl: number;
+  add: number | null;
+}
 
 export const createInvoice = async (req: Request, res: Response, next: NextFunction) => {
-  // Track created docs for rollback
-  const createdInvoiceItemIds: mongoose.Types.ObjectId[] = [];
-  const createdOpticalNumberIds: mongoose.Types.ObjectId[] = [];
-  const createdPrescriptionIds: mongoose.Types.ObjectId[] = [];
-  let createdCustomerId: mongoose.Types.ObjectId | null = null;
-
   try {
     const body: CreateInvoiceInput = req.body;
     const { customer: customerIdRaw, customerName, customerMobile, customerAddress, items, discount = 0, billDate: billDateRaw } = body;
 
-    // ── 1. Validate items ────────────────────────────────────────────────────
+    // ── 1. Validate the whole request before anything is written ──────────────
     if (!items || items.length === 0) {
       res.status(400).json({ message: 'At least one item is required.' });
       return;
@@ -146,14 +235,11 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       res.status(400).json({ message: validationError });
       return;
     }
-
-    // ── 2. Validate discount ─────────────────────────────────────────────────
     if (typeof discount !== 'number' || discount < 0) {
       res.status(400).json({ message: 'Discount must be a non-negative number.' });
       return;
     }
 
-    // ── 3. Validate billDate ────────────────────────────────────────────────
     let billDate: Date;
     if (billDateRaw) {
       billDate = new Date(billDateRaw);
@@ -165,332 +251,19 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       billDate = new Date();
     }
 
-    // ── 4. Resolve customer ──────────────────────────────────────────────────
-    let customerId: mongoose.Types.ObjectId;
-    let resolvedCustomerName: string = 'Customer';
-
-    if (isValidId(customerIdRaw)) {
-      const existing = await Customer.findById(customerIdRaw);
-      if (!existing) {
-        res.status(404).json({ message: 'Customer not found.' });
-        return;
-      }
-      customerId = existing._id as mongoose.Types.ObjectId;
-      resolvedCustomerName = existing.name;
-    } else {
-      if (!customerName?.trim()) {
-        res.status(400).json({ message: 'customerName is required when creating a new customer.' });
-        return;
-      }
-      const newCustomer = await Customer.create({
-        name: customerName.trim(),
-        mobileNumber: customerMobile?.trim() || undefined,
-        address: customerAddress?.trim() || undefined,
-      });
-      customerId = newCustomer._id as mongoose.Types.ObjectId;
-      createdCustomerId = customerId;
-      resolvedCustomerName = newCustomer.name;
-    }
-
-    // ── 5. Create inline OpticalNumbers / Prescriptions ──────────────────────
-    const resolvedItems: any[] = [];
-    const newPrescriptionGroups = new Map<string, { userName: string; label: string; items: any[] }>();
-
-    console.log(`[createInvoice] Processing ${items.length} items`);
-
-    for (const item of items) {
-      if (item.type === 'opticalLens') {
-        const enhancedItem: any = { ...item };
-        let targetUserName = item.userName?.trim() || resolvedCustomerName;
-
-        if (isValidId(item.prescription)) {
-          const rx = await Prescription.findById(item.prescription);
-          if (rx) {
-            if (!item.userName?.trim() && rx.userName) targetUserName = rx.userName;
-            if (!item.lensLabel?.trim()) enhancedItem.lensLabel = rx.label;
-          }
-        } else if ((item as any).rightSpherical !== undefined || (item as any).leftSpherical !== undefined) {
-          // New-style: both eyes encoded in a single item
-          const label = item.lensLabel?.trim() || (item as any).lensType?.trim() || 'Prescription';
-          const rxDoc = await Prescription.create({
-            customer: customerId,
-            label,
-            userName: targetUserName,
-            rightSpherical: (item as any).rightSpherical ?? undefined,
-            rightCylinder: (item as any).rightCylinder ?? undefined,
-            rightAxis: (item as any).rightAxis ?? undefined,
-            rightAddition: (item as any).rightAddition ?? undefined,
-            leftSpherical: (item as any).leftSpherical ?? undefined,
-            leftCylinder: (item as any).leftCylinder ?? undefined,
-            leftAxis: (item as any).leftAxis ?? undefined,
-            leftAddition: (item as any).leftAddition ?? undefined,
-          });
-          createdPrescriptionIds.push(rxDoc._id as mongoose.Types.ObjectId);
-          enhancedItem._resolvedPrescription = rxDoc._id;
-          enhancedItem.lensLabel = label;
-        } else if (item.lensLabel?.trim() || item.spherical !== null) {
-          const label = item.lensLabel?.trim() || "Prescription";
-          const groupKey = `${targetUserName}|${label}`;
-          if (!newPrescriptionGroups.has(groupKey)) {
-            newPrescriptionGroups.set(groupKey, { userName: targetUserName, label: label, items: [] });
-          }
-          newPrescriptionGroups.get(groupKey)!.items.push(enhancedItem);
-        }
-
-        // Auto-Catalogue Sync
-        if (item.lensBrand?.trim() && item.lensName?.trim() && item.lensCategory) {
-          const filter = {
-            brand: item.lensBrand.trim(),
-            name: item.lensName.trim(),
-            category: item.lensCategory,
-            index: item.lensIndex || null,
-            coating: item.lensCoating || null,
-            spherical: item.spherical === undefined ? null : item.spherical,
-            cylinder: item.cylinder === undefined ? null : item.cylinder,
-            addition: item.addition === undefined ? null : item.addition,
-          };
-
-          let lensDoc = await OpticalLens.findOne({
-            brand: { $regex: new RegExp(`^${escapeRegExp(filter.brand)}$`, 'i') },
-            name: { $regex: new RegExp(`^${escapeRegExp(filter.name)}$`, 'i') },
-            category: filter.category,
-            index: filter.index,
-            coating: filter.coating,
-            spherical: filter.spherical,
-            cylinder: filter.cylinder,
-            addition: filter.addition,
-          } as any);
-
-          if (!lensDoc) {
-            try {
-              lensDoc = await OpticalLens.create({ ...filter, sellPrice: item.price } as any);
-            } catch (err: any) {
-              if (err.code === 11000) {
-                lensDoc = await OpticalLens.findOne(filter as any);
-              } else {
-                throw err;
-              }
-            }
-          }
-
-          if (lensDoc) {
-            // Update sell price even for existing lenses
-            await OpticalLens.findByIdAndUpdate(lensDoc._id, { sellPrice: item.price }, { returnDoc: false });
-            enhancedItem._resolvedOpticalLens = lensDoc._id;
-          }
-        }
-
-        enhancedItem.userName = targetUserName;
-        resolvedItems.push(enhancedItem);
-      } else if (item.type === 'frame') {
-        if (isValidId(item.frame)) {
-          await Frame.findByIdAndUpdate(item.frame, { sellPrice: item.price }, { returnDoc: false });
-
-          // Deduct variant stock when a specific colour is selected
-          if (item.frameVariantLabel) {
-            const frameDoc = await Frame.findById(item.frame);
-            if (frameDoc?.web?.frameVariants?.length) {
-              const varIdx = frameDoc.web.frameVariants.findIndex((v: any) => {
-                const computed = v.label || v.colors.map((c: any) => c.name).join(' + ');
-                return computed === item.frameVariantLabel;
-              });
-              if (varIdx >= 0) {
-                const currentStock = frameDoc.web.frameVariants[varIdx]?.stock || 0;
-                const newStock = Math.max(0, currentStock - (item.quantity || 1));
-                await Frame.updateOne(
-                  { _id: item.frame },
-                  { $set: { [`web.frameVariants.${varIdx}.stock`]: newStock } },
-                );
-              }
-            }
-          }
-        }
-        resolvedItems.push({ ...(item as any) });
-      } else if (item.type === 'fragrance') {
-        if (isValidId(item.fragrance)) {
-          await Fragrance.findByIdAndUpdate(item.fragrance, { sellPrice: item.price }, { returnDoc: false });
-
-          // Deduct variant stock when a specific grade / variant is selected
-          const selectedGrade = (item as any).fragranceGrade || (item as any).fragranceVariantLabel;
-          if (selectedGrade) {
-            const fragDoc = await Fragrance.findById(item.fragrance);
-            if (fragDoc?.variants?.length) {
-              const varIdx = fragDoc.variants.findIndex((v: any) => v.label === selectedGrade);
-              if (varIdx >= 0) {
-                const currentStock = fragDoc.variants[varIdx]?.stock || 0;
-                const newStock = Math.max(0, currentStock - (item.quantity || 1));
-                await Fragrance.updateOne(
-                  { _id: item.fragrance },
-                  { $set: { [`variants.${varIdx}.stock`]: newStock } }
-                );
-              }
-            }
-          }
-        }
-        resolvedItems.push({ ...(item as any) });
-      } else {
-        resolvedItems.push({ ...(item as any) });
-      }
-    }
-
-    // Process new inline prescriptions
-    for (const group of Array.from(newPrescriptionGroups.values())) {
-      const rxDoc: any = {
-        customer: customerId,
-        label: group.label,
-        userName: group.userName,
-      };
-
-      for (const i of group.items) {
-        if (i.eye === 'right') {
-          rxDoc.rightSpherical = i.spherical;
-          rxDoc.rightCylinder = i.cylinder;
-          rxDoc.rightAxis = i.axis;
-          rxDoc.rightAddition = i.addition;
-        } else if (i.eye === 'left') {
-          rxDoc.leftSpherical = i.spherical;
-          rxDoc.leftCylinder = i.cylinder;
-          rxDoc.leftAxis = i.axis;
-          rxDoc.leftAddition = i.addition;
-        }
-      }
-
-      const newPrescription = await Prescription.create(rxDoc);
-      createdPrescriptionIds.push(newPrescription._id as mongoose.Types.ObjectId);
-
-      for (const i of group.items) {
-        i._resolvedPrescription = newPrescription._id;
-      }
-    }
-
-    // ── 6. Create InvoiceItems ───────────────────────────────────────────────
-    const invoiceItemIds: mongoose.Types.ObjectId[] = [];
-    let calculatedTotalCogs = 0;
-
-    for (const item of resolvedItems) {
-      let costPrice = typeof (item as any).costPrice === 'number' ? (item as any).costPrice : 0;
-
-      // Auto-lookup costPrice if not provided
-      if (costPrice === 0) {
-        if (item.type === 'frame' && item.frame) {
-          const frameDoc = await Frame.findById(item.frame).select('costPrice').lean();
-          if (frameDoc?.costPrice) costPrice = frameDoc.costPrice;
-        } else if (item.type === 'fragrance' && item.fragrance) {
-          const fragDoc = await Fragrance.findById(item.fragrance).select('costPrice variants').lean();
-          const selectedGrade = (item as any).fragranceGrade || (item as any).fragranceVariantLabel;
-          if (selectedGrade && fragDoc?.variants?.length) {
-            const matchedVar = fragDoc.variants.find((v: any) => v.label === selectedGrade);
-            if (matchedVar?.costPrice) costPrice = matchedVar.costPrice;
-            else if (fragDoc?.costPrice) costPrice = fragDoc.costPrice;
-          } else if (fragDoc?.costPrice) {
-            costPrice = fragDoc.costPrice;
-          }
-        }
-      }
-
-      const doc: any = {
-        type: item.type,
-        quantity: item.quantity,
-        price: item.price,
-        costPrice,
-      };
-      calculatedTotalCogs += costPrice * item.quantity;
-
-      if (item.type === 'frame' && item.frame) {
-        doc.type = 'frame';
-        doc.frame = item.frame;
-        if ((item as any).frameVariantLabel) doc.frameVariantLabel = (item as any).frameVariantLabel;
-      }
-      if (item.type === 'fragrance' && item.fragrance) {
-        doc.type = 'fragrance';
-        doc.fragrance = item.fragrance;
-        const grade = (item as any).fragranceGrade || (item as any).fragranceVariantLabel;
-        if (grade) doc.fragranceGrade = grade;
-      }
-      if (item.type === 'opticalLens') {
-        doc.type = 'opticalLens';
-        doc.opticalLens = item._resolvedOpticalLens || item.opticalLens;
-        doc.prescription = item._resolvedPrescription || item.prescription;
-        doc.eye = item.eye;
-        doc.userName = item.userName;
-        doc.spherical = item.spherical;
-        doc.cylinder = item.cylinder;
-        doc.axis = item.axis;
-        doc.addition = item.addition;
-        doc.lensLabel = item.lensLabel;
-        doc.lensBrand = item.lensBrand || null;
-        doc.lensName = item.lensName || null;
-        doc.lensCategory = item.lensCategory || null;
-        doc.lensIndex = item.lensIndex || null;
-        doc.lensCoating = item.lensCoating || null;
-        doc.lensMaterial = (item as any).lensMaterial || null;
-        doc.lensColor = (item as any).lensColor || null;
-        doc.isCustomLens = (item as any).isCustomLens || false;
-        // Simplified Prescription (legacy string format)
-        doc.rightEyeNumber = item.rightEyeNumber || null;
-        doc.leftEyeNumber = item.leftEyeNumber || null;
-        doc.lensCompany = item.lensCompany || null;
-        doc.lensType = item.lensType || null;
-        doc.isSameNumber = item.isSameNumber || false;
-        // Structured prescription fields
-        doc.rightSpherical = (item as any).rightSpherical ?? null;
-        doc.rightCylinder = (item as any).rightCylinder ?? null;
-        doc.rightAxis = (item as any).rightAxis ?? null;
-        doc.rightAddition = (item as any).rightAddition ?? null;
-        doc.leftSpherical = (item as any).leftSpherical ?? null;
-        doc.leftCylinder = (item as any).leftCylinder ?? null;
-        doc.leftAxis = (item as any).leftAxis ?? null;
-        doc.leftAddition = (item as any).leftAddition ?? null;
-        // Fulfillment tracking
-        const sendToWholesaler = (item as any).sendToWholesaler;
-        const isAlreadyOrdered = !!(
-          (item as any).alreadyOrdered ||
-          (item as any).skipWholesalerQueue ||
-          (item as any).fulfillmentSource === 'already_ordered'
-        );
-        const isCounterStock = (item as any).fulfillmentSource === 'stock' && sendToWholesaler === false;
-
-        if (isAlreadyOrdered) {
-          doc.fulfillmentSource = 'stock';
-          doc.sentToWholesaler = true;
-          doc.labStatus = 'fitted';
-          doc.wholesalerOrderDate = new Date();
-        } else if (isCounterStock) {
-          doc.fulfillmentSource = 'stock';
-          doc.sentToWholesaler = false;
-          doc.labStatus = 'fitted';
-        } else {
-          // Default for optical lenses: send number to wholesaler queue
-          doc.fulfillmentSource = (item as any).fulfillmentSource || 'ordered';
-          doc.sentToWholesaler = (item as any).sentToWholesaler || false;
-          doc.labStatus = (item as any).labStatus || 'pending';
-        }
-        doc.requestedQty = (item as any).requestedQty ?? item.quantity;
-        doc.fulfilledQty = (item as any).fulfilledQty ?? item.quantity;
-      }
-
-      const invoiceItem = await InvoiceItem.create(doc);
-      createdInvoiceItemIds.push(invoiceItem._id as mongoose.Types.ObjectId);
-      invoiceItemIds.push(invoiceItem._id as mongoose.Types.ObjectId);
-    }
-
-    // ── 7. Calculate totals ──────────────────────────────────────────────────
-    const subtotal = resolvedItems.reduce((sum, i) => sum + i.quantity * i.price, 0);
-
+    const subtotal = items.reduce((sum, i) => sum + i.quantity * i.price, 0);
     if (discount >= subtotal) {
       res.status(400).json({ message: 'Discount cannot be equal to or greater than the subtotal.' });
       return;
     }
     const total = subtotal - discount;
 
-    // ── 8. Resolve initialPayment ─────────────────────────────────────────────
     const { initialPayment, initialPayments: initialPaymentsInput } = body;
     const initialPayments: Array<{ date: Date; amount: number; method: 'cash' | 'online' }> = [];
     let billClearDate: Date | undefined;
 
     if (initialPaymentsInput && initialPaymentsInput.length > 0) {
       let upfrontTotal = 0;
-
       for (const payment of initialPaymentsInput) {
         if (typeof payment.amount !== 'number' || payment.amount <= 0) {
           res.status(400).json({ message: 'Each initial payment must have a positive amount.' });
@@ -500,29 +273,19 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
           res.status(400).json({ message: "Each initial payment must include method 'cash' or 'online'." });
           return;
         }
-
         const paymentDate = payment.date ? new Date(payment.date) : billDate;
         if (Number.isNaN(paymentDate.getTime())) {
           res.status(400).json({ message: 'Each initial payment date must be valid.' });
           return;
         }
-
-        initialPayments.push({
-          date: paymentDate,
-          amount: payment.amount,
-          method: payment.method,
-        });
+        initialPayments.push({ date: paymentDate, amount: payment.amount, method: payment.method });
         upfrontTotal += payment.amount;
       }
-
       if (upfrontTotal > total) {
         res.status(400).json({ message: 'Initial payments cannot exceed invoice total.' });
         return;
       }
-
-      if (upfrontTotal === total) {
-        billClearDate = billDate;
-      }
+      if (upfrontTotal === total) billClearDate = billDate;
     } else if (initialPayment !== undefined && initialPayment !== 0) {
       if (typeof initialPayment !== 'number' || initialPayment <= 0) {
         res.status(400).json({ message: 'initialPayment must be a positive number.' });
@@ -533,149 +296,370 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         return;
       }
       initialPayments.push({ date: billDate, amount: initialPayment, method: 'cash' });
-      if (initialPayment === total) {
-        billClearDate = billDate;
+      if (initialPayment === total) billClearDate = billDate;
+    }
+
+    // ── 2. Lookups (reads only) ───────────────────────────────────────────────
+    let existingCustomer: any = null;
+    if (isValidId(customerIdRaw)) {
+      existingCustomer = await Customer.findById(customerIdRaw);
+      if (!existingCustomer) {
+        res.status(404).json({ message: 'Customer not found.' });
+        return;
+      }
+    } else if (!customerName?.trim()) {
+      res.status(400).json({ message: 'customerName is required when creating a new customer.' });
+      return;
+    }
+    const resolvedCustomerName: string = existingCustomer ? existingCustomer.name : customerName!.trim();
+
+    // Catalog lenses and referenced prescriptions are resolved before the transaction.
+    const catalogLens = new Map<number, { existingId?: string; filter: CatalogLensFilter }>();
+    const referencedRx = new Map<number, any>();
+    const productIds = { frames: new Set<string>(), fragrances: new Set<string>() };
+
+    for (const [i, item] of items.entries()) {
+      if (item.type === 'opticalLens') {
+        if (isValidId(item.prescription)) {
+          const rx = await Prescription.findById(item.prescription);
+          if (rx) referencedRx.set(i, rx);
+        }
+        if (item.lensBrand?.trim() && item.lensName?.trim() && item.lensCategory) {
+          const filter: CatalogLensFilter = {
+            brand: item.lensBrand.trim(),
+            name: item.lensName.trim(),
+            category: item.lensCategory,
+            index: item.lensIndex || null,
+            coating: item.lensCoating || null,
+            spherical: item.spherical === undefined ? null : item.spherical,
+            cylinder: item.cylinder === undefined ? null : item.cylinder,
+            addition: item.addition === undefined ? null : item.addition,
+          };
+          const found = await findCatalogLens(filter);
+          catalogLens.set(i, { existingId: found ? idOf(found._id) : undefined, filter });
+        }
+      } else if (item.type === 'frame' && isValidId(item.frame)) {
+        productIds.frames.add(idOf(item.frame));
+      } else if (item.type === 'fragrance' && isValidId(item.fragrance)) {
+        productIds.fragrances.add(idOf(item.fragrance));
       }
     }
 
-    // ── 9. Load Financial Config & Customer Visit Data ─────────────────────────
+    const customerKey = existingCustomer ? idOf(existingCustomer._id) : null;
     const [financialSetting, priorInvoicesCount] = await Promise.all([
       SiteSetting.findOne({ key: 'retail_financial_settings' }).lean(),
-      Invoice.countDocuments({ customer: customerId }),
+      customerKey ? Invoice.countDocuments({ customer: customerKey }) : Promise.resolve(0),
     ]);
-
-    const defaultSettings = {
-      defaultCardSwipeFeePct: 0,
-      defaultPackagingCost: 35,
-    };
     const finConfig = financialSetting?.value
-      ? { ...defaultSettings, ...financialSetting.value }
-      : defaultSettings;
+      ? { defaultCardSwipeFeePct: 0, defaultPackagingCost: 35, ...financialSetting.value }
+      : { defaultCardSwipeFeePct: 0, defaultPackagingCost: 35 };
 
     const isNewCustomer = priorInvoicesCount === 0;
     const visitNumber = priorInvoicesCount + 1;
-
-    const packagingCost =
-      typeof body.packagingCost === 'number'
-        ? body.packagingCost
-        : finConfig.defaultPackagingCost;
-
-    const onlinePaid = initialPayments
-      .filter((p) => p.method === 'online')
-      .reduce((s, p) => s + p.amount, 0);
-
+    const packagingCost = typeof body.packagingCost === 'number' ? body.packagingCost : finConfig.defaultPackagingCost;
+    const onlinePaid = initialPayments.filter((p) => p.method === 'online').reduce((s, p) => s + p.amount, 0);
     const paymentProcessingFee =
       typeof body.paymentProcessingFee === 'number'
         ? body.paymentProcessingFee
-        : Number(((onlinePaid * (finConfig.defaultCardSwipeFeePct / 100))).toFixed(2));
+        : Number((onlinePaid * (finConfig.defaultCardSwipeFeePct / 100)).toFixed(2));
+    const acquisitionSource = body.acquisitionSource || (isNewCustomer ? 'walk_by' : 'repeat');
+    const fy = financialYear(billDate);
 
-    const netContributionMargin = Math.max(
-      0,
-      Number((total - calculatedTotalCogs - packagingCost - paymentProcessingFee).toFixed(2))
-    );
-    const contributionMarginPct =
-      total > 0 ? Number(((netContributionMargin / total) * 100).toFixed(2)) : 0;
+    // ── 3. One transaction: every write lands together or not at all ─────────
+    const invoiceId = await runModelTransaction(async (t) => {
+      // Reads first (Firestore requires all reads before writes).
+      const [counter] = await t.query<any>(InvoiceCounter, { year: fy }, 1);
+      const frames = await t.getMany<any>(Frame, [...productIds.frames]);
+      const fragrances = await t.getMany<any>(Fragrance, [...productIds.fragrances]);
 
-    const acquisitionSource =
-      body.acquisitionSource || (isNewCustomer ? 'walk_by' : 'repeat');
+      const deductions: StockDeduction[] = [];
+      for (const item of items as any[]) {
+        if (item.type !== 'opticalLens' || item.isCustomLens) continue;
+        const lensType = item.lensType ?? null;
+        const material = item.lensMaterial ?? null;
+        const coating = item.lensCoating ?? null;
+        const color = item.lensColor ?? null;
+        if (!lensType || !material || !coating || !color) continue;
+        const eye = item.eye ?? 'both';
+        const base = { lensType, material, coating, color };
+        if ((eye === 'right' || eye === 'both') && (item.rightSpherical ?? null) !== null) {
+          deductions.push({ ...base, sph: item.rightSpherical, cyl: item.rightCylinder ?? 0, add: item.rightAddition ?? null });
+        }
+        if ((eye === 'left' || eye === 'both') && (item.leftSpherical ?? null) !== null) {
+          deductions.push({ ...base, sph: item.leftSpherical, cyl: item.leftCylinder ?? 0, add: item.leftAddition ?? null });
+        }
+      }
+      // Each deduction takes one unit from the first matching stock row that still has stock.
+      const stockRows = new Map<string, any>();
+      const stockTaken = new Map<string, number>();
+      for (const d of deductions) {
+        const rows = await t.query<any>(LensStock, { ...d });
+        for (const r of rows) if (!stockRows.has(r.id)) stockRows.set(r.id, r);
+        const row = rows
+          .sort((a, b) => (a.id < b.id ? -1 : 1))
+          .find((r) => (typeof r.quantity === 'number' ? r.quantity : 0) - (stockTaken.get(r.id) ?? 0) > 0);
+        if (row) stockTaken.set(row.id, (stockTaken.get(row.id) ?? 0) + 1);
+      }
 
-    // ── 10. Create Invoice ───────────────────────────────────────────────────
-    const invoiceNumber = await generateInvoiceNumber(billDate);
-    const invoice = await Invoice.create({
-      customer: customerId,
-      items: invoiceItemIds,
-      subtotal,
-      discount,
-      total,
-      billDate,
-      payments: initialPayments,
-      invoiceNumber,
-      acquisitionSource,
-      totalCogs: calculatedTotalCogs,
-      packagingCost,
-      paymentProcessingFee,
-      netContributionMargin,
-      contributionMarginPct,
-      isNewCustomer,
-      visitNumber,
-      ...(billClearDate ? { billClearDate } : {}),
+      // Writes.
+      const seq = (counter?.lastSeq ?? 0) + 1;
+      if (counter) await t.update(InvoiceCounter, counter.id, { lastSeq: seq }, counter);
+      else await t.create(InvoiceCounter, { year: fy, lastSeq: seq });
+      const invoiceNumber = formatInvoiceNo(seq, fy);
+
+      let customerId = customerKey;
+      if (!customerId) {
+        const created = await t.create<any>(Customer, {
+          name: customerName!.trim(),
+          mobileNumber: customerMobile?.trim() || undefined,
+          address: customerAddress?.trim() || undefined,
+        });
+        customerId = created.id as string;
+      }
+
+      // Prescriptions, catalog lenses and product price/stock updates.
+      const resolved: any[] = [];
+      const rxGroups = new Map<string, { userName: string; label: string; items: any[] }>();
+      const frameUpdates = new Map<string, any>();
+      const fragranceUpdates = new Map<string, any>();
+
+      for (const [i, item] of (items as any[]).entries()) {
+        const enhanced: any = { ...item };
+        if (item.type === 'opticalLens') {
+          let targetUserName = item.userName?.trim() || resolvedCustomerName;
+          const rx = referencedRx.get(i);
+          if (rx) {
+            if (!item.userName?.trim() && rx.userName) targetUserName = rx.userName;
+            if (!item.lensLabel?.trim()) enhanced.lensLabel = rx.label;
+          } else if (!isValidId(item.prescription) && (item.rightSpherical !== undefined || item.leftSpherical !== undefined)) {
+            const label = item.lensLabel?.trim() || item.lensType?.trim() || 'Prescription';
+            const rxDoc = await t.create<any>(Prescription, {
+              customer: customerId,
+              label,
+              userName: targetUserName,
+              rightSpherical: item.rightSpherical ?? undefined,
+              rightCylinder: item.rightCylinder ?? undefined,
+              rightAxis: item.rightAxis ?? undefined,
+              rightAddition: item.rightAddition ?? undefined,
+              leftSpherical: item.leftSpherical ?? undefined,
+              leftCylinder: item.leftCylinder ?? undefined,
+              leftAxis: item.leftAxis ?? undefined,
+              leftAddition: item.leftAddition ?? undefined,
+            });
+            enhanced._resolvedPrescription = rxDoc.id;
+            enhanced.lensLabel = label;
+          } else if (!isValidId(item.prescription) && (item.lensLabel?.trim() || item.spherical !== null)) {
+            const label = item.lensLabel?.trim() || 'Prescription';
+            const key = `${targetUserName}|${label}`;
+            if (!rxGroups.has(key)) rxGroups.set(key, { userName: targetUserName, label, items: [] });
+            rxGroups.get(key)!.items.push(enhanced);
+          }
+
+          const lens = catalogLens.get(i);
+          if (lens) {
+            if (lens.existingId) {
+              await t.update(OpticalLens, lens.existingId, { sellPrice: item.price }, null);
+              enhanced._resolvedOpticalLens = lens.existingId;
+            } else {
+              const created = await t.create<any>(OpticalLens, { ...lens.filter, sellPrice: item.price });
+              enhanced._resolvedOpticalLens = created.id;
+            }
+          }
+          enhanced.userName = targetUserName;
+        } else if (item.type === 'frame' && isValidId(item.frame)) {
+          const id = idOf(item.frame);
+          const frame = frames.get(id);
+          const update = frameUpdates.get(id) ?? { sellPrice: item.price };
+          update.sellPrice = item.price;
+          const variants = update['web.frameVariants'] ?? frame?.web?.frameVariants;
+          if (item.frameVariantLabel && variants?.length) {
+            const idx = variants.findIndex((v: any) => frameVariantName(v) === item.frameVariantLabel);
+            if (idx >= 0) {
+              const copy = variants.map((v: any) => ({ ...v }));
+              copy[idx].stock = Math.max(0, (copy[idx].stock || 0) - (item.quantity || 1));
+              update['web.frameVariants'] = copy;
+            }
+          }
+          frameUpdates.set(id, update);
+        } else if (item.type === 'fragrance' && isValidId(item.fragrance)) {
+          const id = idOf(item.fragrance);
+          const fragrance = fragrances.get(id);
+          const update = fragranceUpdates.get(id) ?? { sellPrice: item.price };
+          update.sellPrice = item.price;
+          const grade = item.fragranceGrade || item.fragranceVariantLabel;
+          const variants = update.variants ?? fragrance?.variants;
+          if (grade && variants?.length) {
+            const idx = variants.findIndex((v: any) => v.label === grade);
+            if (idx >= 0) {
+              const copy = variants.map((v: any) => ({ ...v }));
+              copy[idx].stock = Math.max(0, (copy[idx].stock || 0) - (item.quantity || 1));
+              update.variants = copy;
+            }
+          }
+          fragranceUpdates.set(id, update);
+        }
+        resolved.push(enhanced);
+      }
+
+      for (const group of rxGroups.values()) {
+        const rxDoc: any = { customer: customerId, label: group.label, userName: group.userName };
+        for (const i of group.items) {
+          if (i.eye === 'right') {
+            rxDoc.rightSpherical = i.spherical;
+            rxDoc.rightCylinder = i.cylinder;
+            rxDoc.rightAxis = i.axis;
+            rxDoc.rightAddition = i.addition;
+          } else if (i.eye === 'left') {
+            rxDoc.leftSpherical = i.spherical;
+            rxDoc.leftCylinder = i.cylinder;
+            rxDoc.leftAxis = i.axis;
+            rxDoc.leftAddition = i.addition;
+          }
+        }
+        const created = await t.create<any>(Prescription, rxDoc);
+        for (const i of group.items) i._resolvedPrescription = created.id;
+      }
+
+      for (const [id, update] of frameUpdates) await t.update(Frame, id, { $set: update }, frames.get(id) ?? null);
+      for (const [id, update] of fragranceUpdates) await t.update(Fragrance, id, { $set: update }, fragrances.get(id) ?? null);
+
+      // Invoice items, already linked to the invoice being created.
+      const invoiceDocId = t.newId(Invoice);
+      const itemIds: string[] = [];
+      let totalCogs = 0;
+
+      for (const item of resolved) {
+        let costPrice = typeof item.costPrice === 'number' ? item.costPrice : 0;
+        if (costPrice === 0) {
+          if (item.type === 'frame' && item.frame) {
+            costPrice = frames.get(idOf(item.frame))?.costPrice || 0;
+          } else if (item.type === 'fragrance' && item.fragrance) {
+            const frag = fragrances.get(idOf(item.fragrance));
+            const grade = item.fragranceGrade || item.fragranceVariantLabel;
+            const variant = grade && frag?.variants?.length ? frag.variants.find((v: any) => v.label === grade) : null;
+            costPrice = variant?.costPrice || frag?.costPrice || 0;
+          }
+        }
+        totalCogs += costPrice * item.quantity;
+
+        const doc: any = {
+          type: item.type,
+          quantity: item.quantity,
+          price: item.price,
+          costPrice,
+          invoice: invoiceDocId,
+          invoiceId: invoiceDocId,
+          invoiceNumber,
+        };
+        if (item.type === 'frame' && item.frame) {
+          doc.frame = item.frame;
+          if (item.frameVariantLabel) doc.frameVariantLabel = item.frameVariantLabel;
+        }
+        if (item.type === 'fragrance' && item.fragrance) {
+          doc.fragrance = item.fragrance;
+          const grade = item.fragranceGrade || item.fragranceVariantLabel;
+          if (grade) doc.fragranceGrade = grade;
+        }
+        if (item.type === 'opticalLens') {
+          doc.opticalLens = item._resolvedOpticalLens || item.opticalLens;
+          doc.prescription = item._resolvedPrescription || item.prescription;
+          doc.eye = item.eye;
+          doc.userName = item.userName;
+          doc.spherical = item.spherical;
+          doc.cylinder = item.cylinder;
+          doc.axis = item.axis;
+          doc.addition = item.addition;
+          doc.lensLabel = item.lensLabel;
+          doc.lensBrand = item.lensBrand || null;
+          doc.lensName = item.lensName || null;
+          doc.lensCategory = item.lensCategory || null;
+          doc.lensIndex = item.lensIndex || null;
+          doc.lensCoating = item.lensCoating || null;
+          doc.lensMaterial = item.lensMaterial || null;
+          doc.lensColor = item.lensColor || null;
+          doc.isCustomLens = item.isCustomLens || false;
+          doc.rightEyeNumber = item.rightEyeNumber || null;
+          doc.leftEyeNumber = item.leftEyeNumber || null;
+          doc.lensCompany = item.lensCompany || null;
+          doc.lensType = item.lensType || null;
+          doc.isSameNumber = item.isSameNumber || false;
+          doc.rightSpherical = item.rightSpherical ?? null;
+          doc.rightCylinder = item.rightCylinder ?? null;
+          doc.rightAxis = item.rightAxis ?? null;
+          doc.rightAddition = item.rightAddition ?? null;
+          doc.leftSpherical = item.leftSpherical ?? null;
+          doc.leftCylinder = item.leftCylinder ?? null;
+          doc.leftAxis = item.leftAxis ?? null;
+          doc.leftAddition = item.leftAddition ?? null;
+
+          const isAlreadyOrdered = !!(item.alreadyOrdered || item.skipWholesalerQueue || item.fulfillmentSource === 'already_ordered');
+          const isCounterStock = item.fulfillmentSource === 'stock' && item.sendToWholesaler === false;
+          if (isAlreadyOrdered) {
+            doc.fulfillmentSource = 'stock';
+            doc.sentToWholesaler = true;
+            doc.labStatus = 'fitted';
+            doc.wholesalerOrderDate = new Date();
+          } else if (isCounterStock) {
+            doc.fulfillmentSource = 'stock';
+            doc.sentToWholesaler = false;
+            doc.labStatus = 'fitted';
+          } else {
+            doc.fulfillmentSource = item.fulfillmentSource || 'ordered';
+            doc.sentToWholesaler = item.sentToWholesaler || false;
+            doc.labStatus = item.labStatus || 'pending';
+          }
+          doc.requestedQty = item.requestedQty ?? item.quantity;
+          doc.fulfilledQty = item.fulfilledQty ?? item.quantity;
+        }
+        const created = await t.create<any>(InvoiceItem, doc);
+        itemIds.push(created.id);
+      }
+
+      const netContributionMargin = Math.max(0, Number((total - totalCogs - packagingCost - paymentProcessingFee).toFixed(2)));
+      await t.create(
+        Invoice,
+        {
+          customer: customerId,
+          items: itemIds,
+          subtotal,
+          discount,
+          total,
+          billDate,
+          payments: initialPayments,
+          invoiceNumber,
+          acquisitionSource,
+          totalCogs,
+          packagingCost,
+          paymentProcessingFee,
+          netContributionMargin,
+          contributionMarginPct: total > 0 ? Number(((netContributionMargin / total) * 100).toFixed(2)) : 0,
+          isNewCustomer,
+          visitNumber,
+          ...(billClearDate ? { billClearDate } : {}),
+        },
+        invoiceDocId,
+      );
+
+      for (const [rowId, taken] of stockTaken) {
+        const row = stockRows.get(rowId);
+        const current = typeof row?.quantity === 'number' ? row.quantity : 0;
+        await t.update(LensStock, rowId, { quantity: Math.max(0, current - taken) }, row ?? null);
+      }
+
+      return invoiceDocId;
     });
 
-    // Link InvoiceItem documents to their parent Invoice
-    if (invoiceItemIds.length > 0) {
-      await InvoiceItem.updateMany(
-        { _id: { $in: invoiceItemIds } },
-        {
-          $set: {
-            invoice: invoice._id,
-            invoiceId: (invoice._id as any).toString(),
-            invoiceNumber: invoice.invoiceNumber,
-          },
-        }
-      ).catch((linkErr) => {
-        console.warn('[createInvoice] Non-blocking: failed to link invoice items to invoice:', linkErr);
-      });
-    }
-
-    // ── 10. Auto-deduct lens stock (best-effort) ─────────────────────────────
-    for (const item of resolvedItems) {
-      if (item.type !== 'opticalLens') continue;
-      if ((item as any).isCustomLens) continue;
-      const lensType   = item.lensType   ?? null;
-      const material   = (item as any).lensMaterial ?? null;
-      const coating    = item.lensCoating ?? null;
-      const color      = (item as any).lensColor ?? null;
-      const eye        = (item as any).eye ?? 'both';
-      if (!lensType || !material) continue;
-      const base = { lensType, material, coating, color };
-      try {
-        if (eye === 'right' || eye === 'both') {
-          const sph = (item as any).rightSpherical ?? null;
-          if (sph !== null) {
-            await deductLensStock({
-              ...base,
-              sph,
-              cyl: (item as any).rightCylinder ?? 0,
-              add: (item as any).rightAddition ?? null,
-            });
-          }
-        }
-        if (eye === 'left' || eye === 'both') {
-          const sph = (item as any).leftSpherical ?? null;
-          if (sph !== null) {
-            await deductLensStock({
-              ...base,
-              sph,
-              cyl: (item as any).leftCylinder ?? 0,
-              add: (item as any).leftAddition ?? null,
-            });
-          }
-        }
-      } catch (stockErr) {
-        console.warn('[createInvoice] Stock deduction warning:', stockErr);
-      }
-    }
-
-    // ── 11. Auto-create pending purchase entries for lens items ──────────────
+    // ── 4. Follow-ups that may fail without affecting the bill ───────────────
     try {
-      await createPendingPurchasesForInvoice(invoice._id);
+      await createPendingPurchasesForInvoice(invoiceId);
     } catch (purchaseErr) {
       console.warn('[createInvoice] Auto-create pending purchase error:', purchaseErr);
     }
 
-    const populated = await populateInvoice(Invoice.findById(invoice._id));
-    res.status(201).json(populated);
+    await respondWithInvoice(res, invoiceId, 201);
   } catch (error) {
-    console.error('[createInvoice] Critical failure, rolling back:', error);
-    if (createdInvoiceItemIds.length > 0) {
-      await InvoiceItem.deleteMany({ _id: { $in: createdInvoiceItemIds } }).catch(() => { });
-    }
-    if (createdOpticalNumberIds.length > 0) {
-      await OpticalNumber.deleteMany({ _id: { $in: createdOpticalNumberIds } }).catch(() => { });
-    }
-    if (createdPrescriptionIds.length > 0) {
-      await Prescription.deleteMany({ _id: { $in: createdPrescriptionIds } }).catch(() => { });
-    }
+    if (sendHttpError(error, res)) return;
+    console.error('[createInvoice] failed; transaction rolled back, nothing was written:', error);
     next(error);
   }
 };
@@ -693,131 +677,93 @@ export const updateInvoice = async (req: Request, res: Response, next: NextFunct
       customer?: any;
     };
 
-    const invoice = await Invoice.findById(req.params.id);
-    if (!invoice) {
-      res.status(404).json({ message: 'Invoice not found' });
-      return;
-    }
-
+    let customerId: string | undefined;
     if (customer !== undefined && customer !== null) {
       const custId = typeof customer === 'object' ? (customer._id || customer.id) : customer;
-      if (isValidId(custId)) {
-        const existingCust = await Customer.findById(custId);
-        if (!existingCust) {
-          res.status(404).json({ message: 'Customer not found.' });
-          return;
-        }
-        invoice.customer = existingCust._id || existingCust.id;
-      } else {
+      if (!isValidId(custId)) {
         res.status(400).json({ message: 'Invalid customer ID.' });
         return;
       }
-    }
-
-    if (billDate !== undefined) {
-      const d = new Date(billDate);
-      if (isNaN(d.getTime())) {
-        res.status(400).json({ message: 'Invalid billDate.' });
+      const existingCust = await Customer.findById(custId);
+      if (!existingCust) {
+        res.status(404).json({ message: 'Customer not found.' });
         return;
       }
-      invoice.billDate = d;
+      customerId = idOf(existingCust._id || existingCust.id);
     }
 
-    if (acquisitionSource !== undefined) {
-      invoice.acquisitionSource = acquisitionSource;
-    }
+    await mutateInvoice(String(req.params.id), (invoice) => {
+      if (customerId) invoice.customer = customerId;
 
-    if (packagingCost !== undefined && typeof packagingCost === 'number' && packagingCost >= 0) {
-      invoice.packagingCost = packagingCost;
-    }
-
-    if (discount !== undefined) {
-      if (typeof discount !== 'number' || discount < 0) {
-        res.status(400).json({ message: 'Discount must be a non-negative number.' });
-        return;
+      if (billDate !== undefined) {
+        const d = new Date(billDate);
+        if (isNaN(d.getTime())) throw new InvoiceHttpError(400, 'Invalid billDate.');
+        invoice.billDate = d;
       }
-      if (discount >= invoice.subtotal && invoice.subtotal > 0) {
-        res.status(400).json({ message: 'Discount cannot equal or exceed the subtotal.' });
-        return;
-      }
-      invoice.discount = discount;
-      invoice.total = Math.max(0, invoice.subtotal - discount);
-    }
-
-    if (payments !== undefined) {
-      if (!Array.isArray(payments)) {
-        res.status(400).json({ message: 'payments must be an array.' });
-        return;
+      if (acquisitionSource !== undefined) invoice.acquisitionSource = acquisitionSource;
+      if (packagingCost !== undefined && typeof packagingCost === 'number' && packagingCost >= 0) {
+        invoice.packagingCost = packagingCost;
       }
 
-      const updatedPayments: IPayment[] = [];
-      for (const p of payments) {
-        if (typeof p.amount !== 'number' || p.amount < 0) {
-          res.status(400).json({ message: 'Payment amount must be a non-negative number.' });
-          return;
+      if (discount !== undefined) {
+        if (typeof discount !== 'number' || discount < 0) throw new InvoiceHttpError(400, 'Discount must be a non-negative number.');
+        if (discount >= invoice.subtotal && invoice.subtotal > 0) {
+          throw new InvoiceHttpError(400, 'Discount cannot equal or exceed the subtotal.');
         }
-        if (!p.method || !['cash', 'online'].includes(p.method)) {
-          res.status(400).json({ message: "Payment method must be 'cash' or 'online'." });
-          return;
-        }
-        const writeoff = typeof p.writeoff === 'number' && p.writeoff > 0 ? p.writeoff : 0;
-        if (p.amount > 0 || writeoff > 0) {
-          const pDate = p.date ? new Date(p.date) : invoice.billDate ?? new Date();
-          if (isNaN(pDate.getTime())) {
-            res.status(400).json({ message: 'Invalid payment date.' });
-            return;
+        invoice.discount = discount;
+        invoice.total = Math.max(0, invoice.subtotal - discount);
+      }
+
+      if (payments !== undefined) {
+        if (!Array.isArray(payments)) throw new InvoiceHttpError(400, 'payments must be an array.');
+        const updatedPayments: IPayment[] = [];
+        for (const p of payments) {
+          if (typeof p.amount !== 'number' || p.amount < 0) {
+            throw new InvoiceHttpError(400, 'Payment amount must be a non-negative number.');
           }
-          updatedPayments.push({
-            date: pDate,
-            amount: p.amount,
-            method: p.method,
-            writeoff,
-          });
+          if (!p.method || !['cash', 'online'].includes(p.method)) {
+            throw new InvoiceHttpError(400, "Payment method must be 'cash' or 'online'.");
+          }
+          const writeoff = typeof p.writeoff === 'number' && p.writeoff > 0 ? p.writeoff : 0;
+          if (p.amount > 0 || writeoff > 0) {
+            const pDate = p.date ? new Date(p.date) : invoice.billDate ?? new Date();
+            if (isNaN(pDate.getTime())) throw new InvoiceHttpError(400, 'Invalid payment date.');
+            updatedPayments.push({ date: pDate, amount: p.amount, method: p.method, writeoff });
+          }
         }
+        const totalPaid = sumSettled(updatedPayments);
+        if (totalPaid > invoice.total + 0.01) {
+          throw new InvoiceHttpError(
+            400,
+            `Total payments (₹${totalPaid.toLocaleString('en-IN')}) cannot exceed invoice total (₹${invoice.total.toLocaleString('en-IN')}).`,
+          );
+        }
+        invoice.payments = updatedPayments;
       }
 
-      const totalPaid = updatedPayments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
-      if (totalPaid > invoice.total + 0.01) {
-        res.status(400).json({
-          message: `Total payments (₹${totalPaid.toLocaleString('en-IN')}) cannot exceed invoice total (₹${invoice.total.toLocaleString('en-IN')}).`,
-        });
-        return;
+      const totalPaid = sumSettled(invoice.payments);
+      if (totalPaid >= invoice.total && invoice.total > 0) {
+        invoice.billClearDate = invoice.payments[invoice.payments.length - 1]?.date ?? invoice.billDate ?? new Date();
+      } else if (invoice.total === 0 && totalPaid === 0) {
+        invoice.billClearDate = invoice.billDate ?? new Date();
+      } else {
+        delete invoice.billClearDate;
       }
 
-      invoice.payments = updatedPayments as any;
-    }
+      const onlinePaid = invoice.payments.filter((p: IPayment) => p.method === 'online').reduce((s: number, p: IPayment) => s + p.amount, 0);
+      const paymentProcessingFee = Number((onlinePaid * (0.0195 * 1.18)).toFixed(2));
+      invoice.paymentProcessingFee = paymentProcessingFee;
+      const netContributionMargin = Math.max(
+        0,
+        Number((invoice.total - (invoice.totalCogs ?? 0) - (invoice.packagingCost ?? 0) - paymentProcessingFee).toFixed(2)),
+      );
+      invoice.netContributionMargin = netContributionMargin;
+      invoice.contributionMarginPct = invoice.total > 0 ? Number(((netContributionMargin / invoice.total) * 100).toFixed(2)) : 0;
+    });
 
-    // Recalculate billClearDate after total or payments change
-    const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
-    if (totalPaid >= invoice.total && invoice.total > 0) {
-      invoice.billClearDate = invoice.payments[invoice.payments.length - 1]?.date ?? invoice.billDate ?? new Date();
-    } else if (invoice.total === 0 && totalPaid === 0) {
-      invoice.billClearDate = invoice.billDate ?? new Date();
-    } else {
-      invoice.billClearDate = undefined;
-    }
-
-    // Recalculate payment fee and contribution margins
-    const onlinePaid = invoice.payments
-      .filter((p) => p.method === 'online')
-      .reduce((s, p) => s + p.amount, 0);
-
-    const paymentProcessingFee = Number((onlinePaid * (0.0195 * 1.18)).toFixed(2));
-    invoice.paymentProcessingFee = paymentProcessingFee;
-    const pkgCost = invoice.packagingCost ?? 0;
-    const cogs = invoice.totalCogs ?? 0;
-    const netContributionMargin = Math.max(
-      0,
-      Number((invoice.total - cogs - pkgCost - paymentProcessingFee).toFixed(2))
-    );
-    invoice.netContributionMargin = netContributionMargin;
-    invoice.contributionMarginPct =
-      invoice.total > 0 ? Number(((netContributionMargin / invoice.total) * 100).toFixed(2)) : 0;
-
-    await invoice.save();
-    const populated = await populateInvoice(Invoice.findById(invoice._id));
-    res.json(populated);
+    await respondWithInvoice(res, String(req.params.id));
   } catch (error) {
+    if (sendHttpError(error, res)) return;
     next(error);
   }
 };
@@ -846,54 +792,39 @@ export const addPayment = async (req: Request, res: Response, next: NextFunction
       res.status(400).json({ message: 'Discount must be a non-negative number.' });
       return;
     }
-
-    const invoice = await Invoice.findById(req.params.id);
-    if (!invoice) {
-      res.status(404).json({ message: 'Invoice not found' });
-      return;
-    }
-
-    // Apply discount to invoice (adds to existing invoice-level discount)
-    const newDiscount = invoice.discount + discountAmount;
     if (amount + discountAmount <= 0) {
       res.status(400).json({ message: 'Amount and discount cannot both be zero.' });
       return;
     }
-    if (discountAmount > 0 && newDiscount >= invoice.subtotal) {
-      res.status(400).json({ message: 'Discount cannot equal or exceed the invoice subtotal.' });
-      return;
-    }
-    const newTotal = invoice.subtotal - newDiscount;
 
-    // Validate payment against remaining balance (use original total before applying new writeoff)
-    const alreadyPaid = invoice.payments.reduce((sum, p) => sum + p.amount, 0);
-    const currentBalance = invoice.total - alreadyPaid;
-    if (amount + discountAmount > currentBalance + 0.01) {
-      res.status(400).json({ message: 'Payment and discount exceed the outstanding balance.' });
-      return;
-    }
+    await mutateInvoice(String(req.params.id), (invoice) => {
+      // A write-off is added to the invoice-level discount.
+      const newDiscount = invoice.discount + discountAmount;
+      if (discountAmount > 0 && newDiscount >= invoice.subtotal) {
+        throw new InvoiceHttpError(400, 'Discount cannot equal or exceed the invoice subtotal.');
+      }
 
-    if (discountAmount > 0) {
-      invoice.discount = newDiscount;
-      invoice.total = newTotal;
-    }
+      // Validate against the balance before this write-off is applied.
+      const alreadyPaid = invoice.payments.reduce((sum: number, p: IPayment) => sum + p.amount, 0);
+      if (amount + discountAmount > invoice.total - alreadyPaid + 0.01) {
+        throw new InvoiceHttpError(400, 'Payment and discount exceed the outstanding balance.');
+      }
 
-    const paymentDate = date ? new Date(date) : new Date();
-    if (amount > 0) {
-      invoice.payments.push({ date: paymentDate, amount, method });
-    }
+      if (discountAmount > 0) {
+        invoice.discount = newDiscount;
+        invoice.total = invoice.subtotal - newDiscount;
+      }
 
-    const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
-    if (totalPaid >= invoice.total) {
-      invoice.billClearDate = paymentDate;
-    } else {
-      invoice.billClearDate = undefined;
-    }
+      const paymentDate = date ? new Date(date) : new Date();
+      if (amount > 0) invoice.payments.push({ date: paymentDate, amount, method });
 
-    await invoice.save();
-    const populated = await populateInvoice(Invoice.findById(invoice._id));
-    res.json(populated);
+      if (sumSettled(invoice.payments) >= invoice.total) invoice.billClearDate = paymentDate;
+      else delete invoice.billClearDate;
+    });
+
+    await respondWithInvoice(res, String(req.params.id));
   } catch (error) {
+    if (sendHttpError(error, res)) return;
     next(error);
   }
 };
@@ -909,55 +840,41 @@ export const updatePayment = async (req: Request, res: Response, next: NextFunct
       date?: string;
     };
 
-    const invoice = await Invoice.findById(req.params.id);
-    if (!invoice) {
-      res.status(404).json({ message: 'Invoice not found' });
+    if (amount !== undefined && (typeof amount !== 'number' || amount <= 0)) {
+      res.status(400).json({ message: 'amount must be a positive number.' });
       return;
     }
-    if (isNaN(index) || index < 0 || index >= invoice.payments.length) {
-      res.status(400).json({ message: 'Invalid payment index' });
+    if (method !== undefined && !['cash', 'online'].includes(method)) {
+      res.status(400).json({ message: "method must be 'cash' or 'online'." });
+      return;
+    }
+    const parsedDate = date !== undefined ? new Date(date) : undefined;
+    if (parsedDate && Number.isNaN(parsedDate.getTime())) {
+      res.status(400).json({ message: 'Invalid payment date.' });
       return;
     }
 
-    if (amount !== undefined) {
-      if (typeof amount !== 'number' || amount <= 0) {
-        res.status(400).json({ message: 'amount must be a positive number.' });
-        return;
+    await mutateInvoice(String(req.params.id), (invoice) => {
+      if (isNaN(index) || index < 0 || index >= invoice.payments.length) {
+        throw new InvoiceHttpError(400, 'Invalid payment index');
       }
-      invoice.payments[index].amount = amount;
-    }
-    if (method !== undefined) {
-      if (!['cash', 'online'].includes(method)) {
-        res.status(400).json({ message: "method must be 'cash' or 'online'." });
-        return;
-      }
-      invoice.payments[index].method = method;
-    }
-    if (date !== undefined) {
-      const parsedDate = new Date(date);
-      if (Number.isNaN(parsedDate.getTime())) {
-        res.status(400).json({ message: 'Invalid payment date.' });
-        return;
-      }
-      invoice.payments[index].date = parsedDate;
-    }
+      const payment = invoice.payments[index];
+      if (amount !== undefined) payment.amount = amount;
+      if (method !== undefined) payment.method = method;
+      if (parsedDate) payment.date = parsedDate;
 
-    const totalSettled = invoice.payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
-    if (totalSettled > invoice.total + 0.01) {
-      res.status(400).json({ message: 'Total payments exceed invoice total.' });
-      return;
-    }
-    if (totalSettled >= invoice.total) {
-      const last = invoice.payments[invoice.payments.length - 1];
-      invoice.billClearDate = last?.date ?? new Date();
-    } else {
-      invoice.billClearDate = undefined;
-    }
+      const totalSettled = sumSettled(invoice.payments);
+      if (totalSettled > invoice.total + 0.01) throw new InvoiceHttpError(400, 'Total payments exceed invoice total.');
+      if (totalSettled >= invoice.total) {
+        invoice.billClearDate = invoice.payments[invoice.payments.length - 1]?.date ?? new Date();
+      } else {
+        delete invoice.billClearDate;
+      }
+    });
 
-    await invoice.save();
-    const populated = await populateInvoice(Invoice.findById(invoice._id));
-    res.json(populated);
+    await respondWithInvoice(res, String(req.params.id));
   } catch (error) {
+    if (sendHttpError(error, res)) return;
     next(error);
   }
 };
@@ -967,30 +884,22 @@ export const updatePayment = async (req: Request, res: Response, next: NextFunct
 export const deletePayment = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const index = parseInt(String(req.params.paymentIndex), 10);
-    const invoice = await Invoice.findById(req.params.id);
-    if (!invoice) {
-      res.status(404).json({ message: 'Invoice not found' });
-      return;
-    }
-    if (isNaN(index) || index < 0 || index >= invoice.payments.length) {
-      res.status(400).json({ message: 'Invalid payment index' });
-      return;
-    }
 
-    invoice.payments.splice(index, 1);
+    await mutateInvoice(String(req.params.id), (invoice) => {
+      if (isNaN(index) || index < 0 || index >= invoice.payments.length) {
+        throw new InvoiceHttpError(400, 'Invalid payment index');
+      }
+      invoice.payments.splice(index, 1);
+      if (sumSettled(invoice.payments) >= invoice.total) {
+        invoice.billClearDate = invoice.payments[invoice.payments.length - 1]?.date ?? new Date();
+      } else {
+        delete invoice.billClearDate;
+      }
+    });
 
-    const totalSettled = invoice.payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
-    if (totalSettled >= invoice.total) {
-      const last = invoice.payments[invoice.payments.length - 1];
-      invoice.billClearDate = last?.date ?? new Date();
-    } else {
-      invoice.billClearDate = undefined;
-    }
-
-    await invoice.save();
-    const populated = await populateInvoice(Invoice.findById(invoice._id));
-    res.json(populated);
+    await respondWithInvoice(res, String(req.params.id));
   } catch (error) {
+    if (sendHttpError(error, res)) return;
     next(error);
   }
 };
@@ -999,38 +908,42 @@ export const deletePayment = async (req: Request, res: Response, next: NextFunct
 
 export const deleteInvoice = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const invoice = await Invoice.findById(req.params.id);
-    if (!invoice) {
-      res.status(404).json({ message: 'Invoice not found' });
-      return;
-    }
+    const invoiceId = String(req.params.id);
 
-    // Restore frame variant stock for each frame item that had a colour selected
-    const invoiceItems = await InvoiceItem.find({ _id: { $in: invoice.items } });
-    for (const invoiceItem of invoiceItems) {
-      if (invoiceItem.frame && invoiceItem.frameVariantLabel) {
-        const frameDoc = await Frame.findById(invoiceItem.frame);
-        if (frameDoc?.web?.frameVariants?.length) {
-          const varIdx = frameDoc.web.frameVariants.findIndex((v: any) => {
-            const computed = v.label || v.colors.map((c: any) => c.name).join(' + ');
-            return computed === invoiceItem.frameVariantLabel;
-          });
-          if (varIdx >= 0) {
-            await Frame.updateOne(
-              { _id: invoiceItem.frame },
-              { $inc: { [`web.frameVariants.${varIdx}.stock`]: invoiceItem.quantity } },
-            );
-          }
+    await runModelTransaction(async (t) => {
+      const invoice = await t.get<any>(Invoice, invoiceId);
+      if (!invoice) throw new InvoiceHttpError(404, 'Invoice not found');
+      const itemIds: string[] = (invoice.items ?? []).map(idOf);
+      const items = await t.getMany<any>(InvoiceItem, itemIds);
+
+      // Restore frame variant stock for frame items that had a colour selected.
+      const frameIds = [...items.values()].filter((i) => i.frame && i.frameVariantLabel).map((i) => idOf(i.frame));
+      const frames = await t.getMany<any>(Frame, frameIds);
+      const restored = new Map<string, any[]>();
+      for (const item of items.values()) {
+        if (!item.frame || !item.frameVariantLabel) continue;
+        const id = idOf(item.frame);
+        const variants = restored.get(id) ?? frames.get(id)?.web?.frameVariants?.map((v: any) => ({ ...v }));
+        if (!variants?.length) continue;
+        const idx = variants.findIndex((v: any) => frameVariantName(v) === item.frameVariantLabel);
+        if (idx >= 0) {
+          variants[idx].stock = (variants[idx].stock || 0) + item.quantity;
+          restored.set(id, variants);
         }
       }
-    }
 
-    await Invoice.findByIdAndDelete(req.params.id);
-    await InvoiceItem.deleteMany({ _id: { $in: invoice.items } });
-    await PurchaseEntry.deleteMany({ purchaseInvoiceId: req.params.id, status: 'pending' }).catch(() => {});
+      for (const [id, variants] of restored) {
+        await t.update(Frame, id, { $set: { 'web.frameVariants': variants } }, frames.get(id) ?? null);
+      }
+      for (const id of itemIds) t.delete(InvoiceItem, id);
+      t.delete(Invoice, invoiceId);
+    });
+
+    await PurchaseEntry.deleteMany({ purchaseInvoiceId: invoiceId, status: 'pending' }).catch(() => {});
     invalidateInvoiceLookupCache();
     res.json({ message: 'Invoice deleted' });
   } catch (error) {
+    if (sendHttpError(error, res)) return;
     next(error);
   }
 };
@@ -1039,16 +952,10 @@ export const deleteInvoice = async (req: Request, res: Response, next: NextFunct
 
 export const addItemToInvoice = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const invoiceId = req.params.id;
-    const invoice = await Invoice.findById(invoiceId);
-    if (!invoice) {
-      res.status(404).json({ message: 'Invoice not found' });
-      return;
-    }
-
+    const invoiceId = String(req.params.id);
     const body = req.body as any;
-    
-    // Auto-resolve optical lens if type is opticalLens or (untyped and no frame/fragrance) lens fields are present
+
+    // Lens items without a catalog reference are matched to (or added to) the lens catalog.
     const isLens =
       body.type === 'opticalLens' ||
       (!body.type && !body.frame && !body.fragrance && (
@@ -1060,54 +967,28 @@ export const addItemToInvoice = async (req: Request, res: Response, next: NextFu
         body.leftSpherical !== undefined
       ));
 
+    let newCatalogLens: CatalogLensFilter | null = null;
     if (isLens && (!body.opticalLens || !isValidId(body.opticalLens))) {
-      const brand = body.lensBrand?.trim() || body.lensCompany?.trim() || 'Custom';
-      const name = body.lensName?.trim() || body.lensType?.trim() || 'Single Vision';
-      const category = body.lensCategory || body.lensType || 'Single Vision';
-
-      const filter = {
-        brand,
-        name,
-        category,
+      const filter: CatalogLensFilter = {
+        brand: body.lensBrand?.trim() || body.lensCompany?.trim() || 'Custom',
+        name: body.lensName?.trim() || body.lensType?.trim() || 'Single Vision',
+        category: body.lensCategory || body.lensType || 'Single Vision',
         index: body.lensIndex || null,
         coating: body.lensCoating || null,
         spherical: body.spherical === undefined ? null : body.spherical,
         cylinder: body.cylinder === undefined ? null : body.cylinder,
         addition: body.addition === undefined ? null : body.addition,
       };
-
-      let lensDoc = await OpticalLens.findOne({
-        brand: { $regex: new RegExp(`^${escapeRegExp(filter.brand)}$`, 'i') },
-        name: { $regex: new RegExp(`^${escapeRegExp(filter.name)}$`, 'i') },
-        category: filter.category,
-        index: filter.index,
-        coating: filter.coating,
-        spherical: filter.spherical,
-        cylinder: filter.cylinder,
-        addition: filter.addition,
-      } as any);
-
-      if (!lensDoc) {
-        try {
-          lensDoc = await OpticalLens.create({ ...filter, sellPrice: body.price } as any);
-        } catch (err: any) {
-          if (err.code === 11000) {
-            lensDoc = await OpticalLens.findOne(filter as any);
-          }
-        }
-      }
-
-      if (lensDoc) {
-        body.opticalLens = lensDoc._id;
-      }
+      const found = await findCatalogLens(filter);
+      if (found) body.opticalLens = idOf(found._id);
+      else newCatalogLens = filter;
     }
 
-    const refCount = [body.frame, body.opticalLens, body.fragrance].filter(Boolean).length;
+    const refCount = [body.frame, body.opticalLens || newCatalogLens, body.fragrance].filter(Boolean).length;
     if (refCount > 1) {
       res.status(400).json({ message: 'Each invoice item cannot reference more than one of: frame, opticalLens, fragrance' });
       return;
     }
-    
     if (typeof body.quantity !== 'number' || body.quantity <= 0) {
       res.status(400).json({ message: 'Quantity must be a positive number.' });
       return;
@@ -1116,78 +997,76 @@ export const addItemToInvoice = async (req: Request, res: Response, next: NextFu
       res.status(400).json({ message: 'Price must be a non-negative number.' });
       return;
     }
-    
-    const doc: any = {
-      quantity: body.quantity,
-      price: body.price,
-    };
-    if ((body.type === 'frame' || body.frame) && body.frame) doc.frame = body.frame;
-    if ((body.type === 'fragrance' || body.fragrance) && body.fragrance) {
-      doc.fragrance = body.fragrance;
-      if (body.fragranceGrade) doc.fragranceGrade = body.fragranceGrade;
-    }
-    if (isLens || body.type === 'opticalLens' || body.opticalLens) {
-      if (body.opticalLens) doc.opticalLens = body.opticalLens;
-      doc.prescription = body.prescription;
-      doc.eye = body.eye || 'both';
-      doc.userName = body.userName;
-      doc.spherical = body.spherical;
-      doc.cylinder = body.cylinder;
-      doc.axis = body.axis;
-      doc.addition = body.addition;
-      doc.lensLabel = body.lensLabel;
-      doc.lensBrand = body.lensBrand || null;
-      doc.lensName = body.lensName || null;
-      doc.lensCategory = body.lensCategory || null;
-      doc.lensIndex = body.lensIndex || null;
-      doc.lensCoating = body.lensCoating || null;
-      doc.lensMaterial = body.lensMaterial || null;
-      doc.lensColor = body.lensColor || null;
-      doc.lensCompany = body.lensCompany || null;
-      doc.lensType = body.lensType || null;
-      doc.rightEyeNumber = body.rightEyeNumber || null;
-      doc.leftEyeNumber = body.leftEyeNumber || null;
-      doc.rightSpherical = body.rightSpherical;
-      doc.rightCylinder = body.rightCylinder;
-      doc.rightAxis = body.rightAxis;
-      doc.rightAddition = body.rightAddition;
-      doc.leftSpherical = body.leftSpherical;
-      doc.leftCylinder = body.leftCylinder;
-      doc.leftAxis = body.leftAxis;
-      doc.leftAddition = body.leftAddition;
-      doc.isCustomLens = body.isCustomLens ?? !body.opticalLens;
-    }
 
-    const invoiceItem = await InvoiceItem.create(doc);
-    invoice.items.push(invoiceItem._id as mongoose.Types.ObjectId);
-    
-    // Recalc total
-    const allItems = await InvoiceItem.find({ _id: { $in: invoice.items } });
-    const subtotal = allItems.reduce((sum, item) => sum + item.quantity * item.price, 0);
-    const total = subtotal - invoice.discount;
-    
-    invoice.subtotal = subtotal;
-    invoice.total = total;
-    
-    const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
-    if (totalPaid >= total) {
-      invoice.billClearDate = new Date();
-    } else {
-      invoice.billClearDate = undefined;
-    }
-    
-    await invoice.save();
+    await mutateInvoice(
+      invoiceId,
+      async (invoice, items, t) => {
+        if (newCatalogLens) {
+          const created = await t.create<any>(OpticalLens, { ...newCatalogLens, sellPrice: body.price });
+          body.opticalLens = created.id;
+        }
 
-    // Auto-create pending purchase entries if lens item was added
+        const doc: any = {
+          quantity: body.quantity,
+          price: body.price,
+          invoice: invoiceId,
+          invoiceId,
+          invoiceNumber: invoice.invoiceNumber,
+        };
+        if ((body.type === 'frame' || body.frame) && body.frame) doc.frame = body.frame;
+        if ((body.type === 'fragrance' || body.fragrance) && body.fragrance) {
+          doc.fragrance = body.fragrance;
+          if (body.fragranceGrade) doc.fragranceGrade = body.fragranceGrade;
+        }
+        if (isLens || body.type === 'opticalLens' || body.opticalLens) {
+          if (body.opticalLens) doc.opticalLens = body.opticalLens;
+          doc.prescription = body.prescription;
+          doc.eye = body.eye || 'both';
+          doc.userName = body.userName;
+          doc.spherical = body.spherical;
+          doc.cylinder = body.cylinder;
+          doc.axis = body.axis;
+          doc.addition = body.addition;
+          doc.lensLabel = body.lensLabel;
+          doc.lensBrand = body.lensBrand || null;
+          doc.lensName = body.lensName || null;
+          doc.lensCategory = body.lensCategory || null;
+          doc.lensIndex = body.lensIndex || null;
+          doc.lensCoating = body.lensCoating || null;
+          doc.lensMaterial = body.lensMaterial || null;
+          doc.lensColor = body.lensColor || null;
+          doc.lensCompany = body.lensCompany || null;
+          doc.lensType = body.lensType || null;
+          doc.rightEyeNumber = body.rightEyeNumber || null;
+          doc.leftEyeNumber = body.leftEyeNumber || null;
+          doc.rightSpherical = body.rightSpherical;
+          doc.rightCylinder = body.rightCylinder;
+          doc.rightAxis = body.rightAxis;
+          doc.rightAddition = body.rightAddition;
+          doc.leftSpherical = body.leftSpherical;
+          doc.leftCylinder = body.leftCylinder;
+          doc.leftAxis = body.leftAxis;
+          doc.leftAddition = body.leftAddition;
+          doc.isCustomLens = body.isCustomLens ?? !body.opticalLens;
+        }
+
+        const created = await t.create<any>(InvoiceItem, doc);
+        invoice.items.push(created.id);
+        items.set(created.id, created);
+        recalcFromItems(invoice, items);
+      },
+      { loadItems: true },
+    );
+
     try {
-      await createPendingPurchasesForInvoice(invoice._id);
+      await createPendingPurchasesForInvoice(invoiceId);
     } catch (purchaseErr) {
       console.warn('[addItemToInvoice] Auto-create pending purchase error:', purchaseErr);
     }
 
-    const populated = await populateInvoice(Invoice.findById(invoice._id));
-    res.json(populated);
+    await respondWithInvoice(res, invoiceId);
   } catch (error) {
+    if (sendHttpError(error, res)) return;
     next(error);
   }
 };
@@ -1196,51 +1075,26 @@ export const addItemToInvoice = async (req: Request, res: Response, next: NextFu
 
 export const removeItemFromInvoice = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const id = req.params.id as string;
-    const itemIndex = req.params.itemIndex as string;
-    const index = parseInt(itemIndex, 10);
-    
-    const invoice = await Invoice.findById(id);
-    if (!invoice) {
-      res.status(404).json({ message: 'Invoice not found' });
-      return;
-    }
-    
-    if (invoice.items.length <= 1) {
-      res.status(400).json({ message: 'Invoice must have at least one item' });
-      return;
-    }
-    
-    if (index < 0 || index >= invoice.items.length) {
-      res.status(400).json({ message: 'Invalid item index' });
-      return;
-    }
-    
-    const itemToRemoveId = invoice.items[index];
-    invoice.items.splice(index, 1);
-    
-    await InvoiceItem.findByIdAndDelete(itemToRemoveId);
-    
-    // Recalc total
-    const allItems = await InvoiceItem.find({ _id: { $in: invoice.items } });
-    const subtotal = allItems.reduce((sum, item) => sum + item.quantity * item.price, 0);
-    const total = subtotal - invoice.discount;
-    
-    invoice.subtotal = subtotal;
-    invoice.total = total;
-    
-    const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
-    if (totalPaid >= total) {
-      invoice.billClearDate = new Date();
-    } else {
-      invoice.billClearDate = undefined;
-    }
-    
-    await invoice.save();
-    
-    const populated = await populateInvoice(Invoice.findById(invoice._id));
-    res.json(populated);
+    const invoiceId = String(req.params.id);
+    const index = parseInt(String(req.params.itemIndex), 10);
+
+    await mutateInvoice(
+      invoiceId,
+      (invoice, items, t) => {
+        if (invoice.items.length <= 1) throw new InvoiceHttpError(400, 'Invoice must have at least one item');
+        if (isNaN(index) || index < 0 || index >= invoice.items.length) throw new InvoiceHttpError(400, 'Invalid item index');
+
+        const [removedId] = invoice.items.splice(index, 1);
+        t.delete(InvoiceItem, removedId);
+        items.delete(removedId);
+        recalcFromItems(invoice, items);
+      },
+      { loadItems: true },
+    );
+
+    await respondWithInvoice(res, invoiceId);
   } catch (error) {
+    if (sendHttpError(error, res)) return;
     next(error);
   }
 };
@@ -1297,9 +1151,10 @@ export const renumberAllInvoices = async (_req: Request, res: Response, next: Ne
 
 export const updateItemInInvoice = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { id, itemId } = req.params;
+    const invoiceId = String(req.params.id);
+    const itemId = String(req.params.itemId);
     const { quantity, price, fragranceGrade } = req.body;
-    
+
     if (typeof quantity !== 'number' || quantity <= 0) {
       res.status(400).json({ message: 'Quantity must be a positive number.' });
       return;
@@ -1308,44 +1163,24 @@ export const updateItemInInvoice = async (req: Request, res: Response, next: Nex
       res.status(400).json({ message: 'Price must be a non-negative number.' });
       return;
     }
-    
-    const invoice = await Invoice.findById(id);
-    if (!invoice) {
-      res.status(404).json({ message: 'Invoice not found' });
-      return;
-    }
-    
-    if (!invoice.items.includes(itemId as any)) {
-      res.status(400).json({ message: 'Item does not belong to this invoice' });
-      return;
-    }
-    
-    const updateItemPayload: any = { quantity, price };
-    if (fragranceGrade !== undefined) {
-      updateItemPayload.fragranceGrade = fragranceGrade;
-    }
-    await InvoiceItem.findByIdAndUpdate(itemId, updateItemPayload, { returnDoc: false });
-    
-    // Recalc total
-    const allItems = await InvoiceItem.find({ _id: { $in: invoice.items } });
-    const subtotal = allItems.reduce((sum, item) => sum + item.quantity * item.price, 0);
-    const total = subtotal - invoice.discount;
-    
-    invoice.subtotal = subtotal;
-    invoice.total = total;
-    
-    const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
-    if (totalPaid >= total) {
-      invoice.billClearDate = new Date();
-    } else {
-      invoice.billClearDate = undefined;
-    }
-    
-    await invoice.save();
-    
-    const populated = await populateInvoice(Invoice.findById(invoice._id));
-    res.json(populated);
+
+    await mutateInvoice(
+      invoiceId,
+      async (invoice, items, t) => {
+        if (!invoice.items.includes(itemId)) throw new InvoiceHttpError(400, 'Item does not belong to this invoice');
+        const existing = items.get(itemId) ?? null;
+        const update: Record<string, any> = { quantity, price };
+        if (fragranceGrade !== undefined) update.fragranceGrade = fragranceGrade;
+        await t.update(InvoiceItem, itemId, update, existing);
+        if (existing) items.set(itemId, { ...existing, ...update });
+        recalcFromItems(invoice, items);
+      },
+      { loadItems: true },
+    );
+
+    await respondWithInvoice(res, invoiceId);
   } catch (error) {
+    if (sendHttpError(error, res)) return;
     next(error);
   }
 };
