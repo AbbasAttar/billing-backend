@@ -4,7 +4,7 @@ import { env, isProduction } from './config/env';
 import { connectDB } from './config/database';
 import { errorHandler } from './middleware/errorHandler';
 import { readMeter } from './middleware/readMeter';
-import { requireAdmin } from './middleware/auth';
+import { authorizeByPolicy, whoAmI } from './middleware/auth';
 import { aiRateLimit } from './middleware/rateLimits';
 
 import customerRoutes from './routes/customer.routes';
@@ -128,9 +128,13 @@ apiRouter.use('/public', publicRoutes);
 apiRouter.use('/auth',   authRoutes);
 apiRouter.use('/razorpay', razorpayRoutes);
 
-// Everything else is staff-only: requires a Firebase ID token for an admin user
+// Signed-in admin/staff user and role (the admin app calls this after Google sign-in)
+apiRouter.get('/me', whoAmI);
+
+// Everything else needs a Firebase ID token for an admin or staff user; the access policy
+// (middleware/accessPolicy.ts) decides which role each method + path needs.
 const adminRouter = express.Router();
-adminRouter.use(requireAdmin);
+adminRouter.use(authorizeByPolicy);
 adminRouter.use('/ai', aiRateLimit);
 adminRouter.use('/customers', customerRoutes);
 adminRouter.use('/optical-numbers', opticalNumberRoutes); // legacy — kept for backward compat

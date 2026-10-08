@@ -1,5 +1,8 @@
 import dotenv from 'dotenv';
 
+const emailList = (v: string | undefined) =>
+  (v ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+
 // Tests must never pick up real secrets or Firebase credentials from .env.
 if (!process.env.VITEST) dotenv.config({ override: true });
 
@@ -20,14 +23,15 @@ export const env = {
   GEMINI_API_KEY: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '',
   GEMINI_MODEL: process.env.GEMINI_MODEL || 'gemini-3.6-flash',
   // Auth
-  // When false, missing/invalid credentials are logged ([AUTH] ...) but the request still proceeds,
-  // so the admin app and storefront can be migrated to send tokens before enforcement is switched on.
-  AUTH_ENFORCE: process.env.AUTH_ENFORCE === 'true',
-  // Comma-separated Firebase Auth emails allowed to use the admin API (in addition to the `admin` custom claim).
-  ADMIN_EMAILS: (process.env.ADMIN_EMAILS ?? '')
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean),
+  // When an enforce flag is false, missing/invalid credentials are logged ([AUTH] ...) but the request
+  // still proceeds, so each frontend can start sending tokens before enforcement is switched on.
+  // STAFF_* covers the admin/POS app; CUSTOMER_* covers the storefront. AUTH_ENFORCE=true turns on both.
+  STAFF_AUTH_ENFORCE: process.env.STAFF_AUTH_ENFORCE === 'true' || process.env.AUTH_ENFORCE === 'true',
+  CUSTOMER_AUTH_ENFORCE: process.env.CUSTOMER_AUTH_ENFORCE === 'true' || process.env.AUTH_ENFORCE === 'true',
+  // Comma-separated Google (Firebase Auth) emails. Admins see everything; staff get the counter/POS areas.
+  // The `role` custom claim ("admin" | "staff") or legacy `admin: true` claim also work.
+  ADMIN_EMAILS: emailList(process.env.ADMIN_EMAILS),
+  STAFF_EMAILS: emailList(process.env.STAFF_EMAILS),
   CUSTOMER_TOKEN_SECRET: process.env.CUSTOMER_TOKEN_SECRET ?? '',
   INTERNAL_API_SECRET: process.env.INTERNAL_API_SECRET ?? '',
 };
@@ -50,14 +54,16 @@ export function checkEnv(): void {
   if (!env.RAZORPAY_WEBHOOK_SECRET) missing.push('RAZORPAY_WEBHOOK_SECRET (webhooks will be rejected)');
   if (!env.CUSTOMER_TOKEN_SECRET) missing.push('CUSTOMER_TOKEN_SECRET (no customer session tokens)');
   if (!env.INTERNAL_API_SECRET) missing.push('INTERNAL_API_SECRET');
-  if (env.ADMIN_EMAILS.length === 0) missing.push('ADMIN_EMAILS (only users with the admin claim can use the admin API)');
+  if (env.ADMIN_EMAILS.length === 0) missing.push('ADMIN_EMAILS (only users with an admin claim can use admin areas)');
   if (missing.length) console.warn(`[ENV] Missing settings:\n  - ${missing.join('\n  - ')}`);
 
-  if (env.AUTH_ENFORCE && !env.CUSTOMER_TOKEN_SECRET) {
-    throw new Error('AUTH_ENFORCE=true requires CUSTOMER_TOKEN_SECRET');
+  if (env.CUSTOMER_AUTH_ENFORCE && !env.CUSTOMER_TOKEN_SECRET) {
+    throw new Error('CUSTOMER_AUTH_ENFORCE requires CUSTOMER_TOKEN_SECRET');
   }
-  if (!env.AUTH_ENFORCE) {
-    console.warn('[ENV] AUTH_ENFORCE is off: unauthenticated admin/customer calls are logged, not blocked.');
+  if (env.STAFF_AUTH_ENFORCE && env.ADMIN_EMAILS.length === 0) {
+    throw new Error('STAFF_AUTH_ENFORCE requires ADMIN_EMAILS (or nobody could administer the app)');
   }
+  if (!env.STAFF_AUTH_ENFORCE) console.warn('[ENV] STAFF_AUTH_ENFORCE is off: admin-app calls without a valid sign-in are logged, not blocked.');
+  if (!env.CUSTOMER_AUTH_ENFORCE) console.warn('[ENV] CUSTOMER_AUTH_ENFORCE is off: storefront calls without a session token are logged, not blocked.');
 }
 

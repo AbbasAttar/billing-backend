@@ -296,7 +296,7 @@ export const getMyOrders = async (req: Request, res: Response, next: NextFunctio
       phone = req.customerPhone;
       const user = await User.findOne({ phone }, { email: 1, emailVerified: 1 }).lean() as any;
       email = user?.emailVerified && user.email ? String(user.email).toLowerCase() : undefined;
-    } else if (env.AUTH_ENFORCE) {
+    } else if (env.CUSTOMER_AUTH_ENFORCE) {
       res.status(401).json({ success: false, message: 'Authentication required' });
       return;
     } else {
@@ -417,7 +417,7 @@ export const getInvoiceById = async (req: Request, res: Response, next: NextFunc
     const phone = req.customerPhone ?? (req.query.phone as string | undefined)?.replace(/\D/g, '').trim();
     if (!phone) {
       // Previously an invoice could be read by id alone; ownership is now always checked.
-      res.status(env.AUTH_ENFORCE ? 401 : 400).json({ success: false, message: 'phone required' });
+      res.status(env.CUSTOMER_AUTH_ENFORCE ? 401 : 400).json({ success: false, message: 'phone required' });
       return;
     }
 

@@ -54,13 +54,14 @@ function userDoc(over: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  env.AUTH_ENFORCE = true;
+  env.STAFF_AUTH_ENFORCE = env.CUSTOMER_AUTH_ENFORCE = true;
   env.NODE_ENV = 'test';
   env.CUSTOMER_TOKEN_SECRET = 'test-secret';
   env.INTERNAL_API_SECRET = 'internal-secret';
   env.RAZORPAY_KEY_SECRET = 'rzp-key-secret';
   env.RAZORPAY_WEBHOOK_SECRET = 'rzp-webhook-secret';
   env.ADMIN_EMAILS = ['owner@shop.com'];
+  env.STAFF_EMAILS = ['counter@shop.com'];
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
@@ -94,7 +95,7 @@ describe('admin routes', () => {
   });
 
   it('with AUTH_ENFORCE off the request reaches the handler', async () => {
-    env.AUTH_ENFORCE = false;
+    env.STAFF_AUTH_ENFORCE = env.CUSTOMER_AUTH_ENFORCE = false;
     Order.find.mockReturnValue(chain([]));
     const res = await request(app).get('/api/razorpay/orders');
     expect([401, 403]).not.toContain(res.status);
@@ -167,7 +168,7 @@ describe('/auth', () => {
   });
 
   it('reauth-token is refused for a bare phone even with AUTH_ENFORCE off', async () => {
-    env.AUTH_ENFORCE = false;
+    env.STAFF_AUTH_ENFORCE = env.CUSTOMER_AUTH_ENFORCE = false;
     const res = await request(app).post('/api/auth/reauth-token').send({ phone: PHONE });
     expect(res.status).toBe(401);
   });
@@ -249,7 +250,7 @@ describe('/public per-user endpoints', () => {
   });
 
   it('my-orders escapes regex characters in a legacy email', async () => {
-    env.AUTH_ENFORCE = false;
+    env.STAFF_AUTH_ENFORCE = env.CUSTOMER_AUTH_ENFORCE = false;
     Order.find.mockReturnValue(chain([]));
     await request(app).get('/api/public/my-orders?email=.*');
     const re = Order.find.mock.calls[0][0].customerEmail.$regex as RegExp;
@@ -264,7 +265,7 @@ describe('/public per-user endpoints', () => {
   });
 
   it('invoice detail is never readable by id alone', async () => {
-    env.AUTH_ENFORCE = false;
+    env.STAFF_AUTH_ENFORCE = env.CUSTOMER_AUTH_ENFORCE = false;
     const res = await request(app).get('/api/public/invoices/inv1');
     expect(res.status).toBe(400);
     expect(Invoice.findById).not.toHaveBeenCalled();
@@ -362,7 +363,7 @@ describe('production detection', () => {
 
   it('error responses carry no stack trace in production', async () => {
     process.env.K_SERVICE = 'api';
-    env.AUTH_ENFORCE = false;
+    env.STAFF_AUTH_ENFORCE = env.CUSTOMER_AUTH_ENFORCE = false;
     Order.find.mockImplementation(() => { throw new Error('boom'); });
     try {
       const res = await request(app).get('/api/razorpay/orders');
@@ -371,5 +372,53 @@ describe('production detection', () => {
     } finally {
       delete process.env.K_SERVICE;
     }
+  });
+});
+
+// ── Staff vs admin ────────────────────────────────────────────────────────────
+describe('roles over HTTP', () => {
+  const asStaff = () => verifyIdToken.mockResolvedValue({ uid: 's1', email: 'counter@shop.com', email_verified: true });
+  const asAdmin = () => verifyIdToken.mockResolvedValue({ uid: 'a1', email: 'owner@shop.com', email_verified: true });
+  const auth = { Authorization: 'Bearer firebase-id-token' };
+
+  it('/me returns the role, and 401/403 for no token or an unlisted user', async () => {
+    asStaff();
+    const me = await request(app).get('/api/me').set(auth);
+    expect(me.status).toBe(200);
+    expect(me.body.data).toMatchObject({ email: 'counter@shop.com', role: 'staff' });
+
+    expect((await request(app).get('/api/me')).status).toBe(401);
+    verifyIdToken.mockResolvedValue({ uid: 'x', email: 'stranger@gmail.com', email_verified: true });
+    expect((await request(app).get('/api/me').set(auth)).status).toBe(403);
+  });
+
+  it('/me always needs a token, even with enforcement off', async () => {
+    env.STAFF_AUTH_ENFORCE = env.CUSTOMER_AUTH_ENFORCE = false;
+    expect((await request(app).get('/api/me')).status).toBe(401);
+  });
+
+  it('staff reach counter endpoints but not admin areas', async () => {
+    asStaff();
+    Order.find.mockReturnValue(chain([]));
+    expect((await request(app).get('/api/razorpay/orders').set(auth)).status).toBe(200);
+    expect((await request(app).get('/api/analytics/sales').set(auth)).status).toBe(403);
+    expect((await request(app).get('/api/expenses').set(auth)).status).toBe(403);
+    expect((await request(app).post('/api/ai/data-chat').set(auth).send({})).status).toBe(403);
+    expect((await request(app).delete('/api/invoices/abc').set(auth)).status).toBe(403);
+    expect((await request(app).post('/api/invoices/renumber').set(auth)).status).toBe(403);
+    expect((await request(app).delete('/api/razorpay/orders/o1').set(auth)).status).toBe(403);
+  });
+
+  it('a staff request to a counter endpoint gets past the guard', async () => {
+    asStaff();
+    // The handler then fails on the mocked-out data layer; the point is it is not 401/403.
+    const res = await request(app).get('/api/invoices/merged').set(auth);
+    expect([401, 403]).not.toContain(res.status);
+  });
+
+  it('admins reach admin areas', async () => {
+    asAdmin();
+    const res = await request(app).get('/api/analytics/sales').set(auth);
+    expect([401, 403]).not.toContain(res.status);
   });
 });

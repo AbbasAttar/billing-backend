@@ -3,7 +3,7 @@ import {
   createOrder, verifyPayment, listOrders, updateOrderStatus,
   setLensPrice, createBalanceOrder, verifyBalancePayment, deleteOrder,
 } from '../controllers/razorpay.controller';
-import { requireAdmin, attachCustomer } from '../middleware/auth';
+import { requireAdmin, requireStaff, attachCustomer } from '../middleware/auth';
 
 const router = Router();
 
@@ -15,10 +15,10 @@ router.post('/verify-payment', verifyPayment);
 router.post('/orders/:id/create-balance-order', attachCustomer, createBalanceOrder);
 router.post('/verify-balance-payment', verifyBalancePayment);
 
-// Admin endpoints
-router.get('/orders', requireAdmin, listOrders);
-router.patch('/orders/:id/status', requireAdmin, updateOrderStatus);
+// Admin-app endpoints: staff handle dispatch and lens quotes; only admins delete orders
+router.get('/orders', requireStaff, listOrders);
+router.patch('/orders/:id/status', requireStaff, updateOrderStatus);
 router.delete('/orders/:id', requireAdmin, deleteOrder);
-router.patch('/orders/:id/set-lens-price', requireAdmin, setLensPrice);
+router.patch('/orders/:id/set-lens-price', requireStaff, setLensPrice);
 
 export default router;

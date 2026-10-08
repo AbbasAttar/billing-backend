@@ -4,6 +4,8 @@ import { Invoice } from '../models/Invoice.model';
 import { VendorBill } from '../models/VendorBill.model';
 import { RecurringExpense } from '../models/RecurringExpense.model';
 import { fail, ok } from '../utils/response';
+import { env } from '../config/env';
+import { isAdminRequest } from '../middleware/auth';
 
 const MANAGER_PIN = '1959';
 
@@ -31,10 +33,14 @@ const isPastSettledDate = (date: Date): boolean => {
   return itemDate.getTime() < today.getTime();
 };
 
+// Past-dated records can only be changed by an admin. The old shared PIN is accepted only until
+// STAFF_AUTH_ENFORCE is on (it is visible in the admin app's code, so it is not a real secret), and
+// `managerOverride` is no longer honoured (any caller could set it).
 const checkManagerAuthorization = (req: Request): boolean => {
+  if (isAdminRequest(req)) return true;
+  if (env.STAFF_AUTH_ENFORCE) return false;
   const pin = req.body?.managerPin || req.headers['x-manager-pin'] || req.query?.managerPin;
-  const override = req.body?.managerOverride === true;
-  return pin === MANAGER_PIN || override;
+  return pin === MANAGER_PIN;
 };
 
 export const createExpense = async (req: Request, res: Response, next: NextFunction) => {
@@ -118,7 +124,7 @@ export const updateExpense = async (req: Request, res: Response, next: NextFunct
 
     // Historical lock protection: If record is from a past date, require Manager PIN
     if (isPastSettledDate(expense.date) && !checkManagerAuthorization(req)) {
-      return fail(res, 'Historical records created before today are locked. Manager PIN (1959) required to edit.', 403);
+      return fail(res, 'Historical records created before today are locked. Admin sign-in required to edit.', 403);
     }
 
     expense.date = parsedDate;
@@ -440,7 +446,7 @@ export const voidExpense = async (req: Request, res: Response, next: NextFunctio
 
     // Historical lock protection
     if (isPastSettledDate(expense.date) && !checkManagerAuthorization(req)) {
-      return fail(res, 'Historical records created before today are locked. Manager PIN (1959) required to void.', 403);
+      return fail(res, 'Historical records created before today are locked. Admin sign-in required to void.', 403);
     }
 
     expense.isVoid = true;
@@ -460,7 +466,7 @@ export const deleteExpense = async (req: Request, res: Response, next: NextFunct
 
     // Historical lock protection
     if (isPastSettledDate(expense.date) && !checkManagerAuthorization(req)) {
-      return fail(res, 'Historical records created before today are locked. Manager PIN (1959) required to delete.', 403);
+      return fail(res, 'Historical records created before today are locked. Admin sign-in required to delete.', 403);
     }
 
     if (typeof (expense as any).deleteOne === 'function') {

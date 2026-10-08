@@ -9,7 +9,7 @@ vi.mock('../src/lib/firebaseAdmin', () => ({
 
 import { env } from '../src/config/env';
 import { issueCustomerToken } from '../src/lib/sessionToken';
-import { requireAdmin, attachCustomer, customerPhoneFrom, customerOwns } from '../src/middleware/auth';
+import { requireAdmin, requireStaff, roleFor, attachCustomer, customerPhoneFrom, customerOwns } from '../src/middleware/auth';
 
 function mockRes() {
   const res: any = { statusCode: 200, body: undefined };
@@ -22,8 +22,9 @@ const mockReq = (headers: Record<string, string> = {}): any => ({
 });
 
 beforeEach(() => {
-  env.AUTH_ENFORCE = true;
+  env.STAFF_AUTH_ENFORCE = env.CUSTOMER_AUTH_ENFORCE = true;
   env.ADMIN_EMAILS = ['owner@shop.com'];
+  env.STAFF_EMAILS = ['counter@shop.com'];
   env.CUSTOMER_TOKEN_SECRET = 'test-secret';
   verifyIdToken.mockReset();
   vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -53,14 +54,14 @@ describe('requireAdmin', () => {
     verifyIdToken.mockResolvedValue({ uid: 'u1', admin: true });
     const { req, next } = await run({ authorization: 'Bearer ok' });
     expect(next).toHaveBeenCalled();
-    expect(req.admin).toEqual({ uid: 'u1', email: undefined });
+    expect(req.user).toEqual({ uid: 'u1', email: undefined, role: 'admin' });
   });
 
   it('allows a verified email from ADMIN_EMAILS (case-insensitive)', async () => {
     verifyIdToken.mockResolvedValue({ uid: 'u2', email: 'Owner@Shop.com', email_verified: true });
     const { req, next } = await run({ authorization: 'Bearer ok' });
     expect(next).toHaveBeenCalled();
-    expect(req.admin.email).toBe('owner@shop.com');
+    expect(req.user.email).toBe('owner@shop.com');
   });
 
   it('403 for a listed email that is not verified', async () => {
@@ -77,8 +78,15 @@ describe('requireAdmin', () => {
     expect(res.statusCode).toBe(403);
   });
 
+  it('a staff user is refused by requireAdmin', async () => {
+    verifyIdToken.mockResolvedValue({ uid: 'u5', email: 'counter@shop.com', email_verified: true });
+    const { res, next } = await run({ authorization: 'Bearer ok' });
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(403);
+  });
+
   it('logs but allows when AUTH_ENFORCE is off', async () => {
-    env.AUTH_ENFORCE = false;
+    env.STAFF_AUTH_ENFORCE = env.CUSTOMER_AUTH_ENFORCE = false;
     const { res, next } = await run({});
     expect(next).toHaveBeenCalled();
     expect(res.status).not.toHaveBeenCalled();
@@ -121,12 +129,12 @@ describe('attachCustomer + customerPhoneFrom', () => {
   });
 
   it('falls back to the request phone when not enforcing', () => {
-    env.AUTH_ENFORCE = false;
+    env.STAFF_AUTH_ENFORCE = env.CUSTOMER_AUTH_ENFORCE = false;
     expect(customerPhoneFrom(mockReq(), mockRes(), '98765 43210')).toBe('9876543210');
   });
 
   it('401 with neither token nor phone, even when not enforcing', () => {
-    env.AUTH_ENFORCE = false;
+    env.STAFF_AUTH_ENFORCE = env.CUSTOMER_AUTH_ENFORCE = false;
     const res = mockRes();
     expect(customerPhoneFrom(mockReq(), res, undefined)).toBeNull();
     expect(res.statusCode).toBe(401);
@@ -156,7 +164,28 @@ describe('customerOwns', () => {
     const res = mockRes();
     expect(customerOwns(req(), res, '9876543210')).toBe(false);
     expect(res.statusCode).toBe(401);
-    env.AUTH_ENFORCE = false;
+    env.STAFF_AUTH_ENFORCE = env.CUSTOMER_AUTH_ENFORCE = false;
     expect(customerOwns(req(), mockRes(), '9876543210')).toBe(true);
+  });
+});
+
+describe('roles', () => {
+  it('roleFor: claims win, then verified listed emails', () => {
+    expect(roleFor({ role: 'admin' })).toBe('admin');
+    expect(roleFor({ admin: true })).toBe('admin');
+    expect(roleFor({ role: 'staff', email: 'owner@shop.com', email_verified: true })).toBe('staff');
+    expect(roleFor({ email: 'OWNER@shop.com', email_verified: true })).toBe('admin');
+    expect(roleFor({ email: 'counter@shop.com', email_verified: true })).toBe('staff');
+    expect(roleFor({ email: 'counter@shop.com', email_verified: false })).toBeNull();
+    expect(roleFor({ email: 'stranger@gmail.com', email_verified: true })).toBeNull();
+  });
+
+  it('requireStaff lets staff and admins through', async () => {
+    for (const email of ['counter@shop.com', 'owner@shop.com']) {
+      verifyIdToken.mockResolvedValue({ uid: 'x', email, email_verified: true });
+      const req = mockReq({ authorization: 'Bearer ok' }), res = mockRes(), next = vi.fn();
+      await requireStaff(req, res, next);
+      expect(next).toHaveBeenCalled();
+    }
   });
 });
