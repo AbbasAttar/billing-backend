@@ -20,6 +20,7 @@ import {
 } from '../controllers/public.controller';
 
 import { publicCache, publicRateLimit } from '../middleware/publicCache';
+import { attachCustomer } from '../middleware/auth';
 
 const router = Router();
 
@@ -40,7 +41,8 @@ router.get('/lens-pricing-lookup', publicCache(300, 600), getLensPricingLookup);
 router.get('/coatings', publicCache(3600, 7200), getPublicCoatings);
 router.get('/colors', publicCache(3600, 7200), getPublicColors);
 
-// Per-user data: never cached.
+// Per-user data: never cached. Identity comes from the customer session token.
+router.use(['/my-orders', '/my-invoices', '/orders', '/invoices'], attachCustomer);
 router.get('/my-orders', getMyOrders);
 router.get('/my-invoices', getMyInvoices);
 router.get('/orders/:id', getOrderById);

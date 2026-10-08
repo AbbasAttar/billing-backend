@@ -4,6 +4,8 @@ import { env } from '../config/env';
 import { Order } from '../models/Order.model';
 import { sendNewOrderNotification } from '../services/fcm';
 import { generateInvoiceNumber } from '../utils/invoiceNumber';
+import { safeEqual } from '../lib/sessionToken';
+import { customerOwns } from '../middleware/auth';
 
 const RAZORPAY_API = 'https://api.razorpay.com/v1';
 
@@ -121,7 +123,7 @@ export const verifyPayment = async (req: Request, res: Response, next: NextFunct
       .update(`${razorpay_order_id}|${razorpay_payment_id}`)
       .digest('hex');
 
-    if (expected !== razorpay_signature) {
+    if (!safeEqual(expected, razorpay_signature)) {
       res.status(400).json({ message: 'Payment verification failed: signature mismatch' });
       return;
     }
@@ -168,15 +170,19 @@ export const handleWebhook = async (req: Request, res: Response, next: NextFunct
     // req.body is a raw Buffer (mounted before express.json())
     const rawBody = req.body as Buffer;
 
-    if (secret) {
-      const expected = crypto
-        .createHmac('sha256', secret)
-        .update(rawBody)
-        .digest('hex');
-      if (signature !== expected) {
-        res.status(400).json({ message: 'Invalid webhook signature' });
-        return;
-      }
+    // Without a configured secret the payload cannot be trusted, so reject rather than skip the check.
+    if (!secret) {
+      console.error('[razorpay] RAZORPAY_WEBHOOK_SECRET not set — webhook rejected');
+      res.status(503).json({ message: 'Webhook not configured' });
+      return;
+    }
+    const expected = crypto
+      .createHmac('sha256', secret)
+      .update(rawBody)
+      .digest('hex');
+    if (!safeEqual(signature, expected)) {
+      res.status(400).json({ message: 'Invalid webhook signature' });
+      return;
     }
 
     const payload = JSON.parse(rawBody.toString('utf8'));
@@ -235,6 +241,7 @@ export const createBalanceOrder = async (req: Request, res: Response, next: Next
     const order = await Order.findById(id).lean();
 
     if (!order) { res.status(404).json({ message: 'Order not found' }); return; }
+    if (!customerOwns(req, res, order.customerPhone)) return;
     if (!order.lensQuotePending) { res.status(400).json({ message: 'No lens quote pending on this order' }); return; }
     if (order.balancePaid) { res.status(400).json({ message: 'Balance already paid' }); return; }
     if (!order.adminLensPrice || order.adminLensPrice <= 0) {
@@ -285,13 +292,27 @@ export const verifyBalancePayment = async (req: Request, res: Response, next: Ne
       razorpay_signature: string;
     };
 
+    if (!orderId || !razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      res.status(400).json({ message: 'Missing payment verification fields' });
+      return;
+    }
+
     const expected = crypto
       .createHmac('sha256', env.RAZORPAY_KEY_SECRET)
       .update(`${razorpay_order_id}|${razorpay_payment_id}`)
       .digest('hex');
 
-    if (expected !== razorpay_signature) {
+    if (!safeEqual(expected, razorpay_signature)) {
       res.status(400).json({ message: 'Signature mismatch' });
+      return;
+    }
+
+    // The signature only proves *some* Razorpay payment succeeded. Bind it to this order's
+    // balance payment, otherwise any cheap paid order could mark another order's balance paid.
+    const existing = await Order.findById(orderId).lean();
+    if (!existing) { res.status(404).json({ message: 'Order not found' }); return; }
+    if (!existing.balanceRazorpayOrderId || existing.balanceRazorpayOrderId !== razorpay_order_id) {
+      res.status(400).json({ message: 'Payment does not belong to this order' });
       return;
     }
 

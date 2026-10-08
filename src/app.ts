@@ -1,9 +1,11 @@
 import express from 'express';
 import cors from 'cors';
-import { env } from './config/env';
+import { env, isProduction } from './config/env';
 import { connectDB } from './config/database';
 import { errorHandler } from './middleware/errorHandler';
 import { readMeter } from './middleware/readMeter';
+import { requireAdmin } from './middleware/auth';
+import { aiRateLimit } from './middleware/rateLimits';
 
 import customerRoutes from './routes/customer.routes';
 import opticalNumberRoutes from './routes/opticalNumber.routes';
@@ -60,14 +62,27 @@ const app = express();
 
 // Middleware
 const allowedOrigins = env.CORS_ORIGIN.split(',').map((s) => s.trim()).filter(Boolean);
+// Only origins this project controls. Firebase site names and project ids are globally unique,
+// so these patterns cannot be claimed by someone else (unlike a bare `*.web.app` match).
+const ownedOriginPatterns = [
+  /^https:\/\/(www\.)?attarwalaopticalhouse\.com$/,
+  /^https:\/\/(attarwala-46200|attarwala-admin)(--[a-z0-9-]+)?\.(web\.app|firebaseapp\.com)$/,
+  /^https:\/\/[a-z0-9-]+--attarwala-46200\.[a-z0-9-]+\.hosted\.app$/,
+];
+const localOrigin = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
+
 app.use(
   cors({
     origin: (origin, callback) => {
+      // No Origin header: server-to-server calls (Next.js SSR, NextAuth, cron, curl).
       if (!origin) return callback(null, true);
+      // localhost is dev-only, even if CORS_ORIGIN lists it.
+      if (localOrigin.test(origin)) return callback(null, !isProduction());
       if (allowedOrigins.includes(origin)) return callback(null, true);
-      if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return callback(null, true);
-      if (/^https?:\/\/(.*attarwala.*|.*hosted\.app|.*web\.app|.*firebaseapp\.com)$/.test(origin)) return callback(null, true);
-      return callback(null, true);
+      if (ownedOriginPatterns.some((re) => re.test(origin))) return callback(null, true);
+      // Capacitor app loads the live site, but keep its native origins working too.
+      if (origin === 'capacitor://localhost' || origin === 'https://localhost') return callback(null, true);
+      return callback(null, false);
     },
     credentials: true,
   })
@@ -108,56 +123,62 @@ apiRouter.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// API Routes mounted on apiRouter
-apiRouter.use('/customers', customerRoutes);
-apiRouter.use('/optical-numbers', opticalNumberRoutes); // legacy — kept for backward compat
-apiRouter.use('/optical-lenses', opticalLensRoutes);
-apiRouter.use('/prescriptions', prescriptionRoutes);
-apiRouter.use('/fragrances', fragranceRoutes);
-apiRouter.use('/frames', frameRoutes);
-apiRouter.use('/invoice-items', invoiceItemRoutes);
-apiRouter.use('/invoices', invoiceRoutes);
-apiRouter.use('/analytics', analyticsRoutes);
-apiRouter.use('/dashboard', dashboardRoutes);
-apiRouter.use('/cashflow', cashflowRoutes);
-apiRouter.use('/expenses', expenseRoutes);
-apiRouter.use('/vendor-bills', vendorBillRoutes);
-apiRouter.use('/payments', paymentsRoutes);
-apiRouter.use('/sales', salesRoutes);
-apiRouter.use('/inventory', inventoryIntelligenceRoutes);
-apiRouter.use('/personal-expenses', personalExpenseRoutes);
-apiRouter.use('/monthly-targets', monthlyTargetRoutes);
-apiRouter.use('/coatings', coatingRoutes);
-apiRouter.use('/lens-pricing', lensPricingRoutes);
-apiRouter.use('/lens-stock', lensStockRoutes);
-apiRouter.use('/frame-companies', frameCompanyRoutes);
-apiRouter.use('/frame-stock', frameStockRoutes);
-apiRouter.use('/frame-colors', frameColorRoutes);
-apiRouter.use('/marketing', marketingRoutes);
-apiRouter.use('/campaigns', campaignRoutes);
-apiRouter.use('/automation', automationRoutes);
-apiRouter.use('/lost-sales', lostSaleRoutes);
-apiRouter.use('/saving-goals', savingGoalRoutes);
-apiRouter.use('/recurring-expenses', recurringExpenseRoutes);
-apiRouter.use('/contact-lenses', contactLensRoutes);
+// Storefront-facing routes (their handlers do their own customer/admin checks)
 apiRouter.use('/public', publicRoutes);
 apiRouter.use('/auth',   authRoutes);
-apiRouter.use('/settings', siteSettingRoutes);
-apiRouter.use('/blog', blogRoutes);
 apiRouter.use('/razorpay', razorpayRoutes);
-apiRouter.use('/notifications', notificationRoutes);
-apiRouter.use('/debts', debtRoutes);
-apiRouter.use('/commitments', commitmentRoutes);
-apiRouter.use('/debt-config', debtConfigRoutes);
-apiRouter.use('/debt-payments', debtPaymentRoutes);
-apiRouter.use('/obligations', obligationRoutes);
-apiRouter.use('/obligation-payments', obligationPaymentRoutes);
-apiRouter.use('/finance', financeOverviewRoutes);
-apiRouter.use('/reports', lensReorderRoutes);
-apiRouter.use('/purchases', purchaseEntryRoutes);
-apiRouter.use('/wholesaler-queue', wholesalerQueueRoutes);
-apiRouter.use('/customer-requirements', customerRequirementRoutes);
-apiRouter.use('/ai', aiChatRoutes);
+
+// Everything else is staff-only: requires a Firebase ID token for an admin user
+const adminRouter = express.Router();
+adminRouter.use(requireAdmin);
+adminRouter.use('/ai', aiRateLimit);
+adminRouter.use('/customers', customerRoutes);
+adminRouter.use('/optical-numbers', opticalNumberRoutes); // legacy — kept for backward compat
+adminRouter.use('/optical-lenses', opticalLensRoutes);
+adminRouter.use('/prescriptions', prescriptionRoutes);
+adminRouter.use('/fragrances', fragranceRoutes);
+adminRouter.use('/frames', frameRoutes);
+adminRouter.use('/invoice-items', invoiceItemRoutes);
+adminRouter.use('/invoices', invoiceRoutes);
+adminRouter.use('/analytics', analyticsRoutes);
+adminRouter.use('/dashboard', dashboardRoutes);
+adminRouter.use('/cashflow', cashflowRoutes);
+adminRouter.use('/expenses', expenseRoutes);
+adminRouter.use('/vendor-bills', vendorBillRoutes);
+adminRouter.use('/payments', paymentsRoutes);
+adminRouter.use('/sales', salesRoutes);
+adminRouter.use('/inventory', inventoryIntelligenceRoutes);
+adminRouter.use('/personal-expenses', personalExpenseRoutes);
+adminRouter.use('/monthly-targets', monthlyTargetRoutes);
+adminRouter.use('/coatings', coatingRoutes);
+adminRouter.use('/lens-pricing', lensPricingRoutes);
+adminRouter.use('/lens-stock', lensStockRoutes);
+adminRouter.use('/frame-companies', frameCompanyRoutes);
+adminRouter.use('/frame-stock', frameStockRoutes);
+adminRouter.use('/frame-colors', frameColorRoutes);
+adminRouter.use('/marketing', marketingRoutes);
+adminRouter.use('/campaigns', campaignRoutes);
+adminRouter.use('/automation', automationRoutes);
+adminRouter.use('/lost-sales', lostSaleRoutes);
+adminRouter.use('/saving-goals', savingGoalRoutes);
+adminRouter.use('/recurring-expenses', recurringExpenseRoutes);
+adminRouter.use('/contact-lenses', contactLensRoutes);
+adminRouter.use('/settings', siteSettingRoutes);
+adminRouter.use('/blog', blogRoutes);
+adminRouter.use('/notifications', notificationRoutes);
+adminRouter.use('/debts', debtRoutes);
+adminRouter.use('/commitments', commitmentRoutes);
+adminRouter.use('/debt-config', debtConfigRoutes);
+adminRouter.use('/debt-payments', debtPaymentRoutes);
+adminRouter.use('/obligations', obligationRoutes);
+adminRouter.use('/obligation-payments', obligationPaymentRoutes);
+adminRouter.use('/finance', financeOverviewRoutes);
+adminRouter.use('/reports', lensReorderRoutes);
+adminRouter.use('/purchases', purchaseEntryRoutes);
+adminRouter.use('/wholesaler-queue', wholesalerQueueRoutes);
+adminRouter.use('/customer-requirements', customerRequirementRoutes);
+adminRouter.use('/ai', aiChatRoutes);
+apiRouter.use(adminRouter);
 
 // Root health check
 app.get('/health', (_req, res) => {

@@ -1,10 +1,11 @@
 import { connectDB } from './config/database';
-import { env } from './config/env';
+import { env, checkEnv } from './config/env';
 import app from './app';
 import { startCron } from './services/cron';
 import { syncObligationPaymentsToCashflow } from './services/obligationSync';
 
 const start = async () => {
+  checkEnv();
   await connectDB();
   await syncObligationPaymentsToCashflow();
 

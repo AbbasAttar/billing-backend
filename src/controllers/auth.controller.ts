@@ -3,6 +3,9 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { User } from '../models/User.model';
 import { getAdminAuth } from '../lib/firebaseAdmin';
+import { env } from '../config/env';
+import { issueCustomerToken, safeEqual } from '../lib/sessionToken';
+import { customerPhoneFrom } from '../middleware/auth';
 
 // POST /api/auth/register
 // Body: { name, phone, password, firebaseToken }
@@ -56,6 +59,7 @@ export async function register(req: Request, res: Response) {
       name:          user.name,
       phone:         user.phone,
       phoneVerified: user.phoneVerified,
+      token:         issueCustomerToken(user.phone),
     });
   } catch (err) {
     console.error('[auth] register error:', err);
@@ -63,11 +67,11 @@ export async function register(req: Request, res: Response) {
   }
 }
 
-// GET /api/auth/profile?phone=xxx
+// GET /api/auth/profile  (Authorization: Bearer <customer token>; legacy ?phone= while AUTH_ENFORCE is off)
 export async function getProfile(req: Request, res: Response) {
   try {
-    const phone = (req.query.phone as string)?.replace(/\D/g, '');
-    if (!phone) return res.status(400).json({ message: 'phone required' });
+    const phone = customerPhoneFrom(req, res, req.query.phone);
+    if (!phone) return;
     const user = await User.findOne({ phone }, { passwordHash: 0, emailOtp: 0, emailOtpExpiry: 0 });
     if (!user) return res.status(404).json({ message: 'User not found' });
     res.json({
@@ -98,8 +102,9 @@ export async function updateProfile(req: Request, res: Response) {
       phone: string; name?: string; email?: string;
       address?: string; city?: string; state?: string; pincode?: string; avatarB64?: string;
     };
-    if (!phone) return res.status(400).json({ message: 'phone required' });
-    const user = await User.findOne({ phone: phone.replace(/\D/g, '') });
+    const callerPhone = customerPhoneFrom(req, res, phone);
+    if (!callerPhone) return;
+    const user = await User.findOne({ phone: callerPhone });
     if (!user) return res.status(404).json({ message: 'User not found' });
 
     if (name?.trim()) user.name = name.trim();
@@ -162,7 +167,9 @@ export async function verifyEmail(req: Request, res: Response) {
       return res.status(400).json({ message: 'Token email does not match the provided email.' });
     }
 
-    const user = await User.findOne({ phone: phone.replace(/\D/g, '') });
+    const callerPhone = customerPhoneFrom(req, res, phone);
+    if (!callerPhone) return;
+    const user = await User.findOne({ phone: callerPhone });
     if (!user) return res.status(404).json({ message: 'User not found.' });
 
     user.email         = email.toLowerCase().trim();
@@ -181,13 +188,15 @@ export async function verifyEmail(req: Request, res: Response) {
 export async function deleteAccount(req: Request, res: Response) {
   try {
     const { phone, password } = req.body as { phone: string; password: string };
-    if (!phone || !password) {
-      return res.status(400).json({ message: 'Phone and password are required.' });
+    if (!password) {
+      return res.status(400).json({ message: 'Password is required.' });
     }
-    const user = await User.findOne({ phone: phone.replace(/\D/g, '') });
+    const callerPhone = customerPhoneFrom(req, res, phone);
+    if (!callerPhone) return;
+    const user = await User.findOne({ phone: callerPhone });
     if (!user) return res.status(404).json({ message: 'Account not found.' });
 
-    const valid = await user.comparePassword(password);
+    const valid = await User.comparePassword(user, password);
     if (!valid) return res.status(401).json({ message: 'Incorrect password.' });
 
     await user.deleteOne();
@@ -213,7 +222,7 @@ export async function login(req: Request, res: Response) {
 
     if (reauthToken) {
       // One-time reauth path (used after Google email verification to restore phone session)
-      if (!user.reauthToken || user.reauthToken !== reauthToken) {
+      if (!safeEqual(user.reauthToken, reauthToken)) {
         return res.status(401).json({ message: 'Invalid reauth token.' });
       }
       if (!user.reauthExpiry || user.reauthExpiry < new Date()) {
@@ -224,7 +233,7 @@ export async function login(req: Request, res: Response) {
       await user.save();
     } else {
       if (!password) return res.status(400).json({ message: 'Password is required.' });
-      const valid = await user.comparePassword(password);
+      const valid = await User.comparePassword(user, password);
       if (!valid) return res.status(401).json({ message: 'Incorrect password. Please try again.' });
     }
 
@@ -233,6 +242,7 @@ export async function login(req: Request, res: Response) {
       name:          user.name,
       phone:         user.phone,
       phoneVerified: user.phoneVerified,
+      token:         issueCustomerToken(user.phone),
     });
   } catch (err) {
     console.error('[auth] login error:', err);
@@ -241,13 +251,14 @@ export async function login(req: Request, res: Response) {
 }
 
 // POST /api/auth/reauth-token
-// Body: { phone } — creates a 5-min one-time token used to restore the phone session
-// after a Google popup is used for email verification.
+// Authorization: Bearer <customer token> — creates a 5-min one-time token used to restore the
+// phone session after a Google popup is used for email verification.
+// Always requires a session token (even with AUTH_ENFORCE off): issuing a login token for a bare
+// phone number would let anyone sign in as any customer.
 export async function createReauthToken(req: Request, res: Response) {
   try {
-    const { phone } = req.body as { phone: string };
-    if (!phone) return res.status(400).json({ message: 'phone required' });
-    const user = await User.findOne({ phone: phone.replace(/\D/g, '') });
+    if (!req.customerPhone) return res.status(401).json({ message: 'Authentication required' });
+    const user = await User.findOne({ phone: req.customerPhone });
     if (!user) return res.status(404).json({ message: 'User not found.' });
     const token = crypto.randomUUID();
     user.reauthToken  = token;
@@ -271,7 +282,7 @@ export async function markEmailVerified(req: Request, res: Response) {
     if (!phone || !email || !secret) {
       return res.status(400).json({ message: 'phone, email and secret required.' });
     }
-    if (secret !== process.env.INTERNAL_API_SECRET) {
+    if (!env.INTERNAL_API_SECRET || !safeEqual(secret, env.INTERNAL_API_SECRET)) {
       return res.status(403).json({ message: 'Forbidden.' });
     }
     const user = await User.findOne({ phone: phone.replace(/\D/g, '') });

@@ -21,6 +21,11 @@ import { Frame } from '../models/Frame.model';
 import { FrameColor } from '../models/FrameColor.model';
 import { Customer } from '../models/Customer.model';
 import { Invoice } from '../models/Invoice.model';
+import { User } from '../models/User.model';
+import { env } from '../config/env';
+import { customerPhoneFrom, customerOwns } from '../middleware/auth';
+
+const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 function toInt(v: unknown, fallback?: number): number | undefined {
   if (v == null || v === '') return fallback;
@@ -283,8 +288,20 @@ export const getPublicColors = async (_req: Request, res: Response, next: NextFu
 
 export const getMyOrders = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const email = (req.query.email as string | undefined)?.toLowerCase().trim();
-    const phone = (req.query.phone as string | undefined)?.trim();
+    let email = (req.query.email as string | undefined)?.toLowerCase().trim();
+    let phone = (req.query.phone as string | undefined)?.trim();
+
+    if (req.customerPhone) {
+      // Trust only the session: its phone, plus the account's email if that email is verified.
+      phone = req.customerPhone;
+      const user = await User.findOne({ phone }, { email: 1, emailVerified: 1 }).lean() as any;
+      email = user?.emailVerified && user.email ? String(user.email).toLowerCase() : undefined;
+    } else if (env.AUTH_ENFORCE) {
+      res.status(401).json({ success: false, message: 'Authentication required' });
+      return;
+    } else {
+      console.warn(`[AUTH] customer: no session token for ${req.method} ${req.path}`);
+    }
 
     if (!email && !phone) {
       res.status(400).json({ success: false, message: 'email or phone required' });
@@ -293,7 +310,7 @@ export const getMyOrders = async (req: Request, res: Response, next: NextFunctio
 
     // OR query so orders placed by either email or phone are always found
     const orClauses: Record<string, unknown>[] = [];
-    if (email) orClauses.push({ customerEmail: { $regex: new RegExp(`^${email}$`, 'i') } });
+    if (email) orClauses.push({ customerEmail: { $regex: new RegExp(`^${escapeRegex(email)}$`, 'i') } });
     if (phone) orClauses.push({ customerPhone: phone });
     const filter: Record<string, unknown> = orClauses.length === 1 ? orClauses[0] : { $or: orClauses };
 
@@ -385,6 +402,7 @@ export const getOrderById = async (req: Request, res: Response, next: NextFuncti
     const { id } = req.params;
     const order = await Order.findById(id).lean();
     if (!order) { res.status(404).json({ success: false, message: 'Order not found' }); return; }
+    if (!customerOwns(req, res, order.customerPhone)) return;
     res.json({ success: true, data: order });
   } catch (err) {
     next(err);
@@ -396,7 +414,12 @@ export const getOrderById = async (req: Request, res: Response, next: NextFuncti
 export const getInvoiceById = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
-    const phone = (req.query.phone as string | undefined)?.replace(/\D/g, '').trim();
+    const phone = req.customerPhone ?? (req.query.phone as string | undefined)?.replace(/\D/g, '').trim();
+    if (!phone) {
+      // Previously an invoice could be read by id alone; ownership is now always checked.
+      res.status(env.AUTH_ENFORCE ? 401 : 400).json({ success: false, message: 'phone required' });
+      return;
+    }
 
     const invoice = await Invoice.findById(id)
       .populate({
@@ -413,7 +436,7 @@ export const getInvoiceById = async (req: Request, res: Response, next: NextFunc
     if (!invoice) { res.status(404).json({ success: false, message: 'Invoice not found' }); return; }
 
     // Verify phone ownership
-    if (phone) {
+    {
       const last10 = phone.slice(-10);
       const custPhone = (invoice.customer?.mobileNumber ?? '').replace(/\D/g, '').slice(-10);
       if (custPhone !== last10) {
@@ -481,8 +504,9 @@ export const getInvoiceById = async (req: Request, res: Response, next: NextFunc
 // Returns in-store billing invoices for a customer looked up by mobile number.
 export const getMyInvoices = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const phone = (req.query.phone as string | undefined)?.replace(/\D/g, '').trim();
-    if (!phone || phone.length < 7) {
+    const phone = customerPhoneFrom(req, res, req.query.phone);
+    if (!phone) return;
+    if (phone.length < 7) {
       res.status(400).json({ success: false, message: 'phone required' });
       return;
     }
@@ -490,7 +514,7 @@ export const getMyInvoices = async (req: Request, res: Response, next: NextFunct
     // Match last 10 digits to be lenient about country prefix
     const last10 = phone.slice(-10);
     const customer = await Customer.findOne({
-      mobileNumber: { $regex: last10, $options: 'i' },
+      mobileNumber: { $regex: escapeRegex(last10), $options: 'i' },
     }).lean();
 
     if (!customer) {

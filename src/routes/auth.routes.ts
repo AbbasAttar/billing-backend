@@ -1,10 +1,15 @@
 import { Router } from 'express';
+import { attachCustomer } from '../middleware/auth';
+import { authRateLimit } from '../middleware/rateLimits';
 import {
   register, login, deleteAccount, getProfile, updateProfile,
   verifyEmail, createReauthToken, markEmailVerified,
 } from '../controllers/auth.controller';
 
 const router = Router();
+
+router.use(authRateLimit);
+router.use(attachCustomer);
 
 router.post('/register',             register);
 router.post('/login',                login);

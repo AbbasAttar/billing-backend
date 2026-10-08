@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction, RequestHandler } from 'express';
 import rateLimit from 'express-rate-limit';
+import { clientIpKey } from './rateLimits';
 
 /**
  * CDN cache headers for read-only public catalog endpoints.
@@ -34,12 +35,7 @@ export const publicRateLimit = rateLimit({
   limit: Number(process.env.PUBLIC_RATE_LIMIT_PER_MIN) || 600,
   standardHeaders: 'draft-7',
   legacyHeaders: false,
-  keyGenerator: (req) => {
-    const forwarded = req.headers['x-forwarded-for'];
-    const first = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(',')[0]?.trim();
-    return first || req.socket.remoteAddress || 'unknown';
-  },
-  // Cloud Functions sits behind Google's proxies, so the client IP is read from X-Forwarded-For above.
+  keyGenerator: clientIpKey,
   validate: { trustProxy: false, xForwardedForHeader: false },
   handler: (_req, res) => {
     res.status(429).json({ message: 'Too many requests. Please slow down.' });

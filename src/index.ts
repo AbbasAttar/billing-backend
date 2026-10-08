@@ -2,6 +2,9 @@ import { onRequest } from 'firebase-functions/v2/https';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import app from './app';
 import { connectDB } from './config/database';
+import { checkEnv } from './config/env';
+
+checkEnv();
 
 // 1. Cloud Function HTTP API (Express REST API)
 export const api = onRequest(
@@ -12,7 +15,8 @@ export const api = onRequest(
     minInstances: 0, // Scale down to 0 instances when idle to eliminate continuous GCP/Cloud Run charges
     maxInstances: 10,
     concurrency: 80,
-    cors: true,
+    // CORS is handled by the allowlist in app.ts; `cors: true` here would allow every origin.
+    cors: false,
   },
   async (req, res) => {
     try {
