@@ -41,8 +41,10 @@ const STAFF_DASHBOARD = /^\/dashboard\/(recalls(\/.*)?|daily-tasks)$/;
 
 /** Exceptions inside staff areas that still need an admin. [method regex, path regex] */
 const ADMIN_ONLY: Array<[RegExp, RegExp]> = [
-  // Deleting is admin-only, except cancelling one lab order and unregistering a device for notifications.
-  [/^DELETE$/, /^\/(?!wholesaler-queue\/[^/]+$|notifications\/fcm-token$).*/],
+  // Deleting is admin-only, except routine counter corrections: cancelling one lab order, fixing a
+  // wrong prescription, dismissing a pending purchase, removing a logged requirement, and
+  // unregistering a device from notifications. (Removing lines from a saved invoice stays admin-only.)
+  [/^DELETE$/, /^\/(?!(wholesaler-queue|prescriptions|purchases|customer-requirements)\/[^/]+$|notifications\/fcm-token$).*/],
   // Archiving products hides them from sale.
   [/^PATCH$/, /\/archive$/],
   // Invoice numbering and corrections to money already recorded.

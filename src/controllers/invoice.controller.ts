@@ -666,6 +666,21 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
 
 // ── UPDATE invoice ───────────────────────────────────────────────────────────
 
+const sameInstant = (a: unknown, b: unknown) => {
+  const ta = new Date(a as string | Date).getTime();
+  const tb = new Date(b as string | Date).getTime();
+  return Number.isFinite(ta) && ta === tb;
+};
+
+/** True when `next` starts with every payment of `existing`, unchanged and in order. */
+export function keepsExistingPayments(existing: IPayment[], next: IPayment[]): boolean {
+  if (next.length < existing.length) return false;
+  return existing.every((p, i) => {
+    const q = next[i];
+    return q.amount === p.amount && q.method === p.method && (q.writeoff ?? 0) === (p.writeoff ?? 0) && sameInstant(q.date, p.date);
+  });
+}
+
 export const updateInvoice = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { discount, billDate, payments, packagingCost, acquisitionSource, customer } = req.body as {
@@ -730,6 +745,11 @@ export const updateInvoice = async (req: Request, res: Response, next: NextFunct
             if (isNaN(pDate.getTime())) throw new InvoiceHttpError(400, 'Invalid payment date.');
             updatedPayments.push({ date: pDate, amount: p.amount, method: p.method, writeoff });
           }
+        }
+        // Staff may record new payments but not change or remove ones already recorded
+        // (correcting past payments is admin-only, as on PATCH/DELETE /:id/payment/:index).
+        if (req.user?.role === 'staff' && !keepsExistingPayments(invoice.payments ?? [], updatedPayments)) {
+          throw new InvoiceHttpError(403, 'Only the store owner can change payments that are already recorded.');
         }
         const totalPaid = sumSettled(updatedPayments);
         if (totalPaid > invoice.total + 0.01) {
@@ -1149,11 +1169,26 @@ export const renumberAllInvoices = async (_req: Request, res: Response, next: Ne
 
 // ── UPDATE Item Inline ───────────────────────────────────────────────────────
 
+const EDITABLE_ITEM_FIELDS = [
+  'frameVariantLabel',
+  'lensLabel', 'lensBrand', 'lensCompany', 'lensName', 'lensCategory', 'lensType', 'lensIndex',
+  'lensCoating', 'lensMaterial', 'lensColor', 'isCustomLens', 'eye', 'prescription', 'userName',
+  'rightEyeNumber', 'leftEyeNumber',
+  'rightSpherical', 'rightCylinder', 'rightAxis', 'rightAddition',
+  'leftSpherical', 'leftCylinder', 'leftAxis', 'leftAddition',
+] as const;
+
 export const updateItemInInvoice = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const invoiceId = String(req.params.id);
     const itemId = String(req.params.itemId);
     const { quantity, price, fragranceGrade } = req.body;
+    // Descriptive fields an edit may change (lens spec, Rx powers, frame colour). Money and stock
+    // links (frame / fragrance / opticalLens ids) are not editable here.
+    const descriptive: Record<string, unknown> = {};
+    for (const key of EDITABLE_ITEM_FIELDS) {
+      if (req.body[key] !== undefined) descriptive[key] = req.body[key];
+    }
 
     if (typeof quantity !== 'number' || quantity <= 0) {
       res.status(400).json({ message: 'Quantity must be a positive number.' });
@@ -1169,7 +1204,7 @@ export const updateItemInInvoice = async (req: Request, res: Response, next: Nex
       async (invoice, items, t) => {
         if (!invoice.items.includes(itemId)) throw new InvoiceHttpError(400, 'Item does not belong to this invoice');
         const existing = items.get(itemId) ?? null;
-        const update: Record<string, any> = { quantity, price };
+        const update: Record<string, any> = { ...descriptive, quantity, price };
         if (fragranceGrade !== undefined) update.fragranceGrade = fragranceGrade;
         await t.update(InvoiceItem, itemId, update, existing);
         if (existing) items.set(itemId, { ...existing, ...update });
