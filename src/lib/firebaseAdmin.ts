@@ -2,6 +2,7 @@ import { initializeApp, getApps, type App } from 'firebase-admin/app';
 import { cert } from 'firebase-admin/app';
 import { getMessaging, type Messaging } from 'firebase-admin/messaging';
 import { getAuth, type Auth } from 'firebase-admin/auth';
+import { getStorage } from 'firebase-admin/storage';
 import { env } from '../config/env';
 
 let adminApp: App | null = null;
@@ -33,6 +34,13 @@ export function getAdminAuth(): Auth | null {
   const app = getAdminApp();
   if (!app) return null;
   try { return getAuth(app); } catch { return null; }
+}
+
+/** Default Storage bucket (FIREBASE_STORAGE_BUCKET), or null when Firebase Admin is not configured. */
+export function getAdminBucket() {
+  const app = getAdminApp();
+  if (!app || !env.FIREBASE_STORAGE_BUCKET) return null;
+  try { return getStorage(app).bucket(env.FIREBASE_STORAGE_BUCKET); } catch { return null; }
 }
 
 export function getAdminFirestore() {

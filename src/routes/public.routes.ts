@@ -19,7 +19,9 @@ import {
   getInvoiceById,
 } from '../controllers/public.controller';
 
+import { uploadPrescription } from '../controllers/upload.controller';
 import { publicCache, publicRateLimit } from '../middleware/publicCache';
+import { uploadRateLimit } from '../middleware/rateLimits';
 import { attachCustomer } from '../middleware/auth';
 
 const router = Router();
@@ -47,5 +49,8 @@ router.get('/my-orders', getMyOrders);
 router.get('/my-invoices', getMyInvoices);
 router.get('/orders/:id', getOrderById);
 router.get('/invoices/:id', getInvoiceById);
+
+// Checkout prescription photo/PDF (JSON data URL; app.ts gives this path a larger body limit).
+router.post('/upload', uploadRateLimit, uploadPrescription);
 
 export default router;

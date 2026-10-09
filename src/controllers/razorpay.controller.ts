@@ -1,13 +1,51 @@
 import { Request, Response, NextFunction } from 'express';
 import * as crypto from 'crypto';
 import { env } from '../config/env';
-import { Order } from '../models/Order.model';
+import { Order, type IOrderRecipient } from '../models/Order.model';
 import { sendNewOrderNotification } from '../services/fcm';
 import { generateInvoiceNumber } from '../utils/invoiceNumber';
 import { safeEqual } from '../lib/sessionToken';
 import { customerOwns } from '../middleware/auth';
 
 const RAZORPAY_API = 'https://api.razorpay.com/v1';
+
+const text = (v: unknown, max = 200): string | undefined =>
+  typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : undefined;
+
+function eyeRx(v: unknown): Record<string, string> | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const out: Record<string, string> = {};
+  for (const key of ['sph', 'cyl', 'axis', 'add']) {
+    const val = text((v as Record<string, unknown>)[key], 12);
+    if (val) out[key] = val;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** Checkout prescription recipients from the storefront, trimmed to known fields and sizes. */
+export function sanitizeRecipients(raw: unknown): IOrderRecipient[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const list = raw.slice(0, 10).flatMap((r): IOrderRecipient[] => {
+    if (!r || typeof r !== 'object') return [];
+    const src = r as Record<string, unknown>;
+    const rx = src.prescription as Record<string, unknown> | undefined;
+    const prescription = rx && typeof rx === 'object'
+      ? { rightEye: eyeRx(rx.rightEye), leftEye: eyeRx(rx.leftEye), notes: text(rx.notes, 500) }
+      : undefined;
+    const url = text(src.prescriptionUrl, 1000);
+    const recipient: IOrderRecipient = {
+      name: text(src.name, 100),
+      phone: text(src.phone, 20),
+      rxMethod: text(src.rxMethod, 20),
+      prescription: prescription && (prescription.rightEye || prescription.leftEye || prescription.notes) ? prescription : undefined,
+      // Only links to our own Storage bucket (see upload.controller.ts)
+      prescriptionUrl: url?.startsWith('https://firebasestorage.googleapis.com/') ? url : undefined,
+      prescriptionFileName: text(src.prescriptionFileName, 200),
+    };
+    return [JSON.parse(JSON.stringify(recipient)) as IOrderRecipient];
+  });
+  return list.length ? list : undefined;
+}
 
 async function fireOrderNotifications(order: {
   customerName: string;
@@ -31,8 +69,10 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       delivery,
       address,
       city,
+      state,
       pincode,
       items = [],
+      recipients,
       shipping = 0,
       lensQuotePending = false,
       tokenAmount = 0,
@@ -44,7 +84,9 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       delivery?: 'home' | 'pickup';
       address?: string;
       city?: string;
+      state?: string;
       pincode?: string;
+      recipients?: unknown;
       items?: { name: string; qty: number; price: number; productId?: string; slug?: string; category?: string; brand?: string; image?: string }[];
       shipping?: number;
       lensQuotePending?: boolean;
@@ -89,8 +131,10 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
         delivery: delivery ?? 'home',
         address,
         city,
+        state,
         pincode,
         items,
+        recipients: sanitizeRecipients(recipients),
         subtotal: Math.max(0, subtotal),
         shipping: shipping ?? 0,
         total: amount,

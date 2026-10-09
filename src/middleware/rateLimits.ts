@@ -32,5 +32,8 @@ function perMinute(limit: number) {
  */
 export const authRateLimit = perMinute(Number(process.env.AUTH_RATE_LIMIT_PER_MIN) || 60);
 
+/** /public/upload: anonymous checkout uploads write to Storage. */
+export const uploadRateLimit = perMinute(Number(process.env.UPLOAD_RATE_LIMIT_PER_MIN) || 10);
+
 /** /ai/*: every call costs LLM tokens. */
 export const aiRateLimit = perMinute(Number(process.env.AI_RATE_LIMIT_PER_MIN) || 10);

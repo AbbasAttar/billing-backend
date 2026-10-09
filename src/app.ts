@@ -92,6 +92,8 @@ app.use(
 app.post('/api/razorpay/webhook', express.raw({ type: 'application/json' }), handleWebhook);
 app.post('/razorpay/webhook', express.raw({ type: 'application/json' }), handleWebhook);
 
+// Checkout prescription uploads arrive as base64 JSON (5 MB file ~ 6.7 MB encoded).
+app.use(['/api/public/upload', '/public/upload'], express.json({ limit: '8mb' }));
 app.use(express.json());
 
 // Count Firestore document reads per request and log the expensive ones ([FS-READS])

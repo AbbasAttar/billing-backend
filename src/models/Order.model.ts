@@ -11,6 +11,20 @@ export interface IOrderItem {
   image?: string;
 }
 
+/** Who the prescription lenses are for, as entered at checkout. */
+export interface IOrderRecipient {
+  name?: string;
+  phone?: string;
+  rxMethod?: string; // "manual" | "upload" | "later" etc., as sent by the storefront
+  prescription?: {
+    rightEye?: Record<string, string>;
+    leftEye?: Record<string, string>;
+    notes?: string;
+  };
+  prescriptionUrl?: string;
+  prescriptionFileName?: string;
+}
+
 export type OrderStatus = 'pending' | 'paid' | 'preparing' | 'ready' | 'dispatched' | 'fulfilled' | 'cancelled';
 
 export interface IOrder extends BaseDoc {
@@ -24,8 +38,10 @@ export interface IOrder extends BaseDoc {
   delivery: 'home' | 'pickup';
   address?: string;
   city?: string;
+  state?: string;
   pincode?: string;
   items: IOrderItem[];
+  recipients?: IOrderRecipient[];
   subtotal: number;
   shipping: number;
   total: number;
