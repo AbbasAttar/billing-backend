@@ -8,6 +8,7 @@ import { Prescription } from '../models/Prescription.model';
 import { Customer } from '../models/Customer.model';
 import { Frame } from '../models/Frame.model';
 import { Fragrance } from '../models/Fragrance.model';
+import { WholesaleItem } from '../models/WholesaleItem.model';
 import { SiteSetting } from '../models/SiteSetting.model';
 import { financialYear, formatInvoiceNo } from '../utils/invoiceNumber';
 import { InvoiceCounter } from '../models/InvoiceCounter.model';
@@ -316,7 +317,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
     // Catalog lenses and referenced prescriptions are resolved before the transaction.
     const catalogLens = new Map<number, { existingId?: string; filter: CatalogLensFilter }>();
     const referencedRx = new Map<number, any>();
-    const productIds = { frames: new Set<string>(), fragrances: new Set<string>() };
+    const productIds = { frames: new Set<string>(), fragrances: new Set<string>(), wholesale: new Set<string>() };
 
     for (const [i, item] of items.entries()) {
       if (item.type === 'opticalLens') {
@@ -342,6 +343,8 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         productIds.frames.add(idOf(item.frame));
       } else if (item.type === 'fragrance' && isValidId(item.fragrance)) {
         productIds.fragrances.add(idOf(item.fragrance));
+      } else if (item.type === 'wholesale' && isValidId(item.wholesaleItem)) {
+        productIds.wholesale.add(idOf(item.wholesaleItem));
       }
     }
 
@@ -371,6 +374,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       const [counter] = await t.query<any>(InvoiceCounter, { year: fy }, 1);
       const frames = await t.getMany<any>(Frame, [...productIds.frames]);
       const fragrances = await t.getMany<any>(Fragrance, [...productIds.fragrances]);
+      const wholesaleItems = await t.getMany<any>(WholesaleItem, [...productIds.wholesale]);
 
       const deductions: StockDeduction[] = [];
       for (const item of items as any[]) {
@@ -422,6 +426,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       const rxGroups = new Map<string, { userName: string; label: string; items: any[] }>();
       const frameUpdates = new Map<string, any>();
       const fragranceUpdates = new Map<string, any>();
+      const wholesaleStock = new Map<string, number>();
 
       for (const [i, item] of (items as any[]).entries()) {
         const enhanced: any = { ...item };
@@ -497,6 +502,15 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
             }
           }
           fragranceUpdates.set(id, update);
+        } else if (item.type === 'wholesale' && isValidId(item.wholesaleItem)) {
+          const id = idOf(item.wholesaleItem);
+          const ws = wholesaleItems.get(id);
+          if (ws) {
+            const current = wholesaleStock.get(id) ?? (ws.stock || 0);
+            wholesaleStock.set(id, Math.max(0, current - (item.quantity || 1)));
+            if (!item.itemName) enhanced.itemName = ws.companyName ? `${ws.name} (${ws.companyName})` : ws.name;
+            if (!item.unit) enhanced.unit = ws.unit;
+          }
         }
         resolved.push(enhanced);
       }
@@ -522,6 +536,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
 
       for (const [id, update] of frameUpdates) await t.update(Frame, id, { $set: update }, frames.get(id) ?? null);
       for (const [id, update] of fragranceUpdates) await t.update(Fragrance, id, { $set: update }, fragrances.get(id) ?? null);
+      for (const [id, stock] of wholesaleStock) await t.update(WholesaleItem, id, { stock }, wholesaleItems.get(id) ?? null);
 
       // Invoice items, already linked to the invoice being created.
       const invoiceDocId = t.newId(Invoice);
@@ -538,6 +553,8 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
             const grade = item.fragranceGrade || item.fragranceVariantLabel;
             const variant = grade && frag?.variants?.length ? frag.variants.find((v: any) => v.label === grade) : null;
             costPrice = variant?.costPrice || frag?.costPrice || 0;
+          } else if (item.type === 'wholesale' && item.wholesaleItem) {
+            costPrice = wholesaleItems.get(idOf(item.wholesaleItem))?.costPrice || 0;
           }
         }
         totalCogs += costPrice * item.quantity;
@@ -559,6 +576,11 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
           doc.fragrance = item.fragrance;
           const grade = item.fragranceGrade || item.fragranceVariantLabel;
           if (grade) doc.fragranceGrade = grade;
+        }
+        if (item.type === 'wholesale') {
+          if (isValidId(item.wholesaleItem)) doc.wholesaleItem = idOf(item.wholesaleItem);
+          doc.itemName = item.itemName?.trim() || 'Wholesale item';
+          doc.unit = item.unit?.trim() || 'bottle';
         }
         if (item.type === 'opticalLens') {
           doc.opticalLens = item._resolvedOpticalLens || item.opticalLens;
@@ -939,6 +961,8 @@ export const deleteInvoice = async (req: Request, res: Response, next: NextFunct
       // Restore frame variant stock for frame items that had a colour selected.
       const frameIds = [...items.values()].filter((i) => i.frame && i.frameVariantLabel).map((i) => idOf(i.frame));
       const frames = await t.getMany<any>(Frame, frameIds);
+      const wholesaleIds = [...items.values()].filter((i) => i.wholesaleItem).map((i) => idOf(i.wholesaleItem));
+      const wholesaleItems = await t.getMany<any>(WholesaleItem, wholesaleIds);
       const restored = new Map<string, any[]>();
       for (const item of items.values()) {
         if (!item.frame || !item.frameVariantLabel) continue;
@@ -954,6 +978,19 @@ export const deleteInvoice = async (req: Request, res: Response, next: NextFunct
 
       for (const [id, variants] of restored) {
         await t.update(Frame, id, { $set: { 'web.frameVariants': variants } }, frames.get(id) ?? null);
+      }
+
+      // Put billed wholesale units back on the shelf.
+      const wholesaleStock = new Map<string, number>();
+      for (const item of items.values()) {
+        if (!item.wholesaleItem) continue;
+        const id = idOf(item.wholesaleItem);
+        const ws = wholesaleItems.get(id);
+        if (!ws) continue;
+        wholesaleStock.set(id, (wholesaleStock.get(id) ?? (ws.stock || 0)) + (item.quantity || 0));
+      }
+      for (const [id, stock] of wholesaleStock) {
+        await t.update(WholesaleItem, id, { stock }, wholesaleItems.get(id) ?? null);
       }
       for (const id of itemIds) t.delete(InvoiceItem, id);
       t.delete(Invoice, invoiceId);
@@ -978,7 +1015,7 @@ export const addItemToInvoice = async (req: Request, res: Response, next: NextFu
     // Lens items without a catalog reference are matched to (or added to) the lens catalog.
     const isLens =
       body.type === 'opticalLens' ||
-      (!body.type && !body.frame && !body.fragrance && (
+      (!body.type && !body.frame && !body.fragrance && !body.wholesaleItem && (
         Boolean(body.lensBrand) ||
         Boolean(body.lensName) ||
         Boolean(body.lensType) ||
@@ -1037,6 +1074,13 @@ export const addItemToInvoice = async (req: Request, res: Response, next: NextFu
         if ((body.type === 'fragrance' || body.fragrance) && body.fragrance) {
           doc.fragrance = body.fragrance;
           if (body.fragranceGrade) doc.fragranceGrade = body.fragranceGrade;
+        }
+        if (body.type === 'wholesale') {
+          doc.type = 'wholesale';
+          if (isValidId(body.wholesaleItem)) doc.wholesaleItem = idOf(body.wholesaleItem);
+          doc.itemName = body.itemName?.trim() || 'Wholesale item';
+          doc.unit = body.unit?.trim() || 'bottle';
+          if (typeof body.costPrice === 'number') doc.costPrice = body.costPrice;
         }
         if (isLens || body.type === 'opticalLens' || body.opticalLens) {
           if (body.opticalLens) doc.opticalLens = body.opticalLens;
@@ -1170,7 +1214,7 @@ export const renumberAllInvoices = async (_req: Request, res: Response, next: Ne
 // ── UPDATE Item Inline ───────────────────────────────────────────────────────
 
 const EDITABLE_ITEM_FIELDS = [
-  'frameVariantLabel',
+  'frameVariantLabel', 'itemName', 'unit',
   'lensLabel', 'lensBrand', 'lensCompany', 'lensName', 'lensCategory', 'lensType', 'lensIndex',
   'lensCoating', 'lensMaterial', 'lensColor', 'isCustomLens', 'eye', 'prescription', 'userName',
   'rightEyeNumber', 'leftEyeNumber',
@@ -1237,7 +1281,7 @@ export const downloadTodayExcel = async (req: Request, res: Response, next: Next
 
     for (const inv of invoices as any[]) {
       const customer = inv.customer as any;
-      const lensItems = (inv.items as any[]).filter((item: any) => !item.frame && !item.fragrance);
+      const lensItems = (inv.items as any[]).filter((item: any) => !item.frame && !item.fragrance && item.type !== 'wholesale');
       for (const lensItem of lensItems) {
         rows.push({
           SHOP:    'AOH',
@@ -1343,7 +1387,7 @@ export const pushToExcel = async (req: Request, res: Response, next: NextFunctio
     }
 
     const customer = invoice.customer as any;
-    const lensItem = (invoice.items as any[]).find((item: any) => !item.frame && !item.fragrance);
+    const lensItem = (invoice.items as any[]).find((item: any) => !item.frame && !item.fragrance && item.type !== 'wholesale');
     if (!lensItem) {
       res.status(400).json({ message: 'No optical lens item on this invoice' });
       return;

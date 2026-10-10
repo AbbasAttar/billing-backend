@@ -18,6 +18,17 @@ export interface CreateFragranceItemInput {
   fragranceGrade?: string;
 }
 
+export interface CreateWholesaleItemInput {
+  type: 'wholesale';
+  wholesaleItem?: string;
+  /** Snapshot of the item name / unit at billing time, so old bills read the same after edits. */
+  itemName?: string;
+  unit?: string;
+  quantity: number;
+  price: number;
+  costPrice?: number;
+}
+
 export interface CreateOpticalLensItemInput {
   type: "opticalLens";
   eye?: "left" | "right" | "both";
@@ -64,6 +75,7 @@ export interface CreateOpticalLensItemInput {
 export type CreateInvoiceItemInput =
   | CreateFrameItemInput
   | CreateFragranceItemInput
+  | CreateWholesaleItemInput
   | CreateOpticalLensItemInput;
 
 export interface CreateInvoiceInput {

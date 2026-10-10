@@ -24,6 +24,7 @@ const STAFF_AREAS = [
   'frame-companies',
   'frame-colors',
   'fragrances',
+  'wholesale-items',
   'optical-lenses',
   'contact-lenses',
   'lens-stock',

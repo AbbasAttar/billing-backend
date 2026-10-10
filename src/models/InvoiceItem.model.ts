@@ -9,6 +9,10 @@ export interface IInvoiceItem extends BaseDoc {
   opticalLens?: string | any;
   prescription?: string | any;
   fragrance?: string | any;
+  /** Wholesale line: id of the WholesaleItem plus name/unit snapshot. */
+  wholesaleItem?: string;
+  itemName?: string;
+  unit?: string;
   eye?: 'left' | 'right' | 'both';
   userName?: string;
   spherical?: number;
@@ -37,7 +41,7 @@ export interface IInvoiceItem extends BaseDoc {
   lensColor?: string;
   isCustomLens?: boolean;
   isSameNumber?: boolean;
-  fulfillmentSource: 'stock' | 'ordered' | 'unfulfilled';
+  fulfillmentSource?: 'stock' | 'ordered' | 'unfulfilled';
   requestedQty?: number | null;
   fulfilledQty?: number | null;
   sentToWholesaler?: boolean;

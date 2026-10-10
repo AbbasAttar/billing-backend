@@ -56,6 +56,7 @@ import purchaseEntryRoutes from './routes/purchaseEntry.routes';
 import wholesalerQueueRoutes from './routes/wholesalerQueue.routes';
 import customerRequirementRoutes from './routes/customerRequirement.routes';
 import aiChatRoutes from './routes/aiChat.routes';
+import wholesaleItemRoutes from './routes/wholesaleItem.routes';
 import { handleWebhook } from './controllers/razorpay.controller';
 
 const app = express();
@@ -143,6 +144,7 @@ adminRouter.use('/optical-numbers', opticalNumberRoutes); // legacy — kept for
 adminRouter.use('/optical-lenses', opticalLensRoutes);
 adminRouter.use('/prescriptions', prescriptionRoutes);
 adminRouter.use('/fragrances', fragranceRoutes);
+adminRouter.use('/wholesale-items', wholesaleItemRoutes);
 adminRouter.use('/frames', frameRoutes);
 adminRouter.use('/invoice-items', invoiceItemRoutes);
 adminRouter.use('/invoices', invoiceRoutes);
