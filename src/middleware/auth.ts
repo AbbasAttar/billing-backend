@@ -65,8 +65,14 @@ async function resolveStaffUser(req: Request): Promise<Resolved> {
   }
 }
 
-function deny(req: Request, res: Response, next: NextFunction, status: number, reason: string) {
-  if (!env.STAFF_AUTH_ENFORCE) {
+/**
+ * Refuses the request. While STAFF_AUTH_ENFORCE is off, callers we cannot identify (no/invalid token,
+ * account not listed) are still let through and logged, so old clients keep working during rollout.
+ * A signed-in staff user asking for an admin-only action is always refused (`always`): their role is
+ * known, so there is nothing to roll out.
+ */
+function deny(req: Request, res: Response, next: NextFunction, status: number, reason: string, always = false) {
+  if (!env.STAFF_AUTH_ENFORCE && !always) {
     console.warn(`[AUTH] ${reason} — allowed (STAFF_AUTH_ENFORCE off): ${req.method} ${req.originalUrl}`);
     return next();
   }
@@ -80,7 +86,7 @@ export function requireRole(need: StaffRole) {
     if ('status' in r) return deny(req, res, next, r.status, `${need}: ${r.reason}`);
     req.user = r.user;
     if (!satisfies(r.user.role, need)) {
-      return deny(req, res, next, 403, `${need}: ${r.user.email ?? r.user.uid} is ${r.user.role}`);
+      return deny(req, res, next, 403, `${need}: ${r.user.email ?? r.user.uid} is ${r.user.role}`, true);
     }
     next();
   };

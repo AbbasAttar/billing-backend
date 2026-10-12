@@ -85,6 +85,14 @@ describe('requireAdmin', () => {
     expect(res.statusCode).toBe(403);
   });
 
+  it('refuses a signed-in staff user even when AUTH_ENFORCE is off', async () => {
+    env.STAFF_AUTH_ENFORCE = env.CUSTOMER_AUTH_ENFORCE = false;
+    verifyIdToken.mockResolvedValue({ uid: 'u5', email: 'counter@shop.com', email_verified: true });
+    const { res, next } = await run({ authorization: 'Bearer ok' });
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(403);
+  });
+
   it('logs but allows when AUTH_ENFORCE is off', async () => {
     env.STAFF_AUTH_ENFORCE = env.CUSTOMER_AUTH_ENFORCE = false;
     const { res, next } = await run({});
