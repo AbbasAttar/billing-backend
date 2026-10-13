@@ -1,3 +1,4 @@
+import './config/timezone';
 import { connectDB } from './config/database';
 import { env, checkEnv } from './config/env';
 import app from './app';

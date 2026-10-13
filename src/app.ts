@@ -1,3 +1,4 @@
+import './config/timezone';
 import express from 'express';
 import cors from 'cors';
 import { env, isProduction } from './config/env';
