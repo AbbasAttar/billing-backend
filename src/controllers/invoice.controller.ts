@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { isAdminRequest } from '../middleware/auth';
 import * as XLSX from 'xlsx';
 import { Coating } from '../models/Coating.model';
 import { Invoice, IPayment } from '../models/Invoice.model';
@@ -253,8 +254,13 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
     }
 
     const subtotal = items.reduce((sum, i) => sum + i.quantity * i.price, 0);
-    if (discount >= subtotal) {
-      res.status(400).json({ message: 'Discount cannot be equal to or greater than the subtotal.' });
+    if (discount > subtotal) {
+      res.status(400).json({ message: 'Discount cannot be greater than the subtotal.' });
+      return;
+    }
+    // A full discount (₹0 bill, e.g. frames for family) gives stock away, so only the owner may do it.
+    if (subtotal > 0 && discount === subtotal && !isAdminRequest(req)) {
+      res.status(403).json({ message: 'Only the owner can make a free (₹0) bill.' });
       return;
     }
     const total = subtotal - discount;
@@ -299,6 +305,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       initialPayments.push({ date: billDate, amount: initialPayment, method: 'cash' });
       if (initialPayment === total) billClearDate = billDate;
     }
+    if (total === 0) billClearDate = billDate; // nothing to collect on a free bill
 
     // ── 2. Lookups (reads only) ───────────────────────────────────────────────
     let existingCustomer: any = null;
@@ -744,8 +751,11 @@ export const updateInvoice = async (req: Request, res: Response, next: NextFunct
 
       if (discount !== undefined) {
         if (typeof discount !== 'number' || discount < 0) throw new InvoiceHttpError(400, 'Discount must be a non-negative number.');
-        if (discount >= invoice.subtotal && invoice.subtotal > 0) {
-          throw new InvoiceHttpError(400, 'Discount cannot equal or exceed the subtotal.');
+        if (discount > invoice.subtotal) {
+          throw new InvoiceHttpError(400, 'Discount cannot be greater than the subtotal.');
+        }
+        if (invoice.subtotal > 0 && discount === invoice.subtotal && discount !== invoice.discount && !isAdminRequest(req)) {
+          throw new InvoiceHttpError(403, 'Only the owner can make a free (₹0) bill.');
         }
         invoice.discount = discount;
         invoice.total = Math.max(0, invoice.subtotal - discount);

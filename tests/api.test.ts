@@ -416,6 +416,18 @@ describe('roles over HTTP', () => {
     expect([401, 403]).not.toContain(res.status);
   });
 
+  it('a free (100% discount) bill is owner-only; more than the subtotal is never allowed', async () => {
+    const bill = (discount: number) => ({ customerName: 'Family', items: [{ type: 'frame', quantity: 1, price: 2500 }], discount });
+    asStaff();
+    const staff = await request(app).post('/api/invoices').set(auth).send(bill(2500));
+    expect(staff.status).toBe(403);
+    expect(staff.body.message).toMatch(/owner/);
+    asAdmin();
+    const admin = await request(app).post('/api/invoices').set(auth).send(bill(2500));
+    expect(admin.body.message ?? '').not.toMatch(/owner|subtotal/);
+    expect((await request(app).post('/api/invoices').set(auth).send(bill(2600))).status).toBe(400);
+  });
+
   it('admins reach admin areas', async () => {
     asAdmin();
     const res = await request(app).get('/api/analytics/sales').set(auth);
