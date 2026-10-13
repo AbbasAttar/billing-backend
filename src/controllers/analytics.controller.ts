@@ -1802,7 +1802,8 @@ export const getExecutiveAnalytics = async (req: Request, res: Response, next: N
                             point.payments.count += 1;
                             const method = (p.method || 'cash').toLowerCase();
                             if (method.includes('cash')) point.payments.cash += amt;
-                            else if (method.includes('upi') || method.includes('qr') || method.includes('gpay') || method.includes('phonepe') || method.includes('paytm')) point.payments.upi += amt;
+                            // Bills store UPI/QR payments as method 'online'.
+                            else if (method === 'online' || method.includes('upi') || method.includes('qr') || method.includes('gpay') || method.includes('phonepe') || method.includes('paytm')) point.payments.upi += amt;
                             else if (method.includes('card') || method.includes('pos') || method.includes('swipe')) point.payments.card += amt;
                             else point.payments.other += amt;
                         }
