@@ -1506,45 +1506,23 @@ export const getExecutiveAnalytics = async (req: Request, res: Response, next: N
 
         // 5. Category Breakdown
         const totalCatRev = frameRev + lensRev + fragRev + wsRev || 1;
+        // Two groups: Optics (frames, lenses) and Fragrance (retail bottles, wholesale stock).
+        const catEntry = (group: 'Optics' | 'Fragrance', name: string, category: string, rev: number, cost: number, units: number, color: string) => ({
+            group,
+            name,
+            category,
+            revenue: Math.round(rev),
+            units,
+            sharePct: Number(((rev / totalCatRev) * 100).toFixed(1)),
+            // No sales means no margin to show (was a made-up default).
+            marginPct: rev > 0 ? Number((((rev - cost) / rev) * 100).toFixed(1)) : null,
+            color,
+        });
         const categoryShare = [
-            {
-                name: 'Optical Frames',
-                category: 'frame',
-                revenue: Math.round(frameRev),
-                units: frameUnits,
-                sharePct: Number(((frameRev / totalCatRev) * 100).toFixed(1)),
-                marginPct: frameRev > 0 ? Number((((frameRev - frameCost) / frameRev) * 100).toFixed(1)) : 58.0,
-                color: '#2563EB',
-            },
-            {
-                name: 'Prescription Lenses',
-                category: 'lens',
-                revenue: Math.round(lensRev),
-                units: lensUnits,
-                sharePct: Number(((lensRev / totalCatRev) * 100).toFixed(1)),
-                marginPct: lensRev > 0 ? Number((((lensRev - lensCost) / lensRev) * 100).toFixed(1)) : 62.5,
-                color: '#059669',
-            },
-            {
-                name: 'Attar & Fragrance',
-                category: 'fragrance',
-                revenue: Math.round(fragRev),
-                units: fragUnits,
-                sharePct: Number(((fragRev / totalCatRev) * 100).toFixed(1)),
-                marginPct: fragRev > 0 ? Number((((fragRev - fragCost) / fragRev) * 100).toFixed(1)) : 52.0,
-                color: '#D97706',
-            },
-            ...(wsRev > 0
-                ? [{
-                    name: 'Wholesale Stock',
-                    category: 'wholesale',
-                    revenue: Math.round(wsRev),
-                    units: wsUnits,
-                    sharePct: Number(((wsRev / totalCatRev) * 100).toFixed(1)),
-                    marginPct: Number((((wsRev - wsCost) / wsRev) * 100).toFixed(1)),
-                    color: '#A78BFA',
-                }]
-                : []),
+            catEntry('Optics', 'Frames', 'frame', frameRev, frameCost, frameUnits, '#2563EB'),
+            catEntry('Optics', 'Lenses', 'lens', lensRev, lensCost, lensUnits, '#059669'),
+            catEntry('Fragrance', 'Retail', 'fragrance', fragRev, fragCost, fragUnits, '#D97706'),
+            catEntry('Fragrance', 'Wholesale', 'wholesale', wsRev, wsCost, wsUnits, '#A78BFA'),
         ];
 
         // 6. Inventory Valuation, Aging & Trapped Capital
@@ -1726,13 +1704,14 @@ export const getExecutiveAnalytics = async (req: Request, res: Response, next: N
 
         // Top Growth Driver (Fragrance or Frames)
         const topCat = [...categoryShare].sort((a, b) => b.revenue - a.revenue)[0];
-        if (topCat) {
+        if (topCat && topCat.revenue > 0) {
+            const topLabel = `${topCat.group} · ${topCat.name}`;
             actionBriefs.push({
                 id: 'top-growth-driver',
                 type: 'growth' as const,
-                title: `${topCat.name} Primary Revenue Driver (${topCat.sharePct}%)`,
+                title: `${topLabel} Primary Revenue Driver (${topCat.sharePct}%)`,
                 subtitle: `Generated ₹${topCat.revenue.toLocaleString('en-IN')} with ${topCat.marginPct}% gross margin across ${topCat.units} units sold.`,
-                observation: `${topCat.name} accounts for ${topCat.sharePct}% of total period sales.`,
+                observation: `${topLabel} accounts for ${topCat.sharePct}% of total period sales.`,
                 cause: `Strong footfall demand and high customer basket conversion.`,
                 action: `Maintain high inventory availability for fast-moving models.`,
                 tag: 'Growth Driver',
