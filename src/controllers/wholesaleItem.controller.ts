@@ -94,6 +94,17 @@ export const updateWholesaleItem = async (req: Request, res: Response, next: Nex
  * POST /:id/adjust-stock { delta, sellPrice?, costPrice? } — inward a fresh lot (+) or write off
  * breakage (−). An inward may carry the lot's new cost / selling price, which replace the old ones.
  */
+/**
+ * Order fields after `received` units of an ordered item arrive: a part delivery keeps the rest on
+ * order; receiving the ordered quantity (or more, or an order with no quantity) closes it.
+ */
+export function orderAfterInward(orderedQty: number | null | undefined, received: number) {
+  const remaining = (orderedQty ?? 0) - received;
+  return remaining > 0
+    ? { isOrdered: true, orderedQty: remaining }
+    : { isOrdered: false, orderedQty: null, orderedAt: null };
+}
+
 export const adjustWholesaleStock = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const delta = num(req.body?.delta);
@@ -108,8 +119,7 @@ export const adjustWholesaleStock = async (req: Request, res: Response, next: Ne
     const existing = await WholesaleItem.findById(req.params.id);
     if (!existing) return fail(res, 'Wholesale item not found', 404);
     const patch: Record<string, unknown> = { ...update, stock: Math.max(0, (existing.stock || 0) + delta) };
-    // An inward of an ordered item means the order arrived.
-    if (req.body?.receivedOrder === true && delta > 0) Object.assign(patch, { isOrdered: false, orderedQty: null, orderedAt: null });
+    if (req.body?.receivedOrder === true && delta > 0) Object.assign(patch, orderAfterInward(existing.orderedQty, delta));
     const item = await WholesaleItem.findByIdAndUpdate(req.params.id, patch, { new: true });
     return ok(res, item);
   } catch (e) { next(e); }
