@@ -12,7 +12,7 @@
  */
 
 export interface OvPayment { date?: Date | string; amount?: number; method?: string }
-export interface OvItem { frame?: unknown; fragrance?: unknown; wholesaleItem?: unknown; opticalLens?: unknown; isCustomLens?: boolean; type?: string; lensType?: string; quantity?: number; price?: number; costPrice?: number }
+export interface OvItem { fragranceGrade?: string; frame?: unknown; fragrance?: unknown; wholesaleItem?: unknown; opticalLens?: unknown; isCustomLens?: boolean; type?: string; lensType?: string; quantity?: number; price?: number; costPrice?: number }
 export interface OvInvoice {
   billDate: Date | string; subtotal?: number; discount?: number; total?: number;
   payments?: OvPayment[]; items?: (OvItem | string | null)[];
@@ -96,8 +96,29 @@ const kindOf = (it: OvItem): string => {
   return 'other';
 };
 
+/** Unit cost for a line, or null when none is known. Default: the cost saved on the bill line. */
+export type CostOf = (item: OvItem) => number | null;
+const lineCost: CostOf = (it) => (typeof it.costPrice === 'number' && it.costPrice > 0 ? it.costPrice : null);
+
+/**
+ * Retail fragrance cost from the saved fragrance (its size variant first), as the owner keeps cost
+ * there; other lines use the cost saved on the bill.
+ */
+export function savedFragranceCost(fragrances: { _id: unknown; costPrice?: number; variants?: { label?: string; costPrice?: number }[] }[]): CostOf {
+  const byId = new Map(fragrances.map((f) => [String(f._id), f]));
+  return (it) => {
+    if (!(it.fragrance || it.type === 'fragrance')) return lineCost(it);
+    const id = it.fragrance && typeof it.fragrance === 'object' && '_id' in (it.fragrance as object) ? String((it.fragrance as { _id: unknown })._id) : String(it.fragrance ?? '');
+    const f = byId.get(id);
+    if (!f) return lineCost(it);
+    const v = it.fragranceGrade && f.variants?.length ? f.variants.find((x) => x.label === it.fragranceGrade) : undefined;
+    const c = v?.costPrice || f.costPrice;
+    return c && c > 0 ? c : null;
+  };
+}
+
 /** Sales figures for a set of bills. */
-export function salesFigures(invoices: OvInvoice[]) {
+export function salesFigures(invoices: OvInvoice[], costOf: CostOf = lineCost) {
   let revenue = 0, billed = 0, discount = 0, cogs = 0, costedNet = 0, uncostedLines = 0, packaging = 0, fees = 0;
   let newRev = 0, newCount = 0, repeatRev = 0, repeatCount = 0;
   const cat = new Map<string, { billed: number; costedNet: number; cost: number }>();
@@ -121,9 +142,10 @@ export function salesFigures(invoices: OvInvoice[]) {
       const lineRev = qty * (it.price || 0);
       const c = cat.get(kindOf(it)) ?? { billed: 0, costedNet: 0, cost: 0 };
       c.billed += lineRev;
-      if (typeof it.costPrice === 'number' && it.costPrice > 0) {
+      const unitCost = costOf(it);
+      if (unitCost !== null) {
         const net = lineRev * keep;
-        const cost = qty * it.costPrice;
+        const cost = qty * unitCost;
         c.costedNet += net;
         c.cost += cost;
         costedNet += net;

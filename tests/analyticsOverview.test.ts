@@ -103,3 +103,14 @@ describe('dailySeries', () => {
     expect(d[1]).toMatchObject({ date: '2026-10-02', revenue: 500, previous: 300 });
   });
 });
+
+describe('savedFragranceCost', () => {
+  it('uses the saved fragrance or variant cost, keeps bill cost for other items', async () => {
+    const { savedFragranceCost } = await import('../src/services/analyticsOverview');
+    const cost = savedFragranceCost([{ _id: 'a', costPrice: 100 }, { _id: 'b', variants: [{ label: '6ml', costPrice: 200 }] }, { _id: 'c' }]);
+    expect(cost({ fragrance: 'a', costPrice: 290 })).toBe(100);
+    expect(cost({ fragrance: { _id: 'b' }, fragranceGrade: '6ml' })).toBe(200);
+    expect(cost({ fragrance: 'c', costPrice: 50 })).toBeNull();
+    expect(cost({ frame: 'f', costPrice: 700 })).toBe(700);
+  });
+});

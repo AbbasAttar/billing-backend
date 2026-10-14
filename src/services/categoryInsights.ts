@@ -6,6 +6,7 @@
  */
 
 export interface InsightItem {
+  fragranceGrade?: string;
   frame?: unknown;
   fragrance?: unknown;
   wholesaleItem?: unknown;
@@ -31,7 +32,7 @@ export interface FrameDoc { _id: unknown; isArchived?: boolean; name?: string; c
 export interface LensStockDoc { lensType?: string; coating?: string; sph?: number; cyl?: number; add?: number | null; quantity?: number; reorderLevel?: number }
 export interface FragranceDoc {
   _id: unknown; isArchived?: boolean; name?: string; companyName?: string; type?: string; costPrice?: number; stock?: number;
-  variants?: { label?: string; stock?: number; costPrice?: number }[];
+  variants?: { label?: string; stock?: number; costPrice?: number; sellPrice?: number }[];
 }
 export interface WholesaleDoc {
   _id: unknown; isArchived?: boolean; name?: string; companyName?: string; unit?: string; costPrice?: number | null; stock?: number;
@@ -291,14 +292,31 @@ export function buildFragranceInsights(input: {
   const topWholesale = new Map<string, Ranked>();
   const types = new Map<string, Ranked>();
   const soldRetail = new Map<string, number>();
+  const soldNoCost = new Map<string, { id: string; name: string; brand?: string; type?: string; sold: number; revenue: number }>();
+  /** Margin uses the cost saved on the fragrance (its size variant first), not the cost copied onto the bill. */
+  const savedCost = (doc: FragranceDoc | undefined, grade?: string) => {
+    if (!doc) return null;
+    const v = grade && doc.variants?.length ? doc.variants.find((x) => x.label === grade) : undefined;
+    const c = v?.costPrice || doc.costPrice;
+    return c && c > 0 ? c : null;
+  };
 
   for (const inv of input.invoices) {
-    for (const it of items(inv)) {
+    for (let it of items(inv)) {
       const k = kind(it);
       if (k === 'fragrance') {
-        add(retail, it);
         const id = idOf(it.fragrance);
         const doc = fragById.get(id);
+        const cost = savedCost(doc, it.fragranceGrade);
+        it = { ...it, costPrice: cost ?? undefined };
+        if (cost === null) {
+          const qty = it.quantity || 1;
+          const row = soldNoCost.get(id) ?? { id, name: doc?.name || it.itemName || 'Fragrance', brand: doc?.companyName, type: doc?.type, sold: 0, revenue: 0 };
+          row.sold = units(row.sold + qty);
+          row.revenue += qty * (it.price || 0);
+          soldNoCost.set(id, row);
+        }
+        add(retail, it);
         soldRetail.set(id, units((soldRetail.get(id) ?? 0) + (it.quantity || 1)));
         bump(topRetail, id, () => ({ id, name: doc?.name || it.itemName || 'Fragrance', brand: doc?.companyName }), it);
         const t = doc?.type || 'Not recorded';
@@ -359,8 +377,12 @@ export function buildFragranceInsights(input: {
   if (lowMargin.length) {
     guidance.push({ level: 'medium', title: `${lowMargin.length} selling item${lowMargin.length === 1 ? '' : 's'} under 25% margin`, detail: lowMargin.map((x) => `${x.name} (${x.marginPct}%)`).join(', ') });
   }
-  if (retail.missingCost + wholesale.missingCost > 0) {
-    guidance.push({ level: 'info', title: `${retail.missingCost + wholesale.missingCost} sold line${retail.missingCost + wholesale.missingCost === 1 ? '' : 's'} without a cost price`, detail: 'Margins only count lines with a cost. Add cost prices to these products.' });
+  const noCostList = [...soldNoCost.values()].sort((a, b) => b.revenue - a.revenue).map((r) => ({ ...r, revenue: round(r.revenue) }));
+  if (noCostList.length) {
+    guidance.push({ level: 'medium', title: `${noCostList.length} fragrance${noCostList.length === 1 ? '' : 's'} sold without a saved cost price`, detail: 'Their margin is unknown. Open Fragrance → "No cost price" and enter the cost.', href: '/fragrance' });
+  }
+  if (wholesale.missingCost > 0) {
+    guidance.push({ level: 'info', title: `${wholesale.missingCost} wholesale line${wholesale.missingCost === 1 ? '' : 's'} sold without a cost price`, detail: 'Enter the cost on the wholesale item (or on the next delivery).', href: '/bulk-stock' });
   }
 
   return {
@@ -371,6 +393,7 @@ export function buildFragranceInsights(input: {
     topWholesale: rank(topWholesale),
     typeMix: rank(types, 6),
     soldOut,
+    soldWithoutCost: noCostList.slice(0, 15),
     unsold: { count: unsold.length, value: round(unsoldValue), items: unsold.slice(0, 10) },
     wholesaleStock: { low: wsLow, onOrder, overdue: overdue.slice(0, 10) },
     guidance,

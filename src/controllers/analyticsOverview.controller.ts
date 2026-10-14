@@ -6,11 +6,13 @@ import { MonthlyTarget } from '../models/MonthlyTarget.model';
 import { Frame } from '../models/Frame.model';
 import { LensStock } from '../models/LensStock.model';
 import { WholesaleItem } from '../models/WholesaleItem.model';
+import { Fragrance } from '../models/Fragrance.model';
 import {
-  cashSeries, collections, dailySeries, expenseFigures, resolvePeriod, salesFigures, targetProgress,
+  cashSeries, collections, dailySeries, expenseFigures, resolvePeriod, salesFigures, savedFragranceCost, targetProgress,
 } from '../services/analyticsOverview';
 
 const DAY = 86_400_000;
+const LAB_TURNAROUND_DAYS = 1;
 const INVOICE_FIELDS = { billDate: 1, subtotal: 1, discount: 1, total: 1, payments: 1, items: 1, isNewCustomer: 1, visitNumber: 1, acquisitionSource: 1, packagingCost: 1, paymentProcessingFee: 1 };
 
 /** Bills with a payment dated in the window (payments can come long after the bill). */
@@ -36,7 +38,7 @@ export const getAnalyticsOverview = async (req: Request, res: Response, next: Ne
     const now = new Date();
     const period = resolvePeriod(req.query.period as string | undefined, now);
 
-    const [cur, prev, curPaid, prevPaid, expenses, prevExpenses, targetDoc, dues, openLab, frames, lensStock, wholesale] = await Promise.all([
+    const [cur, prev, curPaid, prevPaid, expenses, prevExpenses, targetDoc, dues, openLab, frames, lensStock, wholesale, fragrances] = await Promise.all([
       Invoice.find({ billDate: { $gte: period.from, $lte: period.to } }).select(INVOICE_FIELDS).populate('items').lean(),
       Invoice.find({ billDate: { $gte: period.compareFrom, $lte: period.compareTo } }).select(INVOICE_FIELDS).populate('items').lean(),
       paidIn(period.from, period.to),
@@ -49,10 +51,12 @@ export const getAnalyticsOverview = async (req: Request, res: Response, next: Ne
       Frame.find({ isArchived: { $ne: true } }).select('stock createdAt').lean(),
       LensStock.find({}).select('quantity reorderLevel').lean(),
       WholesaleItem.find({ isArchived: { $ne: true } }).select('stock reorderLevel isOrdered').lean(),
+      Fragrance.find({}).select('costPrice variants').lean(),
     ]);
 
-    const sales = salesFigures(cur as any);
-    const prevSales = salesFigures(prev as any);
+    const costOf = savedFragranceCost(fragrances as any);
+    const sales = salesFigures(cur as any, costOf);
+    const prevSales = salesFigures(prev as any, costOf);
     const col = collections(curPaid as any, period.from, period.to);
     const prevCol = collections(prevPaid as any, period.compareFrom, period.compareTo);
     const exp = expenseFigures(expenses as any, period.from, period.to);
@@ -68,7 +72,8 @@ export const getAnalyticsOverview = async (req: Request, res: Response, next: Ne
       if (bal > 0 && now.getTime() - new Date(inv.billDate).getTime() > 30 * DAY) duesOld += bal;
     }
 
-    const labOverdue = (openLab as any[]).filter((i) => i.createdAt && now.getTime() - new Date(i.createdAt).getTime() > 7 * DAY).length;
+    // Lab jobs are expected back within 1 day.
+    const labOverdue = (openLab as any[]).filter((i) => i.createdAt && now.getTime() - new Date(i.createdAt).getTime() > LAB_TURNAROUND_DAYS * DAY).length;
     // Out of stock, not merely "at re-order level": most powers hold 1 pair against a level of 2, which made nearly all look low.
     const lowPowers = (lensStock as any[]).filter((s) => (s.quantity ?? 0) <= 0).length;
     const agedFrames = (frames as any[]).filter((f) => (f.stock ?? 0) > 0 && f.createdAt && now.getTime() - new Date(f.createdAt).getTime() > 180 * DAY).length;
@@ -84,7 +89,7 @@ export const getAnalyticsOverview = async (req: Request, res: Response, next: Ne
 
     const attention = [
       { key: 'dues', label: 'Dues pending', count: (dues as any[]).length, amount: Math.round(duesTotal), detail: duesOld > 0 ? `₹${Math.round(duesOld).toLocaleString('en-IN')} older than 30 days` : undefined, href: '/invoices?tab=dues' },
-      { key: 'lab', label: 'Lab orders open', count: (openLab as any[]).length, detail: labOverdue ? `${labOverdue} over 7 days` : undefined, href: '/wholesale' },
+      { key: 'lab', label: 'Lab orders open', count: (openLab as any[]).length, detail: labOverdue ? `${labOverdue} past 1 day` : undefined, href: '/wholesale' },
       { key: 'powers', label: 'Lens powers out of stock', count: lowPowers, href: '/lens-stock' },
       { key: 'frames', label: 'Frames over 6 months', count: agedFrames, href: '/analytics/optics' },
       { key: 'wholesale', label: 'Wholesale low, not ordered', count: wsLow, href: '/bulk-stock/order' },

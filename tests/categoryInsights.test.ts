@@ -91,3 +91,25 @@ describe('archived products', () => {
     expect(out.unsold.count).toBe(0);
   });
 });
+
+describe('fragrance margin from the saved cost', () => {
+  it('ignores the cost copied onto the bill and lists fragrances with no saved cost', () => {
+    const out = buildFragranceInsights({
+      invoices: [{ billDate: ago(1), items: [
+        { fragrance: 'a', quantity: 2, price: 300, costPrice: 290 }, // bill copy says 290, saved cost is 100
+        { fragrance: 'b', fragranceGrade: '6ml', quantity: 1, price: 450, costPrice: 400 }, // variant cost 200
+        { fragrance: 'c', quantity: 1, price: 500, costPrice: 100 }, // no saved cost at all
+      ] }],
+      fragrances: [
+        { _id: 'a', name: 'Rose', costPrice: 100, stock: 3 },
+        { _id: 'b', name: 'Oud', variants: [{ label: '6ml', costPrice: 200, stock: 2 }] },
+        { _id: 'c', name: 'Musk', stock: 1 },
+      ],
+      wholesale: [], days: 30, now,
+    });
+    // costed: Rose 600 − 200, Oud 450 − 200 → 650 / 1050
+    expect(out.retail.marginPct).toBe(Number(((650 / 1050) * 100).toFixed(1)));
+    expect(out.retail.missingCost).toBe(1);
+    expect(out.soldWithoutCost).toEqual([{ id: 'c', name: 'Musk', brand: undefined, type: undefined, sold: 1, revenue: 500 }]);
+  });
+});
