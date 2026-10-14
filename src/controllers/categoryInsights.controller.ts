@@ -4,7 +4,8 @@ import { Frame } from '../models/Frame.model';
 import { Fragrance } from '../models/Fragrance.model';
 import { LensStock } from '../models/LensStock.model';
 import { WholesaleItem } from '../models/WholesaleItem.model';
-import { buildFragranceInsights, buildOpticsInsights } from '../services/categoryInsights';
+import { buildFragranceInsights } from '../services/categoryInsights';
+import { buildOpticsInsights } from '../services/opticsInsights';
 
 const ALLOWED_DAYS = [30, 90, 180, 365];
 
@@ -21,16 +22,23 @@ function windowFor(req: Request) {
 const periodInvoices = (from: Date, to: Date) =>
   Invoice.find({ billDate: { $gte: from, $lte: to } }).select({ billDate: 1, items: 1 }).populate('items').lean();
 
-/** GET /analytics/insights/optics?days=30|90|180|365 — frames and lenses: sales, stock and guidance. */
+/** GET /analytics/insights/optics?days=30|90|180|365 — frames and lenses, compared with the previous period. */
 export const getOpticsInsights = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { days, now, from } = windowFor(req);
-    const [invoices, frames, lensStock] = await Promise.all([
+    const prevTo = new Date(from.getTime() - 1);
+    const prevFrom = new Date(from);
+    prevFrom.setDate(prevFrom.getDate() - days);
+    const [invoices, previousInvoices, frames, lensStock] = await Promise.all([
       periodInvoices(from, now),
-      Frame.find({}).select('name companyName costPrice sellPrice stock createdAt isArchived').lean(),
-      LensStock.find({}).select('lensType coating sph cyl add quantity reorderLevel').lean(),
+      periodInvoices(prevFrom, prevTo),
+      Frame.find({}).select('name companyName type costPrice sellPrice stock createdAt isArchived').lean(),
+      LensStock.find({}).select('lensType material coating color sph cyl add quantity').lean(),
     ]);
-    res.json({ from: from.toISOString(), to: now.toISOString(), ...buildOpticsInsights({ invoices: invoices as any, frames: frames as any, lensStock: lensStock as any, days, now }) });
+    res.json({
+      from: from.toISOString(), to: now.toISOString(),
+      ...buildOpticsInsights({ invoices: invoices as any, previousInvoices: previousInvoices as any, frames: frames as any, lensStock: lensStock as any, days, now }),
+    });
   } catch (e) {
     next(e);
   }

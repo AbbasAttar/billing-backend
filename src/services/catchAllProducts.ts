@@ -3,11 +3,12 @@
  * - fragrance "Wholesale": mixed sales (older bills)
  * - fragrance "Attar": a retail attar sale where the exact attar was not noted
  * - frame "Unknown": a frame whose cost is not known (only the company is)
+ * - frame "Wholesale" / "Quick Add": billing shortcuts for frames sold without picking the model
  * Their sales count in revenue and in their category, but not in margin, "no cost price" lists,
  * top sellers or stock lists, since there is no real product or cost behind them.
  */
 const FRAGRANCE_NAMES = ['wholesale', 'attar'];
-const FRAME_NAMES = ['unknown'];
+const FRAME_NAMES = ['unknown', 'wholesale', 'quick add'];
 
 const norm = (name?: string) => (name ?? '').trim().toLowerCase();
 

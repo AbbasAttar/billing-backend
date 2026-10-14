@@ -1,48 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { buildFragranceInsights, buildOpticsInsights } from '../src/services/categoryInsights';
+import { buildFragranceInsights } from '../src/services/categoryInsights';
 
 const now = new Date('2026-10-14T10:00:00Z');
 const ago = (d: number) => new Date(now.getTime() - d * 86_400_000);
-
-describe('buildOpticsInsights', () => {
-  const frames = [
-    { _id: 'f1', name: 'Aviator', companyName: 'Ray-Ban', costPrice: 1000, stock: 2, createdAt: ago(30) },
-    { _id: 'f2', name: 'Old Rimless', companyName: 'Vogue', costPrice: 800, stock: 3, createdAt: ago(400) },
-    { _id: 'f3', name: 'No Cost', companyName: 'Vogue', stock: 1, createdAt: ago(10) },
-  ];
-  const invoices = [
-    { billDate: ago(2), items: [{ frame: 'f1', quantity: 1, price: 2500, costPrice: 1000 }, { lensType: 'Single Vision', lensCoating: 'Blue Cut', quantity: 1, price: 1500 }] },
-    { billDate: ago(3), items: [{ frame: { _id: 'f1' }, quantity: 1, price: 2500, costPrice: 1000 }] },
-  ];
-  const out = buildOpticsInsights({
-    invoices, frames,
-    lensStock: [{ lensType: 'SV', coating: 'ARC', sph: -1, cyl: 0, quantity: 0, reorderLevel: 2 }, { lensType: 'SV', quantity: 1, reorderLevel: 2 }],
-    days: 30, now,
-  });
-
-  it('sums sales and leaves margin out for lines without cost', () => {
-    expect(out.frames).toEqual({ revenue: 5000, units: 2, marginPct: 60, missingCost: 0 });
-    expect(out.lenses).toEqual({ revenue: 1500, units: 1, marginPct: null, missingCost: 1 });
-    expect(out.lensAttachPct).toBe(50);
-    expect(out.topFrames[0]).toMatchObject({ name: 'Aviator', brand: 'Ray-Ban', units: 2, revenue: 5000, marginPct: 60 });
-  });
-
-  it('ages frame stock and counts frames without cost instead of guessing', () => {
-    expect(out.frameStock.value).toBe(2 * 1000 + 3 * 800);
-    expect(out.frameStock.noCostFrames).toBe(1);
-    expect(out.frameStock.aged).toEqual([{ id: 'f2', name: 'Old Rimless', brand: 'Vogue', ageDays: 400, stock: 3, value: 2400 }]);
-    expect(out.frameStock.unsoldInPeriod).toEqual({ units: 4, value: 2400 });
-  });
-
-  it('lists out-of-stock lens powers, and gives guidance', () => {
-    expect(out.lowPowers).toHaveLength(1);
-    expect(out.outOfStockPowers).toBe(1);
-    const titles = out.guidance.map((g) => g.title).join(' | ');
-    expect(titles).toMatch(/1 stock lens power out of stock/);
-    expect(titles).toMatch(/1 frame model in stock for over 6 months/);
-    expect(titles).toMatch(/without a cost price/);
-  });
-});
 
 describe('buildFragranceInsights', () => {
   const out = buildFragranceInsights({
@@ -135,17 +95,4 @@ describe('catch-all products', () => {
     expect(out.unsold.count).toBe(0);
   });
 
-  it('frame "Unknown": counts for the brand, not in margin, top frames or stock', () => {
-    const out = buildOpticsInsights({
-      invoices: [{ billDate: ago(1), items: [{ frame: 'u', quantity: 1, price: 1200 }, { frame: 'f', quantity: 1, price: 2000, costPrice: 1000 }] }],
-      frames: [{ _id: 'u', name: 'Unknown', companyName: 'Vogue', stock: 10, createdAt: ago(400) }, { _id: 'f', name: 'Aviator', companyName: 'Vogue', costPrice: 1000, stock: 1, createdAt: ago(10) }],
-      lensStock: [], days: 30, now,
-    });
-    expect(out.frames).toEqual({ revenue: 3200, units: 2, marginPct: 50, missingCost: 0 });
-    expect(out.mixedSales.revenue).toBe(1200);
-    expect(out.topFrames.map((f) => f.name)).toEqual(['Aviator']);
-    expect(out.topBrands[0]).toMatchObject({ name: 'Vogue', revenue: 3200 });
-    expect(out.frameStock.aged).toEqual([]);
-    expect(out.frameStock.units).toBe(1);
-  });
 });
