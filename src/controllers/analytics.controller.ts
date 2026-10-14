@@ -222,10 +222,22 @@ export const getAnalyticsSummary = async (req: Request, res: Response, next: Nex
             { $group: { _id: null, revenue: { $sum: { $multiply: ['$itemDoc.quantity', '$itemDoc.price'] } }, itemCount: { $sum: '$itemDoc.quantity' } } },
         ]);
 
+        const wholesaleItems = await Invoice.aggregate([
+            { $match: { billDate: { $gte: startOfMonth, $lte: endOfMonth } } },
+            { $unwind: '$items' },
+            { $lookup: { from: 'invoiceitems', localField: 'items', foreignField: '_id', as: 'itemDoc' } },
+            { $unwind: '$itemDoc' },
+            { $match: { 'itemDoc.wholesaleItem': { $exists: true, $ne: null } } },
+            { $group: { _id: null, revenue: { $sum: { $multiply: ['$itemDoc.quantity', '$itemDoc.price'] } }, itemCount: { $sum: '$itemDoc.quantity' } } },
+        ]);
+
         const revenueByCategory = [
             { category: 'Frame', revenue: frameItems[0]?.revenue ?? 0, itemCount: frameItems[0]?.itemCount ?? 0 },
             { category: 'OpticalLens', revenue: lensItems[0]?.revenue ?? 0, itemCount: lensItems[0]?.itemCount ?? 0 },
             { category: 'Fragrance', revenue: fragItems[0]?.revenue ?? 0, itemCount: fragItems[0]?.itemCount ?? 0 },
+            ...(wholesaleItems[0]?.revenue
+                ? [{ category: 'Wholesale', revenue: wholesaleItems[0].revenue, itemCount: wholesaleItems[0].itemCount ?? 0 }]
+                : []),
         ];
 
         // Top customers
@@ -351,6 +363,8 @@ export const getMonthlySummary = async (req: Request, res: Response, next: NextF
                     category: {
                         $switch: {
                             branches: [
+                                { case: { $ifNull: ['$itemDocs.wholesaleItem', false] }, then: 'wholesale' },
+                                { case: { $eq:     ['$itemDocs.type', 'wholesale'] }, then: 'wholesale' },
                                 { case: { $ifNull: ['$itemDocs.frame',       false] }, then: 'frame' },
                                 { case: { $ifNull: ['$itemDocs.opticalLens', false] }, then: 'opticalLens' },
                                 { case: { $eq:     ['$itemDocs.isCustomLens', true]  }, then: 'opticalLens' },
@@ -419,6 +433,7 @@ export const getMonthlySummary = async (req: Request, res: Response, next: NextF
                     frame:       zeroStats(),
                     opticalLens: zeroStats(),
                     fragrance:   zeroStats(),
+                    wholesale:   zeroStats(),
                 },
                 fragranceTypes: {
                     perfume: zeroStats(),
@@ -430,7 +445,7 @@ export const getMonthlySummary = async (req: Request, res: Response, next: NextF
 
         for (const entry of categoryAgg as any[]) {
             const m = months[entry._id.month - 1];
-            const cat = entry._id.category as 'frame' | 'opticalLens' | 'fragrance';
+            const cat = entry._id.category as 'frame' | 'opticalLens' | 'fragrance' | 'wholesale';
             if (m?.categories[cat]) {
                 m.categories[cat].units   = entry.units;
                 m.categories[cat].revenue = entry.revenue;
@@ -484,6 +499,8 @@ export const getTopItems = async (req: Request, res: Response, next: NextFunctio
                     itemCategory: {
                         $switch: {
                             branches: [
+                                { case: { $ifNull: ['$itemDocs.wholesaleItem', false] }, then: 'wholesale' },
+                                { case: { $eq:     ['$itemDocs.type', 'wholesale'] }, then: 'wholesale' },
                                 { case: { $ifNull: ['$itemDocs.frame',       false] }, then: 'frame' },
                                 { case: { $ifNull: ['$itemDocs.opticalLens', false] }, then: 'opticalLens' },
                                 { case: { $eq:     ['$itemDocs.isCustomLens', true]  }, then: 'opticalLens' },
@@ -732,7 +749,13 @@ export const getCategorySales = async (req: Request, res: Response, next: NextFu
                         $cond: [
                             { $ifNull: ['$item.frame', false] },
                             'frame',
-                            { $cond: [{ $ifNull: ['$item.fragrance', false] }, 'fragrance', 'lens'] },
+                            {
+                                $cond: [
+                                    { $ifNull: ['$item.fragrance', false] },
+                                    'fragrance',
+                                    { $cond: [{ $or: [{ $ifNull: ['$item.wholesaleItem', false] }, { $eq: ['$item.type', 'wholesale'] }] }, 'wholesale', 'lens'] },
+                                ],
+                            },
                         ],
                     },
                     itemRevenue: { $multiply: ['$item.price', '$item.quantity'] },
@@ -1023,6 +1046,7 @@ export const getExecutiveAnalytics = async (req: Request, res: Response, next: N
         let frameRev = 0, frameCost = 0, frameUnits = 0;
         let lensRev = 0, lensCost = 0, lensUnits = 0;
         let fragRev = 0, fragCost = 0, fragUnits = 0;
+        let wsRev = 0, wsCost = 0, wsUnits = 0;
 
         // Weekday vs Weekend Sales breakdown for smart forecasting
         let weekdayRevenue = 0;
@@ -1078,7 +1102,18 @@ export const getExecutiveAnalytics = async (req: Request, res: Response, next: N
                     totalCost += itemCost;
                     invCogs += itemCost;
 
-                    if (item.frame) {
+                    // Wholesale lines have no frame/fragrance link; without this branch they were counted as lenses.
+                    if (item.wholesaleItem || item.type === 'wholesale') {
+                        wsRev += itemRev;
+                        wsCost += itemCost;
+                        wsUnits += qty;
+                        const prodKey = `ws-${item.wholesaleItem ?? item.itemName}`;
+                        const existing = productMap.get(prodKey) || { name: item.itemName || 'Wholesale Item', category: 'Wholesale', units: 0, revenue: 0, cogs: 0 };
+                        existing.units += qty;
+                        existing.revenue += itemRev;
+                        existing.cogs += itemCost;
+                        productMap.set(prodKey, existing);
+                    } else if (item.frame) {
                         frameRev += itemRev;
                         frameCost += itemCost;
                         frameUnits += qty;
@@ -1470,7 +1505,7 @@ export const getExecutiveAnalytics = async (req: Request, res: Response, next: N
         };
 
         // 5. Category Breakdown
-        const totalCatRev = frameRev + lensRev + fragRev || 1;
+        const totalCatRev = frameRev + lensRev + fragRev + wsRev || 1;
         const categoryShare = [
             {
                 name: 'Optical Frames',
@@ -1499,6 +1534,17 @@ export const getExecutiveAnalytics = async (req: Request, res: Response, next: N
                 marginPct: fragRev > 0 ? Number((((fragRev - fragCost) / fragRev) * 100).toFixed(1)) : 52.0,
                 color: '#D97706',
             },
+            ...(wsRev > 0
+                ? [{
+                    name: 'Wholesale Stock',
+                    category: 'wholesale',
+                    revenue: Math.round(wsRev),
+                    units: wsUnits,
+                    sharePct: Number(((wsRev / totalCatRev) * 100).toFixed(1)),
+                    marginPct: Number((((wsRev - wsCost) / wsRev) * 100).toFixed(1)),
+                    color: '#A78BFA',
+                }]
+                : []),
         ];
 
         // 6. Inventory Valuation, Aging & Trapped Capital
@@ -1572,7 +1618,7 @@ export const getExecutiveAnalytics = async (req: Request, res: Response, next: N
         }
 
         const trappedCapital = Math.round(ageBuckets[2].value + ageBuckets[3].value);
-        const totalUnitsSoldPeriod = frameUnits + lensUnits + fragUnits || 1;
+        const totalUnitsSoldPeriod = frameUnits + lensUnits + fragUnits + wsUnits || 1;
         const annualizedSoldUnits = (totalUnitsSoldPeriod / days) * 365;
         const annualStockTurns = Number((annualizedSoldUnits / totalStockUnits).toFixed(2));
 
