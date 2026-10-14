@@ -11,9 +11,11 @@ import {
     getSalesDistributionAnalytics,
 } from '../controllers/analytics.controller';
 import { getFragranceInsights, getOpticsInsights } from '../controllers/categoryInsights.controller';
+import { getAnalyticsOverview } from '../controllers/analyticsOverview.controller';
 
 const router = Router();
 
+router.get('/overview',           getAnalyticsOverview);
 router.get('/executive',          getExecutiveAnalytics);
 router.get('/unit-economics',     getUnitEconomicsAnalytics);
 router.get('/sales-distribution', getSalesDistributionAnalytics);

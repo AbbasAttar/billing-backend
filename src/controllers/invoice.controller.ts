@@ -372,7 +372,8 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       typeof body.paymentProcessingFee === 'number'
         ? body.paymentProcessingFee
         : Number((onlinePaid * (finConfig.defaultCardSwipeFeePct / 100)).toFixed(2));
-    const acquisitionSource = body.acquisitionSource || (isNewCustomer ? 'walk_by' : 'repeat');
+    // New customers: keep what the counter picked; no guessing "walk-by" (that made every source look like walk-by).
+    const acquisitionSource = body.acquisitionSource || (isNewCustomer ? undefined : 'repeat');
     const fy = financialYear(billDate);
 
     // ── 3. One transaction: every write lands together or not at all ─────────

@@ -16,7 +16,7 @@ describe('buildOpticsInsights', () => {
   ];
   const out = buildOpticsInsights({
     invoices, frames,
-    lensStock: [{ lensType: 'SV', coating: 'ARC', sph: -1, cyl: 0, quantity: 1, reorderLevel: 4 }, { lensType: 'SV', quantity: 9, reorderLevel: 4 }],
+    lensStock: [{ lensType: 'SV', coating: 'ARC', sph: -1, cyl: 0, quantity: 0, reorderLevel: 2 }, { lensType: 'SV', quantity: 1, reorderLevel: 2 }],
     days: 30, now,
   });
 
@@ -34,10 +34,11 @@ describe('buildOpticsInsights', () => {
     expect(out.frameStock.unsoldInPeriod).toEqual({ units: 4, value: 2400 });
   });
 
-  it('lists only lens powers at or below their re-order level, and gives guidance', () => {
+  it('lists out-of-stock lens powers, and gives guidance', () => {
     expect(out.lowPowers).toHaveLength(1);
+    expect(out.outOfStockPowers).toBe(1);
     const titles = out.guidance.map((g) => g.title).join(' | ');
-    expect(titles).toMatch(/1 lens power at or below/);
+    expect(titles).toMatch(/1 stock lens power out of stock/);
     expect(titles).toMatch(/1 frame model in stock for over 6 months/);
     expect(titles).toMatch(/without a cost price/);
   });

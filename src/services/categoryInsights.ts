@@ -195,21 +195,22 @@ export function buildOpticsInsights(input: {
   }
   aged.sort((a, b) => (b.value ?? 0) - (a.value ?? 0) || b.ageDays - a.ageDays);
 
-  const lowPowers = input.lensStock
-    .filter((s) => typeof s.reorderLevel === 'number' && s.reorderLevel > 0 && (s.quantity ?? 0) <= s.reorderLevel)
+  // Out of stock powers (most powers hold 1 pair against a re-order level of 2, so "at re-order level" flags nearly all).
+  const outPowers = input.lensStock.filter((s) => (s.quantity ?? 0) <= 0);
+  const lowPowers = outPowers
     .map((s) => ({
       label: `${s.lensType ?? ''} ${s.coating ?? ''}`.trim(),
       sph: s.sph ?? 0, cyl: s.cyl ?? 0, add: s.add ?? null,
-      quantity: s.quantity ?? 0, reorderLevel: s.reorderLevel as number,
+      quantity: s.quantity ?? 0, reorderLevel: s.reorderLevel ?? 0,
     }))
-    .sort((a, b) => a.quantity - b.quantity)
-    .slice(0, 12);
+    .sort((a, b) => Math.abs(a.sph) - Math.abs(b.sph) || Math.abs(a.cyl) - Math.abs(b.cyl))
+    .slice(0, 24);
 
   const attachPct = pct(frameBillsWithLens, frameBills);
   const agedValue = buckets[2].value + buckets[3].value;
   const guidance: Guidance[] = [];
-  if (lowPowers.length) {
-    guidance.push({ level: 'high', title: `${lowPowers.length} lens power${lowPowers.length === 1 ? '' : 's'} at or below the re-order level`, detail: 'Order these stock lenses before they run out.', href: '/lens-stock' });
+  if (outPowers.length) {
+    guidance.push({ level: 'high', title: `${outPowers.length} stock lens power${outPowers.length === 1 ? '' : 's'} out of stock`, detail: 'Re-order the common powers first (lowest numbers are listed first below).', href: '/lens-stock' });
   }
   if (aged.length) {
     guidance.push({
@@ -253,6 +254,7 @@ export function buildOpticsInsights(input: {
       aged: aged.slice(0, 10),
     },
     lowPowers,
+    outOfStockPowers: outPowers.length,
     guidance,
   };
 }
