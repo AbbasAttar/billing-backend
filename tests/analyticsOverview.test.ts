@@ -114,3 +114,21 @@ describe('savedFragranceCost', () => {
     expect(cost({ frame: 'f', costPrice: 700 })).toBe(700);
   });
 });
+
+describe('catch-all products in the overview', () => {
+  it('keep revenue in the category but stay out of margin and missing-cost counts', async () => {
+    const { salesFigures, savedFragranceCost } = await import('../src/services/analyticsOverview');
+    const { catchAllIds } = await import('../src/services/catchAllProducts');
+    const frames = [{ _id: 'u', name: 'Unknown' }];
+    const frs = [{ _id: 'w', name: 'Wholesale', costPrice: 1752.5 }, { _id: 'r', name: 'Rose', costPrice: 100 }];
+    const s = salesFigures([{ billDate: now, subtotal: 1650, discount: 0, total: 1650, items: [
+      { fragrance: 'w', quantity: 3, price: 150 }, { fragrance: 'r', quantity: 1, price: 200 }, { frame: 'u', quantity: 1, price: 1000 },
+    ] }], savedFragranceCost(frs), catchAllIds(frames, frs));
+    const by = Object.fromEntries(s.categories.map((c) => [c.category, c]));
+    expect(by.fragrance).toMatchObject({ revenue: 650, marginPct: 50 });
+    expect(by.frame).toMatchObject({ revenue: 1000, marginPct: null });
+    expect(s.mixedSales).toEqual({ revenue: 1450, lines: 2 });
+    expect(s.uncostedLines).toBe(0);
+    expect(s.grossProfit).toBe(100);
+  });
+});

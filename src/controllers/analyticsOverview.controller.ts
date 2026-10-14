@@ -7,6 +7,7 @@ import { Frame } from '../models/Frame.model';
 import { LensStock } from '../models/LensStock.model';
 import { WholesaleItem } from '../models/WholesaleItem.model';
 import { Fragrance } from '../models/Fragrance.model';
+import { catchAllIds, isCatchAllFrame } from '../services/catchAllProducts';
 import {
   cashSeries, collections, dailySeries, expenseFigures, resolvePeriod, salesFigures, savedFragranceCost, targetProgress,
 } from '../services/analyticsOverview';
@@ -48,15 +49,16 @@ export const getAnalyticsOverview = async (req: Request, res: Response, next: Ne
       period.targetMonth ? MonthlyTarget.findOne({ month: period.targetMonth }).lean() : Promise.resolve(null),
       Invoice.find({ hasDue: true }).select({ total: 1, payments: 1, billDate: 1 }).lean(),
       InvoiceItem.find({ isLabItem: true, isOpenLabJob: true }).select('createdAt labStatus sentToWholesaler').lean(),
-      Frame.find({ isArchived: { $ne: true } }).select('stock createdAt').lean(),
+      Frame.find({}).select('name stock createdAt isArchived').lean(),
       LensStock.find({}).select('quantity reorderLevel').lean(),
       WholesaleItem.find({ isArchived: { $ne: true } }).select('stock reorderLevel isOrdered').lean(),
-      Fragrance.find({}).select('costPrice variants').lean(),
+      Fragrance.find({}).select('name costPrice variants').lean(),
     ]);
 
     const costOf = savedFragranceCost(fragrances as any);
-    const sales = salesFigures(cur as any, costOf);
-    const prevSales = salesFigures(prev as any, costOf);
+    const catchAll = catchAllIds(frames as any, fragrances as any);
+    const sales = salesFigures(cur as any, costOf, catchAll);
+    const prevSales = salesFigures(prev as any, costOf, catchAll);
     const col = collections(curPaid as any, period.from, period.to);
     const prevCol = collections(prevPaid as any, period.compareFrom, period.compareTo);
     const exp = expenseFigures(expenses as any, period.from, period.to);
@@ -76,7 +78,7 @@ export const getAnalyticsOverview = async (req: Request, res: Response, next: Ne
     const labOverdue = (openLab as any[]).filter((i) => i.createdAt && now.getTime() - new Date(i.createdAt).getTime() > LAB_TURNAROUND_DAYS * DAY).length;
     // Out of stock, not merely "at re-order level": most powers hold 1 pair against a level of 2, which made nearly all look low.
     const lowPowers = (lensStock as any[]).filter((s) => (s.quantity ?? 0) <= 0).length;
-    const agedFrames = (frames as any[]).filter((f) => (f.stock ?? 0) > 0 && f.createdAt && now.getTime() - new Date(f.createdAt).getTime() > 180 * DAY).length;
+    const agedFrames = (frames as any[]).filter((f) => !f.isArchived && !isCatchAllFrame(f) && (f.stock ?? 0) > 0 && f.createdAt && now.getTime() - new Date(f.createdAt).getTime() > 180 * DAY).length;
     const wsLow = (wholesale as any[]).filter((w) => !w.isOrdered && ((w.stock ?? 0) <= 0 || (w.reorderLevel != null && (w.stock ?? 0) <= w.reorderLevel))).length;
 
     let recallsDue: number | null = null;
@@ -109,7 +111,7 @@ export const getAnalyticsOverview = async (req: Request, res: Response, next: Ne
         revenue: { value: sales.revenue, previous: prevSales.revenue, changePct: change(sales.revenue, prevSales.revenue), invoices: sales.invoices, aov: sales.aov },
         grossProfit: {
           value: sales.grossProfit, previous: prevSales.grossProfit, changePct: change(sales.grossProfit, prevSales.grossProfit),
-          marginPct: sales.marginPct, coveragePct: sales.coveragePct, uncostedLines: sales.uncostedLines,
+          marginPct: sales.marginPct, coveragePct: sales.coveragePct, uncostedLines: sales.uncostedLines, mixedSales: sales.mixedSales,
           netContribution: sales.netContribution, packaging: sales.packaging, fees: sales.fees,
         },
         collected: { value: col.total, previous: prevCol.total, changePct: change(col.total, prevCol.total), cash: col.cash, upi: col.upi },

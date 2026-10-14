@@ -113,3 +113,39 @@ describe('fragrance margin from the saved cost', () => {
     expect(out.soldWithoutCost).toEqual([{ id: 'c', name: 'Musk', brand: undefined, type: undefined, sold: 1, revenue: 500 }]);
   });
 });
+
+describe('catch-all products', () => {
+  it('fragrance "Wholesale" and "Attar": revenue only, out of margin and lists', () => {
+    const out = buildFragranceInsights({
+      invoices: [{ billDate: ago(1), items: [
+        { fragrance: 'w', quantity: 3, price: 150 }, { fragrance: 'a', quantity: 1, price: 200 }, { fragrance: 'r', quantity: 1, price: 250 },
+      ] }],
+      fragrances: [
+        { _id: 'w', name: 'Wholesale', costPrice: 1752.5, stock: 0 },
+        { _id: 'a', name: ' attar ', stock: 4 },
+        { _id: 'r', name: 'Rose', costPrice: 100, stock: 2 },
+      ],
+      wholesale: [], days: 30, now,
+    });
+    expect(out.retail).toEqual({ revenue: 900, units: 5, marginPct: 60, missingCost: 0 });
+    expect(out.mixedSales.revenue).toBe(650);
+    expect(out.topRetail.map((r) => r.name)).toEqual(['Rose']);
+    expect(out.soldOut).toEqual([]);
+    expect(out.soldWithoutCost).toEqual([]);
+    expect(out.unsold.count).toBe(0);
+  });
+
+  it('frame "Unknown": counts for the brand, not in margin, top frames or stock', () => {
+    const out = buildOpticsInsights({
+      invoices: [{ billDate: ago(1), items: [{ frame: 'u', quantity: 1, price: 1200 }, { frame: 'f', quantity: 1, price: 2000, costPrice: 1000 }] }],
+      frames: [{ _id: 'u', name: 'Unknown', companyName: 'Vogue', stock: 10, createdAt: ago(400) }, { _id: 'f', name: 'Aviator', companyName: 'Vogue', costPrice: 1000, stock: 1, createdAt: ago(10) }],
+      lensStock: [], days: 30, now,
+    });
+    expect(out.frames).toEqual({ revenue: 3200, units: 2, marginPct: 50, missingCost: 0 });
+    expect(out.mixedSales.revenue).toBe(1200);
+    expect(out.topFrames.map((f) => f.name)).toEqual(['Aviator']);
+    expect(out.topBrands[0]).toMatchObject({ name: 'Vogue', revenue: 3200 });
+    expect(out.frameStock.aged).toEqual([]);
+    expect(out.frameStock.units).toBe(1);
+  });
+});

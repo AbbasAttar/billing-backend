@@ -25,6 +25,7 @@ export const STOCK_EXPENSE_CATEGORIES = ['stock', 'vendor_order'];
 export const HOME_EXPENSE_CATEGORIES = ['home_expense'];
 
 const DAY = 86_400_000;
+const idOf = (v: unknown) => (v && typeof v === 'object' && '_id' in (v as object) ? String((v as { _id: unknown })._id) : String(v ?? ''));
 const r0 = (n: number) => Math.round(n);
 const pct1 = (a: number, b: number) => (b > 0 ? Number(((a / b) * 100).toFixed(1)) : null);
 const inRange = (d: Date, from: Date, to: Date) => d.getTime() >= from.getTime() && d.getTime() <= to.getTime();
@@ -117,8 +118,12 @@ export function savedFragranceCost(fragrances: { _id: unknown; costPrice?: numbe
   };
 }
 
-/** Sales figures for a set of bills. */
-export function salesFigures(invoices: OvInvoice[], costOf: CostOf = lineCost) {
+/**
+ * Sales figures for a set of bills. `catchAll`: ids of catch-all products (see catchAllProducts.ts);
+ * their lines stay in revenue and their category but out of margin and the missing-cost count.
+ */
+export function salesFigures(invoices: OvInvoice[], costOf: CostOf = lineCost, catchAll: Set<string> = new Set()) {
+  let mixedRevenue = 0, mixedLines = 0;
   let revenue = 0, billed = 0, discount = 0, cogs = 0, costedNet = 0, uncostedLines = 0, packaging = 0, fees = 0;
   let newRev = 0, newCount = 0, repeatRev = 0, repeatCount = 0;
   const cat = new Map<string, { billed: number; costedNet: number; cost: number }>();
@@ -142,8 +147,12 @@ export function salesFigures(invoices: OvInvoice[], costOf: CostOf = lineCost) {
       const lineRev = qty * (it.price || 0);
       const c = cat.get(kindOf(it)) ?? { billed: 0, costedNet: 0, cost: 0 };
       c.billed += lineRev;
-      const unitCost = costOf(it);
-      if (unitCost !== null) {
+      const isCatchAll = catchAll.size > 0 && (catchAll.has(idOf(it.frame)) || catchAll.has(idOf(it.fragrance)));
+      const unitCost = isCatchAll ? null : costOf(it);
+      if (isCatchAll) {
+        mixedRevenue += lineRev;
+        mixedLines += 1;
+      } else if (unitCost !== null) {
         const net = lineRev * keep;
         const cost = qty * unitCost;
         c.costedNet += net;
@@ -183,6 +192,7 @@ export function salesFigures(invoices: OvInvoice[], costOf: CostOf = lineCost) {
     marginPct: costedNet > 0 ? Number(((grossProfit / costedNet) * 100).toFixed(1)) : null,
     coveragePct: pct1(costedNet, revenue),
     uncostedLines,
+    mixedSales: { revenue: r0(mixedRevenue), lines: mixedLines },
     netContribution: costedNet > 0 ? r0(grossProfit - packaging - fees) : null,
     packaging: r0(packaging), fees: r0(fees),
     categories,

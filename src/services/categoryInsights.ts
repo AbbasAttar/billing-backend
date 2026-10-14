@@ -1,3 +1,5 @@
+import { isCatchAllFragrance, isCatchAllFrame } from './catchAllProducts';
+
 /**
  * Category insights for the analytics pages: Optics (frames, lenses) and Fragrance (retail, wholesale).
  * Built only from recorded data — a figure that cannot be worked out (e.g. margin without cost prices)
@@ -47,6 +49,13 @@ const tally = (): Tally => ({ revenue: 0, units: 0, cost: 0, costedRevenue: 0, m
 
 const idOf = (v: unknown): string => (v && typeof v === 'object' && '_id' in (v as object) ? String((v as { _id: unknown })._id) : String(v ?? ''));
 const DAY = 86_400_000;
+
+/** A catch-all line: revenue counts, but no cost, margin or product to list (see catchAllProducts.ts). */
+function addRevenueOnly(t: Tally, item: InsightItem) {
+  const qty = item.quantity && item.quantity > 0 ? item.quantity : 1;
+  t.revenue += qty * (item.price || 0);
+  t.units += qty;
+}
 const round = (n: number) => Math.round(n);
 /** Attar is sold by part bottles, so units can be fractional. */
 const units = (n: number) => Math.round(n * 100) / 100;
@@ -124,6 +133,7 @@ export function buildOpticsInsights(input: {
   const lensTypes = new Map<string, Ranked>();
   const coatings = new Map<string, Ranked>();
   const soldFrameIds = new Set<string>();
+  let frameMixed = 0;
   let frameBills = 0;
   let frameBillsWithLens = 0;
 
@@ -134,11 +144,18 @@ export function buildOpticsInsights(input: {
       const k = kind(it);
       if (k === 'frame') {
         hasFrame = true;
-        add(frames, it);
         const id = idOf(it.frame);
-        soldFrameIds.add(id);
         const doc = frameById.get(id);
         const brand = doc?.companyName || 'Unknown brand';
+        if (doc && isCatchAllFrame(doc)) {
+          // "Unknown" frame: the company is known (so it counts for the brand), the model and cost are not.
+          addRevenueOnly(frames, it);
+          frameMixed += (it.quantity || 1) * (it.price || 0);
+          bump(brands, brand, () => ({ id: brand, name: brand }), { ...it, costPrice: undefined });
+          continue;
+        }
+        add(frames, it);
+        soldFrameIds.add(id);
         bump(topFrames, id, () => ({ id, name: doc?.name || it.itemName || 'Frame', brand }), it);
         bump(brands, brand, () => ({ id: brand, name: brand }), it);
       } else if (k === 'lens') {
@@ -172,7 +189,7 @@ export function buildOpticsInsights(input: {
   let unsoldValue = 0;
 
   for (const f of input.frames) {
-    if (f.isArchived) continue;
+    if (f.isArchived || isCatchAllFrame(f)) continue;
     const stock = f.stock && f.stock > 0 ? f.stock : 0;
     if (!stock) continue;
     stockUnits += stock;
@@ -238,6 +255,7 @@ export function buildOpticsInsights(input: {
   return {
     days: input.days,
     frames: summary(frames),
+    mixedSales: { revenue: round(frameMixed), note: 'Frames billed as "Unknown": in revenue and brands, not in margin or top frames' },
     lenses: summary(lenses),
     lensAttachPct: attachPct,
     frameBills,
@@ -292,6 +310,7 @@ export function buildFragranceInsights(input: {
   const topWholesale = new Map<string, Ranked>();
   const types = new Map<string, Ranked>();
   const soldRetail = new Map<string, number>();
+  let fragMixed = 0;
   const soldNoCost = new Map<string, { id: string; name: string; brand?: string; type?: string; sold: number; revenue: number }>();
   /** Margin uses the cost saved on the fragrance (its size variant first), not the cost copied onto the bill. */
   const savedCost = (doc: FragranceDoc | undefined, grade?: string) => {
@@ -304,6 +323,12 @@ export function buildFragranceInsights(input: {
   for (const inv of input.invoices) {
     for (let it of items(inv)) {
       const k = kind(it);
+      if (k === 'fragrance' && fragById.get(idOf(it.fragrance)) && isCatchAllFragrance(fragById.get(idOf(it.fragrance))!)) {
+        // "Wholesale" / "Attar" catch-alls: mixed or unnoted sales. Revenue only.
+        addRevenueOnly(retail, it);
+        fragMixed += (it.quantity || 1) * (it.price || 0);
+        continue;
+      }
       if (k === 'fragrance') {
         const id = idOf(it.fragrance);
         const doc = fragById.get(id);
@@ -338,7 +363,7 @@ export function buildFragranceInsights(input: {
     .slice(0, 10)
     .map(({ f, sold }) => ({ id: idOf(f._id), name: f.name || 'Fragrance', brand: f.companyName, sold }));
   const unsold = input.fragrances
-    .filter((f) => !f.isArchived && fragStock(f) > 0 && !soldRetail.has(idOf(f._id)))
+    .filter((f) => !f.isArchived && !isCatchAllFragrance(f) && fragStock(f) > 0 && !soldRetail.has(idOf(f._id)))
     .map((f) => ({ id: idOf(f._id), name: f.name || 'Fragrance', brand: f.companyName, stock: fragStock(f), value: fragValue(f) }))
     .sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
   const unsoldValue = unsold.reduce((s, u) => s + (u.value ?? 0), 0);
@@ -388,6 +413,7 @@ export function buildFragranceInsights(input: {
   return {
     days: input.days,
     retail: summary(retail),
+    mixedSales: { revenue: round(fragMixed), note: 'Billed as "Wholesale" or "Attar" (mixed or unnoted sales): in revenue, not in margin or top sellers' },
     wholesale: summary(wholesale),
     topRetail: rank(topRetail),
     topWholesale: rank(topWholesale),
