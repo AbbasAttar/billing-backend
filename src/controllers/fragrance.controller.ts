@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { mergePlan } from '../services/fragranceMerge';
 import mongoose from 'mongoose';
 import { Fragrance } from '../models/Fragrance.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
@@ -391,3 +392,28 @@ export const getFragranceSold = async (req: Request, res: Response, next: NextFu
   }
 };
 
+
+/** POST /fragrances/:id/merge { fromId } — merge a duplicate into this one (owner only, see accessPolicy). */
+export const mergeFragrance = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const fromId = typeof req.body?.fromId === 'string' ? req.body.fromId : '';
+    const [keep, dup]: any[] = await Promise.all([Fragrance.findById(req.params.id).lean(), fromId ? Fragrance.findById(fromId).lean() : null]);
+    if (!keep || !dup) {
+      res.status(404).json({ message: 'Fragrance not found' });
+      return;
+    }
+    const plan = mergePlan(keep, dup);
+    if ('error' in plan) {
+      res.status(400).json({ message: plan.error });
+      return;
+    }
+    const kept = await Fragrance.findByIdAndUpdate(String(req.params.id), { $set: plan.update }, { new: true });
+    // The duplicate is archived, not deleted: old bills still show it. Its stock now counts on the kept one.
+    await Fragrance.findByIdAndUpdate(fromId, {
+      $set: { isArchived: true, archivedAt: new Date(), stock: 0, variants: (dup.variants ?? []).map((v: any) => ({ ...v, stock: 0 })), mergedInto: String(req.params.id), 'web.isPublished': false },
+    });
+    res.json(kept);
+  } catch (error) {
+    next(error);
+  }
+};

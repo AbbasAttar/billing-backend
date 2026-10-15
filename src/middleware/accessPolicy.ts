@@ -48,6 +48,8 @@ const ADMIN_ONLY: Array<[RegExp, RegExp]> = [
   [/^DELETE$/, /^\/(?!(wholesaler-queue|prescriptions|purchases|customer-requirements)\/[^/]+$|notifications\/fcm-token$).*/],
   // Archiving products hides them from sale.
   [/^PATCH$/, /\/archive$/],
+  // Merging duplicate products moves stock and archives one.
+  [/^POST$/, /^\/fragrances\/[^/]+\/merge$/],
   // Invoice numbering and corrections to money already recorded.
   [/^POST$/, /^\/invoices\/renumber$/],
   [/^PATCH$/, /^\/invoices\/[^/]+\/payment\/[^/]+$/],

@@ -10,6 +10,7 @@ import {
   archiveFragrance,
   deleteFragrance,
   getFragranceRevenueSummary,
+  mergeFragrance,
 } from '../controllers/fragrance.controller';
 import { getFragrancePresets, updateFragrancePresets } from '../controllers/fragrancePresets.controller';
 
@@ -26,6 +27,7 @@ router.get('/:id', getFragranceById);
 router.post('/', createFragrance);
 router.put('/:id', updateFragrance);
 router.patch('/:id/archive', archiveFragrance);
+router.post('/:id/merge', mergeFragrance);
 router.delete('/:id', deleteFragrance);
 
 export default router;
