@@ -122,10 +122,11 @@ function frameToPublic(f: IFrame): PublicProduct {
 function fragranceToPublic(f: IFragrance): PublicProduct {
   const web = f.web ?? ({} as any);
   const primary = web.images?.find((i: any) => i.isPrimary) ?? web.images?.[0];
+  // Only options ticked "online"; cost and wholesale price never leave the admin.
+  const online = (f.variants ?? []).filter((v) => v.online !== false && v.sellPrice > 0);
   const variants: PublicProductVariant[] | undefined =
-    f.variants && f.variants.length > 0
-      ? f.variants.map((v) => ({ label: v.label, sellPrice: v.sellPrice, stock: v.stock }))
-      : undefined;
+    online.length > 0 ? online.map((v) => ({ label: v.label, sellPrice: v.sellPrice, stock: v.stock })) : undefined;
+  const fromPrice = online.length > 0 ? Math.min(...online.map((v) => v.sellPrice)) : undefined;
   return {
     id: (f._id as any).toString(),
     category: 'fragrances',
@@ -133,7 +134,7 @@ function fragranceToPublic(f: IFragrance): PublicProduct {
     slug: web.slug ?? '',
     name: web.displayName || f.name,
     brand: f.companyName,
-    price: f.sellPrice ?? 0,
+    price: fromPrice ?? f.sellPrice ?? 0,
     images: web.images ?? [],
     primaryImage: primary?.url,
     shortDescription: web.shortDescription,

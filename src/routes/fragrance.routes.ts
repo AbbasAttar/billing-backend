@@ -11,9 +11,12 @@ import {
   deleteFragrance,
   getFragranceRevenueSummary,
 } from '../controllers/fragrance.controller';
+import { getFragrancePresets, updateFragrancePresets } from '../controllers/fragrancePresets.controller';
 
 const router = Router();
 
+router.get('/presets', getFragrancePresets);
+router.put('/presets', updateFragrancePresets);
 router.get('/search', searchFragrances);
 router.get('/revenue-summary', getFragranceRevenueSummary);
 router.get('/trends', getFragranceTrends);

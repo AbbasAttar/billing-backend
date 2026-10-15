@@ -115,11 +115,19 @@ function buildSpecs(raw: any, kind: 'frame' | 'lens' | 'fragrance') {
       coating: raw.coating,
     };
   }
+  // Public scent details only: the selling line and "similar to" stay internal.
   return {
     brand: raw.companyName,
     type: raw.type,
     family: raw.web?.fragranceFamily,
     longevity: raw.web?.longevity,
+    gender: raw.gender,
+    topNotes: raw.scent?.top,
+    heartNotes: raw.scent?.heart,
+    baseNotes: raw.scent?.base,
+    projection: raw.scent?.projection,
+    seasons: raw.scent?.seasons,
+    occasions: raw.scent?.occasions,
   };
 }
 
