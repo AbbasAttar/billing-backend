@@ -75,7 +75,7 @@ describe('fragrance margin from the saved cost', () => {
 });
 
 describe('catch-all products', () => {
-  it('fragrance "Wholesale" and "Attar": revenue only, out of margin and lists', () => {
+  it('fragrance "Wholesale" is a mixed wholesale order and "Attar" a mixed retail sale: revenue only, out of margin and lists', () => {
     const out = buildFragranceInsights({
       invoices: [{ billDate: ago(1), items: [
         { fragrance: 'w', quantity: 3, price: 150 }, { fragrance: 'a', quantity: 1, price: 200 }, { fragrance: 'r', quantity: 1, price: 250 },
@@ -87,8 +87,11 @@ describe('catch-all products', () => {
       ],
       wholesale: [], days: 30, now,
     });
-    expect(out.retail).toEqual({ revenue: 900, units: 5, marginPct: 60, missingCost: 0 });
-    expect(out.mixedSales.revenue).toBe(650);
+    expect(out.retail).toEqual({ revenue: 450, units: 2, marginPct: 60, missingCost: 0 });
+    expect(out.mixedSales.revenue).toBe(200);
+    expect(out.wholesale).toEqual({ revenue: 450, units: 3, marginPct: null, missingCost: 0 });
+    expect(out.wholesaleMixed.revenue).toBe(450);
+    expect(out.wholesaleMovement).toEqual([expect.objectContaining({ id: 'wholesale-mix', type: 'mix', units: 3, revenue: 450, stock: null })]);
     expect(out.topRetail.map((r) => r.name)).toEqual(['Rose']);
     expect(out.soldOut).toEqual([]);
     expect(out.soldWithoutCost).toEqual([]);

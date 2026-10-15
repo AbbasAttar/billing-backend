@@ -131,6 +131,18 @@ describe('catch-all products in the overview', () => {
     expect(s.uncostedLines).toBe(0);
     expect(s.grossProfit).toBe(100);
   });
+
+  it('count the "Wholesale" fragrance under Wholesale, not Retail', async () => {
+    const { salesFigures, savedFragranceCost } = await import('../src/services/analyticsOverview');
+    const { catchAllIds, wholesaleMixIds } = await import('../src/services/catchAllProducts');
+    const frs = [{ _id: 'w', name: 'Wholesale' }, { _id: 'r', name: 'Rose', costPrice: 100 }];
+    const s = salesFigures([{ billDate: now, subtotal: 650, discount: 0, total: 650, items: [
+      { fragrance: 'w', quantity: 3, price: 150 }, { fragrance: 'r', quantity: 1, price: 200 },
+    ] }], savedFragranceCost(frs), catchAllIds([], frs), wholesaleMixIds(frs));
+    const by = Object.fromEntries(s.categories.map((c) => [c.category, c]));
+    expect(by.fragrance).toMatchObject({ revenue: 200, marginPct: 50 });
+    expect(by.wholesale).toMatchObject({ revenue: 450, marginPct: null });
+  });
 });
 
 describe('new-customer sources', () => {

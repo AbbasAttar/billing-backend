@@ -13,6 +13,11 @@ const FRAME_NAMES = ['unknown', 'wholesale', 'quick add'];
 const norm = (name?: string) => (name ?? '').trim().toLowerCase();
 
 export const isCatchAllFragrance = (f: { name?: string }) => FRAGRANCE_NAMES.includes(norm(f.name));
+/** Fragrance "Wholesale": mixed wholesale orders billed as one line. Counts as wholesale, not retail. */
+export const isWholesaleMixFragrance = (f: { name?: string }) => norm(f.name) === 'wholesale';
+export const wholesaleMixIds = (fragrances: { _id: unknown; name?: string }[]) =>
+  new Set(fragrances.filter(isWholesaleMixFragrance).map((f) => String(f._id)));
+
 export const isCatchAllFrame = (f: { name?: string }) => FRAME_NAMES.includes(norm(f.name));
 
 export const catchAllIds = (frames: { _id: unknown; name?: string }[], fragrances: { _id: unknown; name?: string }[]) =>

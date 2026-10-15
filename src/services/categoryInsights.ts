@@ -1,4 +1,7 @@
-import { isCatchAllFragrance, isCatchAllFrame } from './catchAllProducts';
+import { isCatchAllFragrance, isCatchAllFrame, isWholesaleMixFragrance } from './catchAllProducts';
+
+/** Movement row for lines billed on the "Wholesale" fragrance (mixed orders, no item named). */
+export const WHOLESALE_MIX_ID = 'wholesale-mix';
 
 /**
  * Category insights for the analytics pages: Optics (frames, lenses) and Fragrance (retail, wholesale).
@@ -159,6 +162,18 @@ export function buildFragranceInsights(input: {
     return movedTo.get(id) ?? id;
   };
   const wsMove = new Map<string, { units: number; revenue: number; bills: Set<string>; customers: Set<string>; lastSold: number }>();
+  const track = (id: string, it: InsightItem, inv: InsightInvoice) => {
+    const qty = it.quantity && it.quantity > 0 ? it.quantity : 1;
+    const m = wsMove.get(id) ?? { units: 0, revenue: 0, bills: new Set<string>(), customers: new Set<string>(), lastSold: 0 };
+    m.units += qty;
+    m.revenue += qty * (it.price || 0);
+    m.bills.add(idOf(inv._id));
+    if (inv.customer) m.customers.add(idOf(inv.customer));
+    m.lastSold = Math.max(m.lastSold, new Date(inv.billDate).getTime());
+    wsMove.set(id, m);
+  };
+  const isMixLine = (it: InsightItem) => kind(it) === 'fragrance' && isWholesaleMixFragrance(fragById.get(idOf(it.fragrance)) ?? {});
+  let wsMixed = 0;
   const types = new Map<string, Ranked>();
   const soldRetail = new Map<string, number>();
   let fragMixed = 0;
@@ -174,8 +189,15 @@ export function buildFragranceInsights(input: {
   for (const inv of input.invoices) {
     for (let it of items(inv)) {
       const k = kind(it);
+      if (isMixLine(it)) {
+        // "Wholesale" fragrance: a mixed wholesale order. Wholesale revenue only — no item, cost or stock.
+        addRevenueOnly(wholesale, it);
+        wsMixed += (it.quantity || 1) * (it.price || 0);
+        track(WHOLESALE_MIX_ID, it, inv);
+        continue;
+      }
       if (k === 'fragrance' && fragById.get(idOf(it.fragrance)) && isCatchAllFragrance(fragById.get(idOf(it.fragrance))!)) {
-        // "Wholesale" / "Attar" catch-alls: mixed or unnoted sales. Revenue only.
+        // "Attar" catch-all: a retail attar sale where the attar was not noted. Revenue only.
         addRevenueOnly(retail, it);
         fragMixed += (it.quantity || 1) * (it.price || 0);
         continue;
@@ -202,14 +224,7 @@ export function buildFragranceInsights(input: {
         const id = wsKey(it);
         const doc = wsById.get(id);
         bump(topWholesale, id, () => ({ id, name: doc?.name || it.itemName || 'Wholesale item', brand: doc?.companyName }), it);
-        const qty = it.quantity && it.quantity > 0 ? it.quantity : 1;
-        const m = wsMove.get(id) ?? { units: 0, revenue: 0, bills: new Set<string>(), customers: new Set<string>(), lastSold: 0 };
-        m.units += qty;
-        m.revenue += qty * (it.price || 0);
-        m.bills.add(idOf(inv._id));
-        if (inv.customer) m.customers.add(idOf(inv.customer));
-        m.lastSold = Math.max(m.lastSold, new Date(inv.billDate).getTime());
-        wsMove.set(id, m);
+        track(id, it, inv);
       }
     }
   }
@@ -231,15 +246,17 @@ export function buildFragranceInsights(input: {
   const prevWs = new Map<string, number>();
   for (const inv of input.previousInvoices ?? []) {
     for (const it of items(inv)) {
-      if (kind(it) !== 'wholesale') continue;
-      const id = wsKey(it);
+      const mix = isMixLine(it);
+      if (!mix && kind(it) !== 'wholesale') continue;
+      const id = mix ? WHOLESALE_MIX_ID : wsKey(it);
       prevWs.set(id, (prevWs.get(id) ?? 0) + (it.quantity && it.quantity > 0 ? it.quantity : 1));
     }
   }
   const currentWs = new Map(input.wholesale.map((w) => [idOf(w._id), w]));
   const wholesaleMovement = [...wsMove]
     .map(([id, m]) => {
-      const doc = wsById.get(id);
+      const mix = id === WHOLESALE_MIX_ID;
+      const doc = mix ? { _id: id, name: 'Wholesale mix (items not named)', unit: 'line', type: 'mix' } : wsById.get(id);
       const cur = currentWs.get(id);
       const perDay = m.units / input.days;
       const stock = cur && !cur.isArchived ? cur.stock ?? 0 : null;
@@ -322,7 +339,8 @@ export function buildFragranceInsights(input: {
   return {
     days: input.days,
     retail: summary(retail),
-    mixedSales: { revenue: round(fragMixed), note: 'Billed as "Wholesale" or "Attar" (mixed or unnoted sales): in revenue, not in margin or top sellers' },
+    mixedSales: { revenue: round(fragMixed), note: 'Billed as "Attar" (attar not noted): in revenue, not in margin or top sellers' },
+    wholesaleMixed: { revenue: round(wsMixed), note: 'Billed as "Wholesale" (mixed order): in wholesale revenue, not in margin' },
     wholesale: summary(wholesale),
     topRetail: rank(topRetail),
     topWholesale: rank(topWholesale),

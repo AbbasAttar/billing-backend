@@ -122,7 +122,9 @@ export function savedFragranceCost(fragrances: { _id: unknown; costPrice?: numbe
  * Sales figures for a set of bills. `catchAll`: ids of catch-all products (see catchAllProducts.ts);
  * their lines stay in revenue and their category but out of margin and the missing-cost count.
  */
-export function salesFigures(invoices: OvInvoice[], costOf: CostOf = lineCost, catchAll: Set<string> = new Set()) {
+export function salesFigures(invoices: OvInvoice[], costOf: CostOf = lineCost, catchAll: Set<string> = new Set(), wholesaleMix: Set<string> = new Set()) {
+  // The "Wholesale" fragrance is a mixed wholesale order, so it belongs to Wholesale, not Retail.
+  const categoryOf = (it: OvItem) => (wholesaleMix.size > 0 && wholesaleMix.has(idOf(it.fragrance)) ? 'wholesale' : kindOf(it));
   let mixedRevenue = 0, mixedLines = 0;
   let revenue = 0, billed = 0, discount = 0, cogs = 0, costedNet = 0, uncostedLines = 0, packaging = 0, fees = 0;
   let newRev = 0, newCount = 0, repeatRev = 0, repeatCount = 0;
@@ -145,7 +147,7 @@ export function salesFigures(invoices: OvInvoice[], costOf: CostOf = lineCost, c
     for (const it of lines) {
       const qty = it.quantity || 1;
       const lineRev = qty * (it.price || 0);
-      const c = cat.get(kindOf(it)) ?? { billed: 0, costedNet: 0, cost: 0 };
+      const c = cat.get(categoryOf(it)) ?? { billed: 0, costedNet: 0, cost: 0 };
       c.billed += lineRev;
       const isCatchAll = catchAll.size > 0 && (catchAll.has(idOf(it.frame)) || catchAll.has(idOf(it.fragrance)));
       const unitCost = isCatchAll ? null : costOf(it);
@@ -162,7 +164,7 @@ export function salesFigures(invoices: OvInvoice[], costOf: CostOf = lineCost, c
       } else if (lineRev > 0) {
         uncostedLines += 1;
       }
-      cat.set(kindOf(it), c);
+      cat.set(categoryOf(it), c);
     }
 
     const isNew = inv.isNewCustomer ?? inv.visitNumber === 1;

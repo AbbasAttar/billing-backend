@@ -7,7 +7,7 @@ import { Frame } from '../models/Frame.model';
 import { LensStock } from '../models/LensStock.model';
 import { wholesaleEntries } from '../services/wholesaleCatalog';
 import { Fragrance } from '../models/Fragrance.model';
-import { catchAllIds, isCatchAllFrame } from '../services/catchAllProducts';
+import { catchAllIds, isCatchAllFrame, wholesaleMixIds } from '../services/catchAllProducts';
 import {
   cashSeries, collections, dailySeries, expenseFigures, resolvePeriod, salesFigures, savedFragranceCost, targetProgress,
 } from '../services/analyticsOverview';
@@ -57,8 +57,9 @@ export const getAnalyticsOverview = async (req: Request, res: Response, next: Ne
 
     const costOf = savedFragranceCost(fragrances as any);
     const catchAll = catchAllIds(frames as any, fragrances as any);
-    const sales = salesFigures(cur as any, costOf, catchAll);
-    const prevSales = salesFigures(prev as any, costOf, catchAll);
+    const wsMix = wholesaleMixIds(fragrances as any);
+    const sales = salesFigures(cur as any, costOf, catchAll, wsMix);
+    const prevSales = salesFigures(prev as any, costOf, catchAll, wsMix);
     const col = collections(curPaid as any, period.from, period.to);
     const prevCol = collections(prevPaid as any, period.compareFrom, period.compareTo);
     const exp = expenseFigures(expenses as any, period.from, period.to);
