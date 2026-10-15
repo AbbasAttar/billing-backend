@@ -84,8 +84,11 @@ export const getAllFragrances = async (req: Request, res: Response, next: NextFu
 export const searchFragrances = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const q = (req.query.q as string) || '';
+    // Billing searches retail items; bulk oil and packaging (not ticked Retail) only with ?all=true.
+    const all = req.query.all === 'true';
+    const sellable = (f: any) => f.isArchived !== true && (all || f.channels?.retail !== false);
     const found = q
-      ? await tokenSearch(Fragrance, q, { marker: SEARCH_MARKERS.fragrances, limit: 15, predicate: (f) => f.isArchived !== true })
+      ? await tokenSearch(Fragrance, q, { marker: SEARCH_MARKERS.fragrances, limit: 15, predicate: sellable })
       : null;
     if (found) {
       res.json(found);
@@ -97,8 +100,8 @@ export const searchFragrances = async (req: Request, res: Response, next: NextFu
         { name: { $regex: q, $options: 'i' } },
         { companyName: { $regex: q, $options: 'i' } },
       ],
-    }).limit(15);
-    res.json(fragrances);
+    }).limit(30);
+    res.json((fragrances as any[]).filter(sellable).slice(0, 15));
   } catch (error) {
     next(error);
   }

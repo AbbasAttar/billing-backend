@@ -1,7 +1,15 @@
 import { Request, Response, NextFunction } from 'express';
-import { WholesaleItem } from '../models/WholesaleItem.model';
+import { Fragrance } from '../models/Fragrance.model';
 import { WholesaleCompany } from '../models/WholesaleCompany.model';
 import { ok, fail } from '../utils/response';
+import {
+  fragranceUpdateFor, parseEntryKey, wholesaleEntries, entryKey, type EntryPatch, type WholesaleEntry,
+} from '../services/wholesaleCatalog';
+
+/**
+ * Wholesale stock. Since the catalogue merge these endpoints work on fragrance records (see
+ * services/wholesaleCatalog.ts); request and response shapes are unchanged for the wholesale screens.
+ */
 
 const num = (v: unknown): number | undefined => {
   if (v === undefined || v === null || v === '') return undefined;
@@ -9,19 +17,18 @@ const num = (v: unknown): number | undefined => {
   return Number.isFinite(n) ? n : undefined;
 };
 
-/** Validated create/update fields from a request body. `partial` skips required checks. */
-function readBody(body: any, partial: boolean): { data?: Record<string, unknown>; error?: string } {
-  const data: Record<string, unknown> = {};
+const WHOLESALE_TYPES = ['attar', 'perfume', 'body spray', 'essence', 'bakhoor', 'packaging'];
 
+/** Validated fields from a request body, in wholesale terms. `partial` skips required checks. */
+function readBody(body: any, partial: boolean): { data?: EntryPatch & { companyId?: string | null; type?: string }; error?: string } {
+  const data: EntryPatch & { companyId?: string | null; type?: string } = {};
   if (body.name !== undefined || !partial) {
     const name = typeof body.name === 'string' ? body.name.trim() : '';
     if (!name) return { error: 'name is required' };
     data.name = name;
   }
-  if (body.companyId !== undefined) data.companyId = typeof body.companyId === 'string' ? body.companyId : '';
-  if (body.unit !== undefined || !partial) {
-    data.unit = (typeof body.unit === 'string' && body.unit.trim()) || 'bottle';
-  }
+  if (body.companyId !== undefined) data.companyId = typeof body.companyId === 'string' && body.companyId ? body.companyId : null;
+  if (body.unit !== undefined || !partial) data.unit = (typeof body.unit === 'string' && body.unit.trim()) || 'bottle';
   if (body.sellPrice !== undefined || !partial) {
     const sellPrice = num(body.sellPrice);
     if (sellPrice === undefined || sellPrice < 0) return { error: 'sellPrice must be a non-negative number' };
@@ -32,49 +39,82 @@ function readBody(body: any, partial: boolean): { data?: Record<string, unknown>
     if (stock < 0) return { error: 'stock cannot be negative' };
     data.stock = stock;
   }
-  for (const key of ['costPrice', 'reorderLevel'] as const) {
-    if (body[key] === undefined) continue;
-    const v = num(body[key]);
-    if (v !== undefined && v < 0) return { error: `${key} cannot be negative` };
-    data[key] = v ?? null;
+  if (body.costPrice !== undefined) {
+    const v = num(body.costPrice);
+    if (v !== undefined && v < 0) return { error: 'costPrice cannot be negative' };
+    data.costPrice = v ?? null;
+  }
+  if (body.reorderLevel !== undefined) {
+    const v = num(body.reorderLevel);
+    if (v !== undefined && v < 0) return { error: 'reorderLevel cannot be negative' };
+    data.ws = { reorderLevel: v ?? null };
   }
   if (body.notes !== undefined) data.notes = typeof body.notes === 'string' ? body.notes.trim() : '';
+  if (body.type !== undefined) {
+    if (!WHOLESALE_TYPES.includes(body.type)) return { error: 'type is not valid' };
+    data.type = body.type;
+  }
   return { data };
 }
 
-/** Fills companyName from the chosen company (companyId '' clears it). Returns an error message. */
-async function resolveCompany(data: Record<string, unknown>): Promise<string | null> {
-  if (data.companyId === undefined) return null;
-  if (!data.companyId) {
-    data.companyId = null;
-    data.companyName = '';
-    return null;
-  }
-  const company = await WholesaleCompany.findById(String(data.companyId));
-  if (!company) return 'Company not found';
-  data.companyName = company.name;
-  return null;
+/** companyName (and companyId) from the chosen wholesale company; '' / null clears it. */
+async function resolveCompany(companyId: string | null | undefined): Promise<{ companyId: string | null; companyName: string } | { error: string } | null> {
+  if (companyId === undefined) return null;
+  if (!companyId) return { companyId: null, companyName: '' };
+  const company = await WholesaleCompany.findById(String(companyId));
+  if (!company) return { error: 'Company not found' };
+  return { companyId: String(company._id), companyName: company.name };
+}
+
+async function allEntries(includeArchived: boolean): Promise<WholesaleEntry[]> {
+  const fragrances = await Fragrance.find(includeArchived ? {} : { isArchived: false }).lean();
+  return wholesaleEntries(fragrances as any);
+}
+
+/** Loads the fragrance behind an entry, applies the patch and returns the updated entry. */
+async function patchEntry(key: string, patch: EntryPatch & { companyId?: string | null }, extra: Record<string, unknown> = {}) {
+  const { fragranceId, optionLabel } = parseEntryKey(key);
+  const f: any = await Fragrance.findById(fragranceId).lean();
+  if (!f) return { status: 404 as const, error: 'Wholesale item not found' };
+  const update = fragranceUpdateFor(f, optionLabel, patch);
+  if ('error' in update) return { status: 404 as const, error: update.error as string };
+  const saved: any = await Fragrance.findByIdAndUpdate(fragranceId, { ...update, ...extra }, { new: true });
+  const entry = wholesaleEntries([saved?.toObject ? saved.toObject() : saved]).find((e) => e._id === entryKey(fragranceId, optionLabel));
+  return { entry: entry ?? null };
 }
 
 export const getWholesaleItems = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const includeArchived = req.query.includeArchived === 'true';
-    const items = await WholesaleItem.find(includeArchived ? {} : { isArchived: false });
-    // Sorted here: a Firestore orderBy would drop older docs that have no companyName.
-    items.sort((a: any, b: any) =>
-      (a.companyName || '').localeCompare(b.companyName || '') || (a.name || '').localeCompare(b.name || ''));
-    return ok(res, items);
+    return ok(res, await allEntries(req.query.includeArchived === 'true'));
   } catch (e) { next(e); }
 };
 
+/** New wholesale item = a new fragrance record sold wholesale (and usable as raw material). */
 export const createWholesaleItem = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { data, error } = readBody(req.body ?? {}, false);
     if (error) return fail(res, error, 400);
-    const companyError = await resolveCompany(data!);
-    if (companyError) return fail(res, companyError, 400);
-    const item = await WholesaleItem.create(data as any);
-    return ok(res, item, 'Wholesale item created', 201);
+    const resolved = await resolveCompany(data!.companyId);
+    if (resolved && 'error' in resolved) return fail(res, resolved.error, 400);
+    const company = resolved && !('error' in resolved) ? resolved : null;
+    const unit = data!.unit || 'bottle';
+    const created: any = await Fragrance.create({
+      name: data!.name,
+      companyName: company?.companyName ?? '',
+      companyId: company?.companyId ?? null,
+      type: data!.type ?? (/(^|\s)(cap|stick|bottle|canter|roll)/i.test(data!.name ?? '') ? 'packaging' : 'attar'),
+      unit,
+      channels: { retail: false, wholesale: true, rawMaterial: true },
+      costPrice: data!.costPrice ?? 0,
+      sellPrice: 0,
+      stock: data!.stock ?? 0,
+      wholesale: { price: data!.sellPrice ?? 0, unit: `per ${unit}` },
+      ws: { reorderLevel: data!.ws?.reorderLevel ?? null },
+      notes: data!.notes ?? '',
+      variants: [],
+    } as any);
+    const entry = wholesaleEntries([created.toObject ? created.toObject() : created])[0];
+    return ok(res, entry, 'Wholesale item created', 201);
   } catch (e) { next(e); }
 };
 
@@ -82,18 +122,22 @@ export const updateWholesaleItem = async (req: Request, res: Response, next: Nex
   try {
     const { data, error } = readBody(req.body ?? {}, true);
     if (error) return fail(res, error, 400);
-    const companyError = await resolveCompany(data!);
-    if (companyError) return fail(res, companyError, 400);
-    const item = await WholesaleItem.findByIdAndUpdate(req.params.id, data, { new: true });
-    if (!item) return fail(res, 'Wholesale item not found', 404);
-    return ok(res, item);
+    const resolved = await resolveCompany(data!.companyId);
+    if (resolved && 'error' in resolved) return fail(res, resolved.error, 400);
+    const company = resolved && !('error' in resolved) ? resolved : null;
+    const { type, companyId: _ignored, ...patch } = data!;
+    const extra: Record<string, unknown> = {};
+    if (type) extra.type = type;
+    if (company) {
+      patch.companyName = company.companyName;
+      extra.companyId = company.companyId;
+    }
+    const r = await patchEntry(String(req.params.id), patch, extra);
+    if ('error' in r) return fail(res, r.error!, r.status);
+    return ok(res, r.entry);
   } catch (e) { next(e); }
 };
 
-/**
- * POST /:id/adjust-stock { delta, sellPrice?, costPrice? } — inward a fresh lot (+) or write off
- * breakage (−). An inward may carry the lot's new cost / selling price, which replace the old ones.
- */
 /**
  * Order fields after `received` units of an ordered item arrive: a part delivery keeps the rest on
  * order; receiving the ordered quantity (or more, or an order with no quantity) closes it.
@@ -105,30 +149,33 @@ export function orderAfterInward(orderedQty: number | null | undefined, received
     : { isOrdered: false, orderedQty: null, orderedAt: null };
 }
 
+/**
+ * POST /:id/adjust-stock { delta, sellPrice?, costPrice?, receivedOrder? } — inward a fresh lot (+) or
+ * write off breakage (−). An inward may carry the lot's new cost / selling price.
+ */
 export const adjustWholesaleStock = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const delta = num(req.body?.delta);
     if (delta === undefined || delta === 0) return fail(res, 'delta must be a non-zero number', 400);
-    const update: Record<string, number> = {};
+    const patch: EntryPatch = { stockDelta: delta };
     for (const key of ['sellPrice', 'costPrice'] as const) {
       const v = num(req.body?.[key]);
       if (v === undefined) continue;
       if (v < 0) return fail(res, `${key} cannot be negative`, 400);
-      update[key] = v;
+      patch[key] = v;
     }
-    const existing = await WholesaleItem.findById(req.params.id);
-    if (!existing) return fail(res, 'Wholesale item not found', 404);
-    const patch: Record<string, unknown> = { ...update, stock: Math.max(0, (existing.stock || 0) + delta) };
-    if (req.body?.receivedOrder === true && delta > 0) Object.assign(patch, orderAfterInward(existing.orderedQty, delta));
-    const item = await WholesaleItem.findByIdAndUpdate(req.params.id, patch, { new: true });
-    return ok(res, item);
+    if (req.body?.receivedOrder === true && delta > 0) {
+      const all = await allEntries(true);
+      const current = all.find((e) => e._id === String(req.params.id));
+      patch.ws = orderAfterInward(current?.orderedQty, delta);
+    }
+    const r = await patchEntry(String(req.params.id), patch);
+    if ('error' in r) return fail(res, r.error!, r.status);
+    return ok(res, r.entry);
   } catch (e) { next(e); }
 };
 
-/**
- * POST /order-status { ids, ordered, quantities? } — bulk mark items ordered (with the quantity sent
- * to the wholesaler) or back to not ordered.
- */
+/** POST /order-status { ids, ordered, quantities? } — mark entries ordered (with quantity) or back. */
 export const setWholesaleOrderStatus = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const ids: unknown = req.body?.ids;
@@ -142,21 +189,17 @@ export const setWholesaleOrderStatus = async (req: Request, res: Response, next:
     const updated = [];
     for (const id of ids as string[]) {
       const qty = num(quantities[id]);
-      // Ordering takes the item out of the order queue.
-      const patch = ordered
+      const ws = ordered
         ? { isOrdered: true, orderedQty: qty !== undefined && qty > 0 ? qty : null, orderedAt: now, inOrderQueue: false, queueQty: null }
         : { isOrdered: false, orderedQty: null, orderedAt: null };
-      const item = await WholesaleItem.findByIdAndUpdate(id, patch, { new: true });
-      if (item) updated.push(item);
+      const r = await patchEntry(id, { ws });
+      if ('entry' in r && r.entry) updated.push(r.entry);
     }
     return ok(res, updated);
   } catch (e) { next(e); }
 };
 
-/**
- * POST /queue { add?, remove?, quantities? } — the order queue kept on the server so it survives a
- * refresh: add items, remove items, or save the quantity typed for queued items (null clears it).
- */
+/** POST /queue { add?, remove?, quantities? } — the order queue kept on the server. */
 export const updateOrderQueue = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const list = (v: unknown): string[] | null =>
@@ -178,23 +221,31 @@ export const updateOrderQueue = async (req: Request, res: Response, next: NextFu
     for (const id of remove) Object.assign(patchFor(id), { inOrderQueue: false, queueQty: null });
 
     const updated = [];
-    for (const [id, patch] of patches) {
-      const item = await WholesaleItem.findByIdAndUpdate(id, patch, { new: true });
-      if (item) updated.push(item);
+    for (const [id, ws] of patches) {
+      const r = await patchEntry(id, { ws });
+      if ('entry' in r && r.entry) updated.push(r.entry);
     }
     return ok(res, updated);
   } catch (e) { next(e); }
 };
 
+/**
+ * PATCH /:id/archive { archive } — a plain product is archived as a whole; a grade / size stops being
+ * sold wholesale (its wholesale price is removed) and comes back with a new price from the fragrance form.
+ */
 export const archiveWholesaleItem = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const archive = req.body?.archive !== false;
-    const item = await WholesaleItem.findByIdAndUpdate(
-      req.params.id,
-      { isArchived: archive, archivedAt: archive ? new Date() : null },
-      { new: true },
-    );
-    if (!item) return fail(res, 'Wholesale item not found', 404);
-    return ok(res, item);
+    const { fragranceId, optionLabel } = parseEntryKey(String(req.params.id));
+    const f: any = await Fragrance.findById(fragranceId).lean();
+    if (!f) return fail(res, 'Wholesale item not found', 404);
+    if (optionLabel) {
+      if (!archive) return fail(res, 'Give the grade / size a wholesale price again in the fragrance form', 400);
+      const variants = (f.variants ?? []).map((v: any) => (v.label === optionLabel ? { ...v, wholesale: null } : v));
+      await Fragrance.findByIdAndUpdate(fragranceId, { variants });
+      return ok(res, { _id: String(req.params.id), isArchived: true });
+    }
+    const saved: any = await Fragrance.findByIdAndUpdate(fragranceId, { isArchived: archive, archivedAt: archive ? new Date() : null }, { new: true });
+    return ok(res, wholesaleEntries([saved?.toObject ? saved.toObject() : saved])[0] ?? { _id: fragranceId, isArchived: archive });
   } catch (e) { next(e); }
 };

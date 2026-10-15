@@ -10,6 +10,8 @@ import { Customer } from '../models/Customer.model';
 import { Frame } from '../models/Frame.model';
 import { Fragrance } from '../models/Fragrance.model';
 import { WholesaleItem } from '../models/WholesaleItem.model';
+import { applyWsStock, resolveWsTarget, wholesaleReadIds } from '../services/wholesaleStock';
+import { applyRecipeStock, recipeFor, recipeIngredientIds } from '../services/recipeStock';
 import { SiteSetting } from '../models/SiteSetting.model';
 import { financialYear, formatInvoiceNo } from '../utils/invoiceNumber';
 import { InvoiceCounter } from '../models/InvoiceCounter.model';
@@ -381,8 +383,18 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       // Reads first (Firestore requires all reads before writes).
       const [counter] = await t.query<any>(InvoiceCounter, { year: fy }, 1);
       const frames = await t.getMany<any>(Frame, [...productIds.frames]);
-      const fragrances = await t.getMany<any>(Fragrance, [...productIds.fragrances]);
-      const wholesaleItems = await t.getMany<any>(WholesaleItem, [...productIds.wholesale]);
+      // Wholesale lines point at the fragrance catalogue (or, on old bills, at an old wholesale item).
+      const wsRead = wholesaleReadIds([...productIds.wholesale]);
+      const wholesaleItems = await t.getMany<any>(WholesaleItem, wsRead.legacyIds);
+      for (const old of wholesaleItems.values()) if (old?.migratedTo) wsRead.fragranceIds.add(String(old.migratedTo));
+      const fragrances = await t.getMany<any>(Fragrance, [...new Set([...productIds.fragrances, ...wsRead.fragranceIds])]);
+      // "Made from" ingredients of sold retail fragrances (read now: all reads come before writes).
+      const recipeIds = recipeIngredientIds(
+        (items as any[])
+          .filter((it) => it.type === 'fragrance' && isValidId(it.fragrance))
+          .map((it) => recipeFor(fragrances.get(idOf(it.fragrance)), it.fragranceGrade || it.fragranceVariantLabel)),
+      ).filter((id) => !fragrances.has(id));
+      if (recipeIds.length) for (const [id, doc] of await t.getMany<any>(Fragrance, recipeIds)) fragrances.set(id, doc);
 
       const deductions: StockDeduction[] = [];
       for (const item of items as any[]) {
@@ -510,14 +522,28 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
             }
           }
           fragranceUpdates.set(id, update);
+          // Selling it also uses up its bulk oil / bottle when the product is set to.
+          applyRecipeStock(recipeFor(fragrance, grade), item.quantity || 1, fragrances, fragranceUpdates);
         } else if (item.type === 'wholesale' && isValidId(item.wholesaleItem)) {
           const id = idOf(item.wholesaleItem);
-          const ws = wholesaleItems.get(id);
-          if (ws) {
-            const current = wholesaleStock.get(id) ?? (ws.stock || 0);
-            wholesaleStock.set(id, Math.max(0, current - (item.quantity || 1)));
-            if (!item.itemName) enhanced.itemName = ws.companyName ? `${ws.name} (${ws.companyName})` : ws.name;
-            if (!item.unit) enhanced.unit = ws.unit;
+          const target = resolveWsTarget(id, fragrances, wholesaleItems);
+          if (target) {
+            // Stock comes off the fragrance record; its retail price is not touched.
+            const f = fragrances.get(target.fragranceId);
+            const update = fragranceUpdates.get(target.fragranceId) ?? {};
+            const out = applyWsStock(target, -(item.quantity || 1), f, update);
+            fragranceUpdates.set(target.fragranceId, update);
+            if (!item.itemName) enhanced.itemName = out.name;
+            if (!item.unit) enhanced.unit = out.unit;
+            if (!(typeof item.costPrice === 'number' && item.costPrice > 0) && out.unitCost !== null) enhanced.costPrice = out.unitCost;
+          } else {
+            const ws = wholesaleItems.get(id);
+            if (ws) {
+              const current = wholesaleStock.get(id) ?? (ws.stock || 0);
+              wholesaleStock.set(id, Math.max(0, current - (item.quantity || 1)));
+              if (!item.itemName) enhanced.itemName = ws.companyName ? `${ws.name} (${ws.companyName})` : ws.name;
+              if (!item.unit) enhanced.unit = ws.unit;
+            }
           }
         }
         resolved.push(enhanced);
@@ -973,7 +999,10 @@ export const deleteInvoice = async (req: Request, res: Response, next: NextFunct
       const frameIds = [...items.values()].filter((i) => i.frame && i.frameVariantLabel).map((i) => idOf(i.frame));
       const frames = await t.getMany<any>(Frame, frameIds);
       const wholesaleIds = [...items.values()].filter((i) => i.wholesaleItem).map((i) => idOf(i.wholesaleItem));
-      const wholesaleItems = await t.getMany<any>(WholesaleItem, wholesaleIds);
+      const wsRead = wholesaleReadIds(wholesaleIds);
+      const wholesaleItems = await t.getMany<any>(WholesaleItem, wsRead.legacyIds);
+      for (const old of wholesaleItems.values()) if (old?.migratedTo) wsRead.fragranceIds.add(String(old.migratedTo));
+      const wsFragrances = await t.getMany<any>(Fragrance, [...wsRead.fragranceIds]);
       const restored = new Map<string, any[]>();
       for (const item of items.values()) {
         if (!item.frame || !item.frameVariantLabel) continue;
@@ -991,17 +1020,28 @@ export const deleteInvoice = async (req: Request, res: Response, next: NextFunct
         await t.update(Frame, id, { $set: { 'web.frameVariants': variants } }, frames.get(id) ?? null);
       }
 
-      // Put billed wholesale units back on the shelf.
+      // Put billed wholesale units back on the shelf (on the fragrance record since the catalogue merge).
       const wholesaleStock = new Map<string, number>();
+      const fragranceStock = new Map<string, Record<string, any>>();
       for (const item of items.values()) {
         if (!item.wholesaleItem) continue;
         const id = idOf(item.wholesaleItem);
+        const target = resolveWsTarget(id, wsFragrances, wholesaleItems);
+        if (target) {
+          const update = fragranceStock.get(target.fragranceId) ?? {};
+          applyWsStock(target, item.quantity || 0, wsFragrances.get(target.fragranceId), update);
+          fragranceStock.set(target.fragranceId, update);
+          continue;
+        }
         const ws = wholesaleItems.get(id);
         if (!ws) continue;
         wholesaleStock.set(id, (wholesaleStock.get(id) ?? (ws.stock || 0)) + (item.quantity || 0));
       }
       for (const [id, stock] of wholesaleStock) {
         await t.update(WholesaleItem, id, { stock }, wholesaleItems.get(id) ?? null);
+      }
+      for (const [id, update] of fragranceStock) {
+        await t.update(Fragrance, id, { $set: update }, wsFragrances.get(id) ?? null);
       }
       for (const id of itemIds) t.delete(InvoiceItem, id);
       t.delete(Invoice, invoiceId);

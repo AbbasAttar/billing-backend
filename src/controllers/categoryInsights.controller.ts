@@ -5,6 +5,7 @@ import { Fragrance } from '../models/Fragrance.model';
 import { LensStock } from '../models/LensStock.model';
 import { WholesaleItem } from '../models/WholesaleItem.model';
 import { buildFragranceInsights } from '../services/categoryInsights';
+import { wholesaleEntries } from '../services/wholesaleCatalog';
 import { buildOpticsInsights } from '../services/opticsInsights';
 
 const ALLOWED_DAYS = [30, 90, 180, 365];
@@ -50,10 +51,13 @@ export const getFragranceInsights = async (req: Request, res: Response, next: Ne
     const { days, now, from } = windowFor(req);
     const [invoices, fragrances, wholesale] = await Promise.all([
       periodInvoices(from, now),
-      Fragrance.find({}).select('name companyName type costPrice stock variants isArchived').lean(),
-      WholesaleItem.find({}).select('name companyName unit costPrice stock reorderLevel isOrdered orderedQty orderedAt isArchived').lean(),
+      Fragrance.find({}).lean(),
+      WholesaleItem.find({}).select('name companyName unit costPrice stock reorderLevel isOrdered orderedQty orderedAt isArchived migratedTo').lean(),
     ]);
-    res.json({ from: from.toISOString(), to: now.toISOString(), ...buildFragranceInsights({ invoices: invoices as any, fragrances: fragrances as any, wholesale: wholesale as any, days, now }) });
+    // Wholesale stock now lives on fragrance records; old items that were not moved still count.
+    const entries = wholesaleEntries((fragrances as any[]).filter((f) => !f.isArchived)).map((e) => ({ ...e, _id: e._id }));
+    const unmoved = (wholesale as any[]).filter((w) => !w.migratedTo);
+    res.json({ from: from.toISOString(), to: now.toISOString(), ...buildFragranceInsights({ invoices: invoices as any, fragrances: fragrances as any, wholesale: [...entries, ...unmoved] as any, legacyWholesale: wholesale as any, days, now }) });
   } catch (e) {
     next(e);
   }

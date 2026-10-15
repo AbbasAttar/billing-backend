@@ -5,7 +5,7 @@ import { Expense } from '../models/Expense.model';
 import { MonthlyTarget } from '../models/MonthlyTarget.model';
 import { Frame } from '../models/Frame.model';
 import { LensStock } from '../models/LensStock.model';
-import { WholesaleItem } from '../models/WholesaleItem.model';
+import { wholesaleEntries } from '../services/wholesaleCatalog';
 import { Fragrance } from '../models/Fragrance.model';
 import { catchAllIds, isCatchAllFrame } from '../services/catchAllProducts';
 import {
@@ -51,8 +51,8 @@ export const getAnalyticsOverview = async (req: Request, res: Response, next: Ne
       InvoiceItem.find({ isLabItem: true, isOpenLabJob: true }).select('createdAt labStatus sentToWholesaler').lean(),
       Frame.find({}).select('name stock createdAt isArchived').lean(),
       LensStock.find({}).select('quantity reorderLevel').lean(),
-      WholesaleItem.find({ isArchived: { $ne: true } }).select('stock reorderLevel isOrdered').lean(),
-      Fragrance.find({}).select('name costPrice variants').lean(),
+      Promise.resolve(null),
+      Fragrance.find({}).lean(),
     ]);
 
     const costOf = savedFragranceCost(fragrances as any);
@@ -79,7 +79,9 @@ export const getAnalyticsOverview = async (req: Request, res: Response, next: Ne
     // Out of stock, not merely "at re-order level": most powers hold 1 pair against a level of 2, which made nearly all look low.
     const lowPowers = (lensStock as any[]).filter((s) => (s.quantity ?? 0) <= 0).length;
     const agedFrames = (frames as any[]).filter((f) => !f.isArchived && !isCatchAllFrame(f) && (f.stock ?? 0) > 0 && f.createdAt && now.getTime() - new Date(f.createdAt).getTime() > 180 * DAY).length;
-    const wsLow = (wholesale as any[]).filter((w) => !w.isOrdered && ((w.stock ?? 0) <= 0 || (w.reorderLevel != null && (w.stock ?? 0) <= w.reorderLevel))).length;
+    void wholesale;
+    const wsLow = wholesaleEntries((fragrances as any[]).filter((f) => !f.isArchived))
+      .filter((w) => !w.isOrdered && (w.stock <= 0 || (w.reorderLevel != null && w.stock <= w.reorderLevel))).length;
 
     let recallsDue: number | null = null;
     try {

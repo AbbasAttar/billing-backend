@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { WholesaleCompany } from '../models/WholesaleCompany.model';
 import { WholesaleItem } from '../models/WholesaleItem.model';
+import { Fragrance } from '../models/Fragrance.model';
 import { ok, fail } from '../utils/response';
 
 const norm = (s: string) => s.trim().replace(/\s+/g, ' ');
@@ -40,6 +41,8 @@ export const updateWholesaleCompany = async (req: Request, res: Response, next: 
     const company = await WholesaleCompany.findByIdAndUpdate(id, { name }, { new: true });
     if (!company) return fail(res, 'Company not found', 404);
     await WholesaleItem.updateMany({ companyId: id }, { $set: { companyName: name } });
+    // Wholesale stock now lives on fragrance records (catalogue merge).
+    await Fragrance.updateMany({ companyId: id }, { $set: { companyName: name } });
     return ok(res, company);
   } catch (e) { next(e); }
 };
@@ -50,7 +53,7 @@ export const deleteWholesaleCompany = async (req: Request, res: Response, next: 
     const id = String(req.params.id);
     const company = await WholesaleCompany.findById(id);
     if (!company) return fail(res, 'Company not found', 404);
-    const used = await WholesaleItem.find({ companyId: id });
+    const used = [...(await Fragrance.find({ companyId: id })), ...(await WholesaleItem.find({ companyId: id, migratedTo: null }))];
     if (used.length > 0) {
       return fail(res, `"${company.name}" is used by ${used.length} wholesale item(s). Move them to another company first.`, 409);
     }

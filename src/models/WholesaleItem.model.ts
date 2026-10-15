@@ -26,6 +26,8 @@ export interface IWholesaleItem extends BaseDoc {
   orderedQty?: number | null;
   orderedAt?: Date | null;
   isArchived?: boolean;
+  /** Fragrance record this item was moved to in the catalogue merge (the item is kept for old bills). */
+  migratedTo?: string | null;
   archivedAt?: Date | null;
   createdAt?: Date;
   updatedAt?: Date;

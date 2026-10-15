@@ -135,6 +135,8 @@ export function buildFragranceInsights(input: {
   invoices: InsightInvoice[];
   fragrances: FragranceDoc[];
   wholesale: WholesaleDoc[];
+  /** Old wholesale items, only to name lines on bills made before the catalogue merge. */
+  legacyWholesale?: WholesaleDoc[];
   days: number;
   now?: Date;
 }) {
@@ -142,7 +144,7 @@ export function buildFragranceInsights(input: {
   const retail = tally();
   const wholesale = tally();
   const fragById = new Map(input.fragrances.map((f) => [idOf(f._id), f]));
-  const wsById = new Map(input.wholesale.map((w) => [idOf(w._id), w]));
+  const wsById = new Map([...(input.legacyWholesale ?? []), ...input.wholesale].map((w) => [idOf(w._id), w]));
   const topRetail = new Map<string, Ranked>();
   const topWholesale = new Map<string, Ranked>();
   const types = new Map<string, Ranked>();
@@ -200,7 +202,7 @@ export function buildFragranceInsights(input: {
     .slice(0, 10)
     .map(({ f, sold }) => ({ id: idOf(f._id), name: f.name || 'Fragrance', brand: f.companyName, sold }));
   const unsold = input.fragrances
-    .filter((f) => !f.isArchived && !isCatchAllFragrance(f) && fragStock(f) > 0 && !soldRetail.has(idOf(f._id)))
+    .filter((f) => !f.isArchived && (f as { channels?: { retail?: boolean } }).channels?.retail !== false && !isCatchAllFragrance(f) && fragStock(f) > 0 && !soldRetail.has(idOf(f._id)))
     .map((f) => ({ id: idOf(f._id), name: f.name || 'Fragrance', brand: f.companyName, stock: fragStock(f), value: fragValue(f) }))
     .sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
   const unsoldValue = unsold.reduce((s, u) => s + (u.value ?? 0), 0);

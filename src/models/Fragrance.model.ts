@@ -21,6 +21,18 @@ export interface IFragranceVariant {
   wholesale?: { price: number; unit: string; minQty?: number };
   /** What one unit of this option is made from (bulk oil, bottle…). */
   recipe?: { fragranceId: string; optionLabel?: string; qty: number }[];
+  /** Wholesale re-order state for this option (see IWholesaleState). */
+  ws?: IWholesaleState;
+}
+
+/** Wholesale stock keeping: alert level and the order to the maker / supplier. */
+export interface IWholesaleState {
+  reorderLevel?: number | null;
+  inOrderQueue?: boolean;
+  queueQty?: number | null;
+  isOrdered?: boolean;
+  orderedQty?: number | null;
+  orderedAt?: Date | null;
 }
 
 export interface IScentProfile {
@@ -42,9 +54,19 @@ export interface IFragrance extends BaseDoc {
   /** Where it is sold / used. Missing = retail only. */
   channels?: { retail?: boolean; wholesale?: boolean; rawMaterial?: boolean };
   scent?: IScentProfile;
-  /** Plain products (no grades / sizes): wholesale price and recipe. */
+  /** Plain products (no grades / sizes): wholesale price, recipe and wholesale order state. */
   wholesale?: IFragranceVariant['wholesale'] | null;
   recipe?: IFragranceVariant['recipe'] | null;
+  ws?: IWholesaleState;
+  /** Selling this also takes its "made from" ingredients out of stock. */
+  recipeDeductsStock?: boolean;
+  /** Stock unit when it differs from the type's usual one (e.g. bulk attar counted in bottles). */
+  unit?: string;
+  notes?: string;
+  /** Wholesale company (maker / supplier) this is bought from. */
+  companyId?: string | null;
+  /** The wholesale item this record was moved from (old bills still point there). */
+  legacyWholesaleId?: string;
   companyName: string;
   name: string;
   authenticity?: 'original' | 'dupe';
