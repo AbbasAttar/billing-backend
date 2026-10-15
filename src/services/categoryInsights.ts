@@ -26,6 +26,7 @@ export interface InsightItem {
 
 export interface InsightInvoice {
   _id?: unknown;
+  customer?: unknown;
   billDate: Date | string;
   items?: (InsightItem | null | string)[];
 }
@@ -37,8 +38,10 @@ export interface FragranceDoc {
   variants?: { label?: string; stock?: number; costPrice?: number; sellPrice?: number }[];
 }
 export interface WholesaleDoc {
-  _id: unknown; isArchived?: boolean; name?: string; companyName?: string; unit?: string; costPrice?: number | null; stock?: number;
+  _id: unknown; isArchived?: boolean; name?: string; companyName?: string; type?: string; unit?: string; costPrice?: number | null; stock?: number;
   reorderLevel?: number | null; isOrdered?: boolean; orderedQty?: number | null; orderedAt?: Date | string | null;
+  /** Old wholesale item moved onto a fragrance record (its id = that product's entry key). */
+  migratedTo?: unknown;
 }
 
 export type GuidanceLevel = 'high' | 'medium' | 'info';
@@ -137,6 +140,8 @@ export function buildFragranceInsights(input: {
   wholesale: WholesaleDoc[];
   /** Old wholesale items, only to name lines on bills made before the catalogue merge. */
   legacyWholesale?: WholesaleDoc[];
+  /** The period before, for the wholesale speed trend. */
+  previousInvoices?: InsightInvoice[];
   days: number;
   now?: Date;
 }) {
@@ -147,6 +152,13 @@ export function buildFragranceInsights(input: {
   const wsById = new Map([...(input.legacyWholesale ?? []), ...input.wholesale].map((w) => [idOf(w._id), w]));
   const topRetail = new Map<string, Ranked>();
   const topWholesale = new Map<string, Ranked>();
+  // Old bills name an old wholesale item; once moved, count it under the fragrance it moved to.
+  const movedTo = new Map((input.legacyWholesale ?? []).filter((w) => w.migratedTo).map((w) => [idOf(w._id), idOf(w.migratedTo)]));
+  const wsKey = (it: InsightItem) => {
+    const id = idOf(it.wholesaleItem) || it.itemName || 'wholesale';
+    return movedTo.get(id) ?? id;
+  };
+  const wsMove = new Map<string, { units: number; revenue: number; bills: Set<string>; customers: Set<string>; lastSold: number }>();
   const types = new Map<string, Ranked>();
   const soldRetail = new Map<string, number>();
   let fragMixed = 0;
@@ -187,9 +199,17 @@ export function buildFragranceInsights(input: {
         bump(types, t, () => ({ id: t, name: t }), it);
       } else if (k === 'wholesale') {
         add(wholesale, it);
-        const id = idOf(it.wholesaleItem) || it.itemName || 'wholesale';
+        const id = wsKey(it);
         const doc = wsById.get(id);
         bump(topWholesale, id, () => ({ id, name: doc?.name || it.itemName || 'Wholesale item', brand: doc?.companyName }), it);
+        const qty = it.quantity && it.quantity > 0 ? it.quantity : 1;
+        const m = wsMove.get(id) ?? { units: 0, revenue: 0, bills: new Set<string>(), customers: new Set<string>(), lastSold: 0 };
+        m.units += qty;
+        m.revenue += qty * (it.price || 0);
+        m.bills.add(idOf(inv._id));
+        if (inv.customer) m.customers.add(idOf(inv.customer));
+        m.lastSold = Math.max(m.lastSold, new Date(inv.billDate).getTime());
+        wsMove.set(id, m);
       }
     }
   }
@@ -206,6 +226,47 @@ export function buildFragranceInsights(input: {
     .map((f) => ({ id: idOf(f._id), name: f.name || 'Fragrance', brand: f.companyName, stock: fragStock(f), value: fragValue(f) }))
     .sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
   const unsoldValue = unsold.reduce((s, u) => s + (u.value ?? 0), 0);
+
+  // Wholesale speed: units per 30 days, trend against the period before, and how long stock lasts.
+  const prevWs = new Map<string, number>();
+  for (const inv of input.previousInvoices ?? []) {
+    for (const it of items(inv)) {
+      if (kind(it) !== 'wholesale') continue;
+      const id = wsKey(it);
+      prevWs.set(id, (prevWs.get(id) ?? 0) + (it.quantity && it.quantity > 0 ? it.quantity : 1));
+    }
+  }
+  const currentWs = new Map(input.wholesale.map((w) => [idOf(w._id), w]));
+  const wholesaleMovement = [...wsMove]
+    .map(([id, m]) => {
+      const doc = wsById.get(id);
+      const cur = currentWs.get(id);
+      const perDay = m.units / input.days;
+      const stock = cur && !cur.isArchived ? cur.stock ?? 0 : null;
+      const prev = prevWs.get(id) ?? 0;
+      return {
+        id,
+        name: doc?.name || 'Wholesale item',
+        brand: doc?.companyName || undefined,
+        unit: (cur ?? doc)?.unit || 'bottle',
+        // Old unmoved items carry no type; the "Bottle" company holds the empty bottles.
+        type: (cur ?? doc)?.type || (/bottle/i.test(doc?.companyName ?? '') ? 'packaging' : 'attar'),
+        units: units(m.units),
+        revenue: round(m.revenue),
+        avgPrice: m.units > 0 ? round(m.revenue / m.units) : null,
+        perMonth: units(perDay * 30),
+        bills: m.bills.size,
+        customers: m.customers.size,
+        previousUnits: units(prev),
+        changePct: prev > 0 ? Number((((m.units - prev) / prev) * 100).toFixed(0)) : null,
+        lastSoldDays: Math.max(0, Math.floor((now.getTime() - m.lastSold) / DAY)),
+        stock,
+        coverDays: stock === null ? null : perDay > 0 ? Math.floor(stock / perDay) : null,
+        costPrice: cur?.costPrice && cur.costPrice > 0 ? cur.costPrice : null,
+        isOrdered: !!cur?.isOrdered,
+      };
+    })
+    .sort((a, b) => b.units - a.units);
 
   // Wholesale stock: low and not ordered, and orders waiting more than a week.
   const isLow = (w: WholesaleDoc) => (w.stock ?? 0) <= 0 || (w.reorderLevel != null && (w.stock ?? 0) <= w.reorderLevel);
@@ -237,6 +298,15 @@ export function buildFragranceInsights(input: {
       href: '/fragrance',
     });
   }
+  const runningOut = wholesaleMovement.filter((w) => !w.isOrdered && w.coverDays !== null && w.coverDays < 14 && w.perMonth >= 2);
+  if (runningOut.length) {
+    guidance.push({
+      level: 'high',
+      title: `${runningOut.length} fast wholesale item${runningOut.length === 1 ? '' : 's'} will run out within 2 weeks`,
+      detail: runningOut.slice(0, 5).map((w) => `${w.name} (${w.coverDays} days left)`).join(', '),
+      href: '/bulk-stock/order',
+    });
+  }
   const lowMargin = [...rank(topRetail, 50), ...rank(topWholesale, 50)].filter((x) => x.marginPct !== null && x.marginPct < 25 && x.revenue > 0).slice(0, 5);
   if (lowMargin.length) {
     guidance.push({ level: 'medium', title: `${lowMargin.length} selling item${lowMargin.length === 1 ? '' : 's'} under 25% margin`, detail: lowMargin.map((x) => `${x.name} (${x.marginPct}%)`).join(', ') });
@@ -256,6 +326,7 @@ export function buildFragranceInsights(input: {
     wholesale: summary(wholesale),
     topRetail: rank(topRetail),
     topWholesale: rank(topWholesale),
+    wholesaleMovement: wholesaleMovement.slice(0, 60),
     typeMix: rank(types, 6),
     soldOut,
     soldWithoutCost: noCostList.slice(0, 15),

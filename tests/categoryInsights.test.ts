@@ -96,3 +96,26 @@ describe('catch-all products', () => {
   });
 
 });
+
+describe('wholesale movement', () => {
+  it('ranks by quantity, joins moved old items to their fragrance, and works out speed and stock cover', () => {
+    const out = buildFragranceInsights({
+      invoices: [
+        { _id: 'i1', customer: 'c1', billDate: ago(2), items: [{ wholesaleItem: 'old1', type: 'wholesale', quantity: 12, price: 80 }] },
+        { _id: 'i2', customer: 'c2', billDate: ago(5), items: [{ wholesaleItem: 'f1', type: 'wholesale', quantity: 18, price: 80 }, { wholesaleItem: 'f2', type: 'wholesale', quantity: 3, price: 90 }] },
+      ],
+      previousInvoices: [{ billDate: ago(40), items: [{ wholesaleItem: 'f1', type: 'wholesale', quantity: 15, price: 80 }] }],
+      fragrances: [],
+      wholesale: [
+        { _id: 'f1', name: 'Majmua', unit: 'bottle', stock: 10, costPrice: 60 },
+        { _id: 'f2', name: 'Musk', unit: 'bottle', stock: 4 },
+      ],
+      legacyWholesale: [{ _id: 'old1', name: 'Majmua (old)', migratedTo: 'f1' }],
+      days: 30, now,
+    });
+    const [top, second] = out.wholesaleMovement;
+    expect(top).toMatchObject({ id: 'f1', name: 'Majmua', units: 30, perMonth: 30, bills: 2, customers: 2, previousUnits: 15, changePct: 100, stock: 10, coverDays: 10, costPrice: 60, lastSoldDays: 2 });
+    expect(second).toMatchObject({ id: 'f2', units: 3, changePct: null, coverDays: 40 });
+    expect(out.guidance.map((g) => g.title).join(' | ')).toMatch(/1 fast wholesale item will run out within 2 weeks/);
+  });
+});

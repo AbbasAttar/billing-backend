@@ -21,15 +21,21 @@ function windowFor(req: Request) {
 }
 
 const periodInvoices = (from: Date, to: Date) =>
-  Invoice.find({ billDate: { $gte: from, $lte: to } }).select({ billDate: 1, items: 1 }).populate('items').lean();
+  Invoice.find({ billDate: { $gte: from, $lte: to } }).select({ billDate: 1, items: 1, customer: 1 }).populate('items').lean();
+
+/** The same number of days just before the window. */
+function previousWindow(from: Date, days: number) {
+  const prevTo = new Date(from.getTime() - 1);
+  const prevFrom = new Date(from);
+  prevFrom.setDate(prevFrom.getDate() - days);
+  return { prevFrom, prevTo };
+}
 
 /** GET /analytics/insights/optics?days=30|90|180|365 — frames and lenses, compared with the previous period. */
 export const getOpticsInsights = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { days, now, from } = windowFor(req);
-    const prevTo = new Date(from.getTime() - 1);
-    const prevFrom = new Date(from);
-    prevFrom.setDate(prevFrom.getDate() - days);
+    const { prevFrom, prevTo } = previousWindow(from, days);
     const [invoices, previousInvoices, frames, lensStock] = await Promise.all([
       periodInvoices(from, now),
       periodInvoices(prevFrom, prevTo),
@@ -49,15 +55,17 @@ export const getOpticsInsights = async (req: Request, res: Response, next: NextF
 export const getFragranceInsights = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { days, now, from } = windowFor(req);
-    const [invoices, fragrances, wholesale] = await Promise.all([
+    const { prevFrom, prevTo } = previousWindow(from, days);
+    const [invoices, previousInvoices, fragrances, wholesale] = await Promise.all([
       periodInvoices(from, now),
+      periodInvoices(prevFrom, prevTo),
       Fragrance.find({}).lean(),
       WholesaleItem.find({}).select('name companyName unit costPrice stock reorderLevel isOrdered orderedQty orderedAt isArchived migratedTo').lean(),
     ]);
     // Wholesale stock now lives on fragrance records; old items that were not moved still count.
     const entries = wholesaleEntries((fragrances as any[]).filter((f) => !f.isArchived)).map((e) => ({ ...e, _id: e._id }));
     const unmoved = (wholesale as any[]).filter((w) => !w.migratedTo);
-    res.json({ from: from.toISOString(), to: now.toISOString(), ...buildFragranceInsights({ invoices: invoices as any, fragrances: fragrances as any, wholesale: [...entries, ...unmoved] as any, legacyWholesale: wholesale as any, days, now }) });
+    res.json({ from: from.toISOString(), to: now.toISOString(), ...buildFragranceInsights({ invoices: invoices as any, fragrances: fragrances as any, wholesale: [...entries, ...unmoved] as any, legacyWholesale: wholesale as any, previousInvoices: previousInvoices as any, days, now }) });
   } catch (e) {
     next(e);
   }
