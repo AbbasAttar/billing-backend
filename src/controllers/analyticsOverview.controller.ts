@@ -97,7 +97,7 @@ export const getAnalyticsOverview = async (req: Request, res: Response, next: Ne
       { key: 'powers', label: 'Lens powers out of stock', count: lowPowers, href: '/lens-stock' },
       { key: 'frames', label: 'Frames over 6 months', count: agedFrames, href: '/analytics/optics' },
       { key: 'wholesale', label: 'Wholesale low, not ordered', count: wsLow, href: '/bulk-stock/order' },
-      ...(recallsDue !== null ? [{ key: 'recalls', label: 'Eye-test recalls due', count: recallsDue, href: '/' }] : []),
+      ...(recallsDue !== null ? [{ key: 'recalls', label: 'Eye-test recalls due', count: recallsDue, href: '/recalls' }] : []),
     ];
 
     const target = targetProgress((targetDoc as any)?.revenueTarget, sales.revenue, period);
