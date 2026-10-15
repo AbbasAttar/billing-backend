@@ -167,7 +167,9 @@ export function salesFigures(invoices: OvInvoice[], costOf: CostOf = lineCost, c
 
     const isNew = inv.isNewCustomer ?? inv.visitNumber === 1;
     if (isNew) { newRev += total; newCount += 1; } else { repeatRev += total; repeatCount += 1; }
-    const src = isNew ? inv.acquisitionSource || 'not_recorded' : 'repeat';
+    // Returning customers are 'repeat'. A first bill tapped as "Repeat client" stays with the new
+    // customers (as 'marked_repeat') so the source list adds up to the new-customer total.
+    const src = !isNew ? 'repeat' : inv.acquisitionSource === 'repeat' ? 'marked_repeat' : inv.acquisitionSource || 'not_recorded';
     const s = sources.get(src) ?? { count: 0, revenue: 0 };
     s.count += 1;
     s.revenue += total;

@@ -132,3 +132,17 @@ describe('catch-all products in the overview', () => {
     expect(s.grossProfit).toBe(100);
   });
 });
+
+describe('new-customer sources', () => {
+  it('add up to the new-customer total even when a first bill was tapped as repeat', async () => {
+    const { salesFigures } = await import('../src/services/analyticsOverview');
+    const s = salesFigures([
+      { billDate: now, total: 100, isNewCustomer: true, acquisitionSource: 'walk_by', items: [] },
+      { billDate: now, total: 50, isNewCustomer: true, acquisitionSource: 'repeat', items: [] },
+      { billDate: now, total: 70, isNewCustomer: false, acquisitionSource: 'walk_by', items: [] },
+    ]);
+    const newSources = s.customers.sources.filter((x) => x.source !== 'repeat');
+    expect(newSources.reduce((t, x) => t + x.revenue, 0)).toBe(s.customers.newRevenue);
+    expect(newSources.map((x) => x.source).sort()).toEqual(['marked_repeat', 'walk_by']);
+  });
+});
