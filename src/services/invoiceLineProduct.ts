@@ -1,0 +1,35 @@
+/**
+ * Bill lines and their product (frame / fragrance): the unit cost a line takes, and stock moved on a
+ * colour / grade when a line's product changes.
+ */
+
+/** Same label rule as the admin UI uses to name a frame colour variant. */
+export const frameVariantName = (v: any) => v.label || (v.colors ?? []).map((c: any) => c.name).join(' + ');
+
+/** Unit cost of a frame or fragrance (its size / grade first), as a new bill line would take it. */
+export function productCost(kind: 'frame' | 'fragrance', doc: any, label?: string | null): number {
+  if (kind === 'fragrance') {
+    const v = label && doc?.variants?.length ? doc.variants.find((x: any) => x.label === label) : null;
+    return v?.costPrice || doc?.costPrice || 0;
+  }
+  return doc?.costPrice || 0;
+}
+
+/**
+ * Moves `delta` units on a product's colour / grade (frames: web.frameVariants, fragrances: variants),
+ * recorded in `pending` (one $set per product). Products without that option are left alone, as on a new bill.
+ */
+export function moveOptionStock(kind: 'frame' | 'fragrance', id: string, doc: any, label: string | null | undefined, delta: number, pending: Map<string, any>) {
+  if (!label || !doc) return;
+  const key = kind === 'frame' ? 'web.frameVariants' : 'variants';
+  const update = pending.get(id) ?? {};
+  const variants: any[] | undefined = update[key] ?? (kind === 'frame' ? doc.web?.frameVariants : doc.variants);
+  if (!variants?.length) return;
+  const nameOf = kind === 'frame' ? frameVariantName : (v: any) => v.label;
+  const idx = variants.findIndex((v: any) => nameOf(v) === label);
+  if (idx < 0) return;
+  const copy = variants.map((v: any) => ({ ...v }));
+  copy[idx].stock = Math.max(0, (copy[idx].stock || 0) + delta);
+  update[key] = copy;
+  pending.set(id, update);
+}

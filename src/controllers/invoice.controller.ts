@@ -12,6 +12,7 @@ import { Fragrance } from '../models/Fragrance.model';
 import { WholesaleItem } from '../models/WholesaleItem.model';
 import { applyWsStock, resolveWsTarget, wholesaleReadIds } from '../services/wholesaleStock';
 import { applyRecipeStock, recipeFor, recipeIngredientIds } from '../services/recipeStock';
+import { frameVariantName, moveOptionStock, productCost } from '../services/invoiceLineProduct';
 import { SiteSetting } from '../models/SiteSetting.model';
 import { financialYear, formatInvoiceNo } from '../utils/invoiceNumber';
 import { InvoiceCounter } from '../models/InvoiceCounter.model';
@@ -147,8 +148,6 @@ const idOf = (v: any): string => (v && typeof v === 'object' ? String(v._id ?? v
 
 const sumSettled = (payments: IPayment[]) => payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
 
-/** Same label rule as the admin UI uses to name a frame colour variant. */
-const frameVariantName = (v: any) => v.label || (v.colors ?? []).map((c: any) => c.name).join(' + ');
 
 interface CatalogLensFilter {
   brand: string;
@@ -195,17 +194,26 @@ async function mutateInvoice(
   });
 }
 
-/** Recomputes subtotal/total from the invoice's items and re-derives billClearDate. */
+/** Recomputes subtotal/total, cost of goods and contribution from the invoice's items, and re-derives billClearDate. */
 function recalcFromItems(invoice: any, items: Map<string, any>): void {
-  const subtotal = invoice.items.reduce((sum: number, id: string) => {
+  let subtotal = 0;
+  let totalCogs = 0;
+  for (const id of invoice.items as string[]) {
     const item = items.get(id);
-    return item ? sum + item.quantity * item.price : sum;
-  }, 0);
+    if (!item) continue;
+    subtotal += item.quantity * item.price;
+    totalCogs += (typeof item.costPrice === 'number' ? item.costPrice : 0) * item.quantity;
+  }
   invoice.subtotal = subtotal;
   invoice.total = subtotal - (invoice.discount ?? 0);
+  invoice.totalCogs = Number(totalCogs.toFixed(2));
+  const net = Math.max(0, Number((invoice.total - totalCogs - (invoice.packagingCost ?? 0) - (invoice.paymentProcessingFee ?? 0)).toFixed(2)));
+  invoice.netContributionMargin = net;
+  invoice.contributionMarginPct = invoice.total > 0 ? Number(((net / invoice.total) * 100).toFixed(2)) : 0;
   if (sumSettled(invoice.payments) >= invoice.total) invoice.billClearDate = new Date();
   else delete invoice.billClearDate;
 }
+
 
 async function respondWithInvoice(res: Response, invoiceId: string, status = 200) {
   const populated = await populateInvoice(Invoice.findById(invoiceId));
@@ -1109,6 +1117,13 @@ export const addItemToInvoice = async (req: Request, res: Response, next: NextFu
     await mutateInvoice(
       invoiceId,
       async (invoice, items, t) => {
+        // Read the product first (all reads come before writes) so the line carries its cost.
+        let productCostPrice: number | null = null;
+        if ((body.type === 'frame' || body.frame) && isValidId(body.frame)) {
+          productCostPrice = productCost('frame', await t.get<any>(Frame, idOf(body.frame)));
+        } else if ((body.type === 'fragrance' || body.fragrance) && isValidId(body.fragrance)) {
+          productCostPrice = productCost('fragrance', await t.get<any>(Fragrance, idOf(body.fragrance)), body.fragranceGrade);
+        }
         if (newCatalogLens) {
           const created = await t.create<any>(OpticalLens, { ...newCatalogLens, sellPrice: body.price });
           body.opticalLens = created.id;
@@ -1121,6 +1136,7 @@ export const addItemToInvoice = async (req: Request, res: Response, next: NextFu
           invoiceId,
           invoiceNumber: invoice.invoiceNumber,
         };
+        if (productCostPrice !== null) doc.costPrice = productCostPrice;
         if ((body.type === 'frame' || body.frame) && body.frame) doc.frame = body.frame;
         if ((body.type === 'fragrance' || body.fragrance) && body.fragrance) {
           doc.fragrance = body.fragrance;
@@ -1278,8 +1294,8 @@ export const updateItemInInvoice = async (req: Request, res: Response, next: Nex
     const invoiceId = String(req.params.id);
     const itemId = String(req.params.itemId);
     const { quantity, price, fragranceGrade } = req.body;
-    // Descriptive fields an edit may change (lens spec, Rx powers, frame colour). Money and stock
-    // links (frame / fragrance / opticalLens ids) are not editable here.
+    // Descriptive fields an edit may change (lens spec, Rx powers, frame colour). The frame or
+    // fragrance itself may be swapped for another one (see below); lens catalogue links may not.
     const descriptive: Record<string, unknown> = {};
     for (const key of EDITABLE_ITEM_FIELDS) {
       if (req.body[key] !== undefined) descriptive[key] = req.body[key];
@@ -1301,6 +1317,29 @@ export const updateItemInInvoice = async (req: Request, res: Response, next: Nex
         const existing = items.get(itemId) ?? null;
         const update: Record<string, any> = { ...descriptive, quantity, price };
         if (fragranceGrade !== undefined) update.fragranceGrade = fragranceGrade;
+
+        // A different frame / fragrance (or colour / grade) picked on the line: the line points to
+        // it and takes its cost; stock of the old option goes back, the new option's comes off.
+        const kind: 'frame' | 'fragrance' | null = existing?.frame ? 'frame' : existing?.fragrance ? 'fragrance' : null;
+        if (kind && existing) {
+          const oldId = idOf(existing[kind]);
+          const newId = isValidId(req.body[kind]) ? idOf(req.body[kind]) : oldId;
+          const labelKey = kind === 'frame' ? 'frameVariantLabel' : 'fragranceGrade';
+          const oldLabel = existing[labelKey] ?? null;
+          const newLabel = update[labelKey] !== undefined ? update[labelKey] || null : oldLabel;
+          if (newId !== oldId || newLabel !== oldLabel) {
+            const Model = kind === 'frame' ? Frame : Fragrance;
+            const docs = await t.getMany<any>(Model, [...new Set([oldId, newId])]);
+            const next = docs.get(newId);
+            if (!next) throw new InvoiceHttpError(404, `The new ${kind} was not found.`);
+            const pending = new Map<string, any>();
+            moveOptionStock(kind, oldId, docs.get(oldId), oldLabel, existing.quantity || 1, pending);
+            moveOptionStock(kind, newId, next, newLabel, -(quantity || 1), pending);
+            for (const [id, set] of pending) await t.update(Model, id, { $set: set }, docs.get(id) ?? null);
+            update[kind] = newId;
+            update.costPrice = productCost(kind, next, newLabel);
+          }
+        }
         await t.update(InvoiceItem, itemId, update, existing);
         if (existing) items.set(itemId, { ...existing, ...update });
         recalcFromItems(invoice, items);
