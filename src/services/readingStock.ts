@@ -11,6 +11,8 @@
  * - Order: keep enough of each power for ORDER_COVER_DAYS at the rate it sold in the period, and
  *   never fewer than MIN_PER_POWER. Order = that target minus what is on the shelf.
  * - Every shelf power from +1.00 to +3.00 is listed, so gaps show even at zero stock.
+ * - Powers outside it (e.g. +3.50, +4.00 left from older buying) show only while there is stock or
+ *   a sale in the period, marked "clearance", and are never put on the order list.
  */
 
 import { isCatchAllFrame } from './catchAllProducts';
@@ -148,7 +150,9 @@ export function buildReadingStock(input: { invoices: RsInvoice[]; frames: any[];
   const powers = [...rows.entries()]
     .sort(([a], [b]) => a - b)
     .map(([power, r]) => {
-      const keep = target(r.sold);
+      const stocked = SHELF_POWERS.includes(power);
+      // Clearance powers: sell what is left, never re-order.
+      const keep = stocked ? target(r.sold) : 0;
       return {
         power,
         label: formatPower(power),
@@ -160,7 +164,8 @@ export function buildReadingStock(input: { invoices: RsInvoice[]; frames: any[];
         types: Object.fromEntries([...r.types]),
         target: keep,
         order: Math.max(0, keep - r.stock),
-        status: r.stock === 0 ? (r.sold > 0 ? 'out-selling' : 'out') : r.stock <= 1 ? 'low' : 'ok',
+        stocked,
+        status: !stocked ? 'clearance' : r.stock === 0 ? (r.sold > 0 ? 'out-selling' : 'out') : r.stock <= 1 ? 'low' : 'ok',
       };
     });
 
@@ -176,7 +181,7 @@ export function buildReadingStock(input: { invoices: RsInvoice[]; frames: any[];
       sold: cells.reduce((s, c) => s + c.sold, 0),
       mostStocked: most.stock > 0 ? { power: most.label, pieces: most.stock } : null,
       topSeller: top.sold > 0 ? { power: top.label, sold: top.sold } : null,
-      emptyPowers: cells.filter((c) => c.stock === 0).map((c) => c.label),
+      emptyPowers: cells.filter((c) => c.stock === 0 && SHELF_POWERS.some((p) => formatPower(p) === c.label)).map((c) => c.label),
     };
   });
 
@@ -210,12 +215,14 @@ export function buildReadingStock(input: { invoices: RsInvoice[]; frames: any[];
   return {
     days: input.days,
     powerLabels: shelf.map(formatPower),
+    /** Power columns outside the +1.00…+3.00 shelf, kept only until sold. */
+    clearanceLabels: shelf.filter((p) => !SHELF_POWERS.includes(p)).map(formatPower),
     frames,
     rule: { coverDays: ORDER_COVER_DAYS, minPerPower: MIN_PER_POWER },
     totals: {
       pieces, cost: r0(cost), sellValue: r0(sellValue), models: models.size,
-      powersInStock: powers.filter((p) => p.stock > 0).length,
-      powersEmpty: powers.filter((p) => p.stock === 0).length,
+      powersInStock: powers.filter((p) => p.stocked && p.stock > 0).length,
+      powersEmpty: powers.filter((p) => p.stocked && p.stock === 0).length,
       soldUnits, soldNoPower, revenue: r0(revenue),
       toOrder: order.reduce((s, o) => s + o.order, 0),
     },

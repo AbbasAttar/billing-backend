@@ -80,3 +80,20 @@ describe('reading frames x power table', () => {
     expect(r.frames[1].stock).toBe(0);
   });
 });
+
+describe('powers outside the shelf', () => {
+  const r = buildReadingStock({
+    invoices: [],
+    frames: [{ _id: 'od', name: 'Old Reader', companyName: 'Local', category: 'reading', type: 'Full Rim', stock: 3,
+      web: { frameVariants: [{ colors: [], power: 3.5, stock: 2 }, { colors: [], power: 4, stock: 1 }] } }],
+    days: 30,
+  });
+
+  it('shows +3.50 / +4.00 as clearance columns and never orders them', () => {
+    expect(r.powerLabels.slice(-2)).toEqual(['+3.50', '+4.00']);
+    expect(r.clearanceLabels).toEqual(['+3.50', '+4.00']);
+    expect(r.powers.find((p) => p.label === '+3.50')).toMatchObject({ stock: 2, stocked: false, status: 'clearance', order: 0 });
+    expect(r.order.map((o) => o.power)).not.toContain('+4.00');
+    expect(r.frames[0].powers['+4.00']).toEqual({ stock: 1, sold: 0 });
+  });
+});
