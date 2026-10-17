@@ -2,8 +2,6 @@ import { Router } from 'express';
 import {
   getAllFragrances,
   searchFragrances,
-  getFragranceTrends,
-  getFragranceSold,
   getFragranceById,
   createFragrance,
   updateFragrance,
@@ -20,8 +18,6 @@ router.get('/presets', getFragrancePresets);
 router.put('/presets', updateFragrancePresets);
 router.get('/search', searchFragrances);
 router.get('/revenue-summary', getFragranceRevenueSummary);
-router.get('/trends', getFragranceTrends);
-router.get('/sold', getFragranceSold);
 router.get('/', getAllFragrances);
 router.get('/:id', getFragranceById);
 router.post('/', createFragrance);

@@ -2,8 +2,6 @@ import { Router } from 'express';
 import {
   getAllFrames,
   searchFrames,
-  getFrameTrends,
-  getFrameSold,
   getFrameById,
   createFrame,
   updateFrame,
@@ -16,8 +14,6 @@ import {
 const router = Router();
 
 router.get('/search', searchFrames);
-router.get('/trends', getFrameTrends);
-router.get('/sold', getFrameSold);
 router.get('/tag-queue', getFrameTagQueue);
 router.get('/', getAllFrames);
 router.get('/:id', getFrameById);
