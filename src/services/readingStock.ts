@@ -1,6 +1,6 @@
 /**
- * Reading glasses (/analytics/reading): pieces on the shelf by power and frame type (Full / Supra /
- * 3-piece), what sold, and how many of each power to order.
+ * Reading glasses (/analytics/reading): pieces on the shelf per reading frame (as entered, e.g.
+ * "Metal Reading") and power, by frame type (Full / Supra / 3-piece), what sold, and what to order.
  *
  * - Reading frames: category "reading" (recorded, or guessed from the name), catch-all frames left out.
  * - Frame type is the frame's rim type (Full Rim / Half Rim = Supra / Rimless = 3-piece).
@@ -58,6 +58,24 @@ export function buildReadingStock(input: { invoices: RsInvoice[]; frames: any[];
   const unassigned: { id: string; name: string; brand: string; pieces: number }[] = [];
   const models = new Set<string>();
   const modelsByType = new Map<string, number>();
+  /** Per reading frame: pieces and sales at each power. */
+  const frameRows = new Map<string, { id: string; name: string; brand: string; type: string; readingType: string | null; powers: Map<number, Cell>; noPower: number }>();
+  const frameRow = (f: any) => {
+    const id = idOf(f._id);
+    let row = frameRows.get(id);
+    if (!row) {
+      const a = frameDocAttrs(f);
+      row = { id, name: f.houseName || f.name || 'Reading glasses', brand: f.companyName || '', type: frameTypeLabel(a.rim), readingType: a.readingType ?? null, powers: new Map(), noPower: 0 };
+      frameRows.set(id, row);
+    }
+    return row;
+  };
+  const frameCell = (f: any, p: number) => {
+    const row = frameRow(f);
+    const c = row.powers.get(p) ?? { stock: 0, sold: 0 };
+    row.powers.set(p, c);
+    return c;
+  };
   for (const f of input.frames) {
     if (f.isArchived || !isReading(f)) continue;
     models.add(idOf(f._id));
@@ -76,8 +94,10 @@ export function buildReadingStock(input: { invoices: RsInvoice[]; frames: any[];
       sellValue += n * unitSell;
       if (a.power === undefined) {
         unassigned.push({ id: idOf(f._id), name: f.name || 'Reading glasses', brand: f.companyName || '', pieces: n });
+        frameRow(f).noPower += n;
         continue;
       }
+      frameCell(f, a.power).stock += n;
       const r = at(a.power);
       r.stock += n;
       r.cost += n * unitCost;
@@ -90,6 +110,9 @@ export function buildReadingStock(input: { invoices: RsInvoice[]; frames: any[];
       cost += rest * unitCost;
       sellValue += rest * unitSell;
       unassigned.push({ id: idOf(f._id), name: f.name || 'Reading glasses', brand: f.companyName || '', pieces: rest });
+      frameRow(f).noPower += rest;
+    } else {
+      frameRow(f);
     }
   }
 
@@ -106,6 +129,7 @@ export function buildReadingStock(input: { invoices: RsInvoice[]; frames: any[];
       soldUnits += qty;
       revenue += rev;
       if (attrs.power === undefined) { soldNoPower += qty; continue; }
+      if (doc && isReading(doc)) frameCell(doc, attrs.power).sold += qty;
       const r = at(attrs.power);
       r.sold += qty;
       r.revenue += rev;
@@ -171,8 +195,22 @@ export function buildReadingStock(input: { invoices: RsInvoice[]; frames: any[];
     })
     .sort((a, b) => b.sold - a.sold || b.order - a.order);
 
+  // Frame × power table: every reading frame entered, by type then name.
+  const shelf = rows.size ? [...rows.keys()].sort((a, b) => a - b) : SHELF_POWERS;
+  const frames = [...frameRows.values()]
+    .map((f) => ({
+      id: f.id, name: f.name, brand: f.brand, type: f.type, readingType: f.readingType,
+      powers: Object.fromEntries(shelf.map((p) => [formatPower(p), f.powers.get(p) ?? { stock: 0, sold: 0 }])),
+      stock: [...f.powers.values()].reduce((s, c) => s + c.stock, 0),
+      sold: [...f.powers.values()].reduce((s, c) => s + c.sold, 0),
+      noPower: f.noPower,
+    }))
+    .sort((a, b) => rank(a.type) - rank(b.type) || a.name.localeCompare(b.name));
+
   return {
     days: input.days,
+    powerLabels: shelf.map(formatPower),
+    frames,
     rule: { coverDays: ORDER_COVER_DAYS, minPerPower: MIN_PER_POWER },
     totals: {
       pieces, cost: r0(cost), sellValue: r0(sellValue), models: models.size,

@@ -58,3 +58,25 @@ describe('buildReadingStock', () => {
     expect(r.totals).toMatchObject({ pieces: 11, models: 2, soldUnits: 5, soldNoPower: 1 });
   });
 });
+
+describe('reading frames x power table', () => {
+  const r = buildReadingStock({
+    invoices: [{ items: [{ frame: 'rd', type: 'frame', quantity: 1, price: 199, frameVariantLabel: 'Black · +1.00' }] }],
+    frames: [
+      { _id: 'rd', name: 'Metal Reading', companyName: 'Local', category: 'reading', type: 'Full Rim', stock: 4,
+        web: { frameVariants: [{ colors: [{ name: 'Black' }], power: 1, stock: 2 }, { colors: [{ name: 'Gold' }], power: 1, stock: 1 }, { colors: [], power: 2.5, stock: 1 }] } },
+      { _id: 'sp', name: 'Supra Reader', companyName: 'Local', category: 'reading', type: 'Half Rim', stock: 0, web: { frameVariants: [] } },
+    ],
+    days: 30,
+  });
+
+  it('has one row per reading frame with pieces at each power', () => {
+    expect(r.powerLabels[0]).toBe('+1.00');
+    expect(r.powerLabels.at(-1)).toBe('+3.00');
+    expect(r.frames.map((f) => [f.name, f.type])).toEqual([['Metal Reading', 'Full'], ['Supra Reader', 'Supra']]);
+    expect(r.frames[0]).toMatchObject({ stock: 4, sold: 1, noPower: 0 });
+    expect(r.frames[0].powers['+1.00']).toEqual({ stock: 3, sold: 1 });
+    expect(r.frames[0].powers['+2.50']).toEqual({ stock: 1, sold: 0 });
+    expect(r.frames[1].stock).toBe(0);
+  });
+});
