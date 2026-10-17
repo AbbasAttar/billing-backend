@@ -20,7 +20,6 @@ describe('frame attributes', () => {
     expect(frameVariantName({ colors: [{ name: 'Black' }] })).toBe('Black');
     expect(frameVariantName({ colors: [{ name: 'Black' }], size: 52 })).toBe('Black · 52mm');
     expect(frameVariantName({ colors: [], power: 1.5 })).toBe('+1.50');
-    expect(frameVariantName({ colors: [], power: -0.75 })).toBe('-0.75');
     expect(frameVariantName({ colors: [], readingType: 'Bifocal', power: 2.25 })).toBe('Bifocal · +2.25');
     expect(frameVariantName({ label: 'Custom', colors: [], power: 2 })).toBe('Custom');
   });
@@ -35,7 +34,8 @@ describe('frame attributes', () => {
 
   it('cleans counter input and lets the line override the record', () => {
     expect(cleanFrameAttrs({ category: 'SUNGLASS', shape: ' ', size: '52', bogus: 1 })).toEqual({ category: 'sunglass', size: 52 });
-    expect(cleanFrameAttrs({ power: '-1.25', size: -3 })).toEqual({ power: -1.25 });
+    // Minus powers are not stocked: dropped.
+    expect(cleanFrameAttrs({ power: '-1.25', size: -3 })).toEqual({});
     expect(lineFrameAttrs({ frameAttrs: { color: 'Red' }, frameVariantLabel: 'Black · 52mm' }, square)).toMatchObject({ color: 'Red', size: 52, shape: 'Square' });
     expect(saleSnapshot(bare, null, { shape: 'Round' })).toEqual({ rim: 'Half Rim', shape: 'Round' });
   });

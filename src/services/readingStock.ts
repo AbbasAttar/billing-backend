@@ -6,18 +6,15 @@
  *   have no power, so they are listed as "power not set" for the counter to fix.
  * - Sales: bill lines whose logged (or recorded) category is reading, by the power and colour sold.
  *   Lines without a power count in the total only.
- * - Every shelf power from -2.50 to +3.00 is listed, so gaps show even at zero stock.
+ * - Every shelf power from +1.00 to +3.00 is listed, so gaps show even at zero stock.
  */
 
 import { isCatchAllFrame } from './catchAllProducts';
 import { frameDocAttrs, formatPower, lineFrameAttrs, swatchFor } from './frameAttributes';
 import { frameVariantName } from './invoiceLineProduct';
 
-/** Readymade powers on the shelf, 0.25 steps: minus -2.50 to -0.25, plus +1.00 to +3.00. */
-export const SHELF_POWERS = [
-  ...Array.from({ length: 10 }, (_, i) => -2.5 + i * 0.25),
-  ...Array.from({ length: 9 }, (_, i) => 1 + i * 0.25),
-];
+/** Readymade powers on the shelf: +1.00 to +3.00 in 0.25 steps. */
+export const SHELF_POWERS = Array.from({ length: 9 }, (_, i) => 1 + i * 0.25);
 
 interface RsItem { frame?: unknown; type?: string; frameAttrs?: unknown; frameVariantLabel?: string | null; quantity?: number; price?: number }
 interface RsInvoice { items?: (RsItem | string | null)[] }

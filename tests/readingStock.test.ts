@@ -7,7 +7,7 @@ const readers = {
   web: { frameVariants: [
     { colors: [{ name: 'Black', hex: '#000' }], power: 1, stock: 2 },
     { colors: [{ name: 'Transparent', hex: '#eee' }], power: 1, stock: 1 },
-    { colors: [{ name: 'Black', hex: '#000' }], power: -0.75, stock: 1 },
+    { colors: [{ name: 'Black', hex: '#000' }], power: 2.75, stock: 1 },
     { colors: [{ name: 'Black', hex: '#000' }], power: 2, stock: 0 },
   ] },
 };
@@ -26,7 +26,7 @@ describe('buildReadingStock', () => {
   it('lists every shelf power with stock by colour', () => {
     expect(r.powers).toHaveLength(SHELF_POWERS.length);
     expect(row('+1.00')).toMatchObject({ stock: 3, sold: 1, colors: { Black: { stock: 2, sold: 1 }, Transparent: { stock: 1, sold: 0 } }, types: { 'Single Vision': 3 } });
-    expect(row('-0.75')).toMatchObject({ stock: 1, status: 'low' });
+    expect(row('+2.75')).toMatchObject({ stock: 1, status: 'low' });
     expect(row('+2.50')).toMatchObject({ stock: 0, status: 'out' });
   });
 
