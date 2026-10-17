@@ -3,12 +3,13 @@
  * colour / grade when a line's product changes.
  */
 
-/** Same label rule as the admin UI uses to name a frame variant: colours, then eye size and reading power. */
+/** Same label rule as the admin UI uses to name a frame variant: colours, eye size, reading type and addition. */
 export const frameVariantName = (v: any) =>
   v.label ||
   [
     (v.colors ?? []).map((c: any) => c.name).join(' + '),
     v.size ? `${v.size}mm` : '',
+    v.readingType ?? '',
     v.power ? `+${Number(v.power).toFixed(2)}` : '',
   ].filter(Boolean).join(' · ');
 

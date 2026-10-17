@@ -4,7 +4,8 @@ import { InvoiceItem } from '../models/InvoiceItem.model';
 import { calculateDefaultFramePricing } from '../utils/pricing.utils';
 import { tokenSearch, SEARCH_MARKERS } from '../services/tokenSearch';
 import { isCatchAllFrame } from '../services/catchAllProducts';
-import { cleanFrameAttrs, missingModelAttrs, tagFrameSet } from '../services/frameAttributes';
+import { cleanTagInput, missingModelAttrs, modelColors, modelSizes, tagFrameSet } from '../services/frameAttributes';
+import { FrameColor } from '../models/FrameColor.model';
 
 function buildFrameQuery(q: string) {
   if (!q) return {};
@@ -356,11 +357,13 @@ export const getFrameSold = async (req: Request, res: Response, next: NextFuncti
 // ── FRAME TAGS ────────────────────────────────────────────────────────────────
 
 /**
- * GET /frames/tag-queue — frames still missing category / shape / material / eye size / colour,
- * best sellers first, then the most stock. Tagging a model also fixes the reports for its old sales.
+ * GET /frames/tag-queue?page=1&limit=25 — frames still missing category, reading type, shape,
+ * material, eye sizes or colours, best sellers first, then the most stock. Tagging a model also
+ * fixes the reports for its old sales.
  */
-export const getFrameTagQueue = async (_req: Request, res: Response, next: NextFunction) => {
+export const getFrameTagQueue = async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit as string) || 25, 5), 100);
     const [frames, items] = await Promise.all([
       Frame.find({ isArchived: { $ne: true } }).lean(),
       InvoiceItem.find({}).select('frame quantity').lean(),
@@ -375,14 +378,21 @@ export const getFrameTagQueue = async (_req: Request, res: Response, next: NextF
     const queue = active
       .map((f) => ({ f, missing: missingModelAttrs(f), sold: sold.get(String(f._id)) ?? 0 }))
       .filter((x) => x.missing.length > 0 && (x.sold > 0 || (x.f.stock ?? 0) > 0))
-      .sort((a, b) => b.sold - a.sold || (b.f.stock ?? 0) - (a.f.stock ?? 0));
+      .sort((a, b) => b.sold - a.sold || (b.f.stock ?? 0) - (a.f.stock ?? 0) || String(a.f._id).localeCompare(String(b.f._id)));
+    const pages = Math.max(1, Math.ceil(queue.length / limit));
+    const page = Math.min(Math.max(parseInt(req.query.page as string) || 1, 1), pages);
     res.json({
       total: active.length,
       remaining: queue.length,
-      frames: queue.slice(0, 150).map(({ f, missing, sold: units }) => ({
-        _id: f._id, name: f.name, houseName: f.houseName, companyName: f.companyName, type: f.type, category: f.category,
+      page,
+      pages,
+      limit,
+      frames: queue.slice((page - 1) * limit, page * limit).map(({ f, missing, sold: units }) => ({
+        _id: f._id, name: f.name, houseName: f.houseName, companyName: f.companyName, type: f.type,
+        category: f.category, readingType: f.readingType,
         stock: f.stock ?? 0, sellPrice: f.sellPrice, sold: units, missing,
-        web: { shape: f.web?.shape, material: f.web?.material, gender: f.web?.gender, color: f.web?.color, frameSize: f.web?.frameSize, frameVariants: f.web?.frameVariants },
+        colors: modelColors(f), sizes: modelSizes(f),
+        web: { shape: f.web?.shape, material: f.web?.material, gender: f.web?.gender, frameVariants: f.web?.frameVariants },
       })),
     });
   } catch (error) {
@@ -390,10 +400,17 @@ export const getFrameTagQueue = async (_req: Request, res: Response, next: NextF
   }
 };
 
-/** PATCH /frames/:id/tags — record category, rim, shape, material, gender, colour, eye size. */
+/**
+ * PATCH /frames/:id/tags — record category, reading type, rim, shape, material, gender, and the
+ * colours / eye sizes the model comes in (`colors`, `sizes` replace the lists).
+ */
 export const tagFrame = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const set = tagFrameSet(cleanFrameAttrs(req.body));
+    const tags = cleanTagInput(req.body);
+    const palette = tags.colors?.length || tags.color
+      ? new Map((await FrameColor.find({}).lean() as any[]).map((c) => [String(c.name).toLowerCase(), c.hex]))
+      : undefined;
+    const set = tagFrameSet(tags, palette);
     if (!Object.keys(set).length) {
       res.status(400).json({ message: 'Nothing to tag.' });
       return;

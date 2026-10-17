@@ -1,7 +1,7 @@
 import { createFirestoreModel, BaseDoc } from '../lib/firestoreModel';
 import { searchTokenHook } from '../lib/searchTokens';
 import { IWebFields } from './webFields.schema';
-import type { FrameCategory } from '../services/frameAttributes';
+import type { FrameCategory, ReadingType } from '../services/frameAttributes';
 
 export interface IFrame extends BaseDoc {
   companyName: string;
@@ -11,6 +11,8 @@ export interface IFrame extends BaseDoc {
   type?: string;
   /** optical / sunglass / reading / kids (see services/frameAttributes.ts). */
   category?: FrameCategory;
+  /** Reading glasses: Single Vision / Bifocal / Progressive (variants may set their own). */
+  readingType?: ReadingType;
   costPrice?: number;
   sellPrice?: number;
   mrp?: number;

@@ -1,6 +1,6 @@
 /**
  * Frame mix (/analytics/optics): what kind of frame sells — category, rim, shape, material, colour,
- * eye size, gender, reading power — against what is on the shelf (pieces, cost, selling value).
+ * eye size, gender, reading type and addition — against what is on the shelf (pieces, cost, selling value).
  *
  * - A sale's attributes come from its bill-line snapshot, gaps filled from the frame record
  *   (see frameAttributes.ts). A sale with an attribute unknown counts in "untagged" for that view,
@@ -19,7 +19,8 @@ interface MixItem { frame?: unknown; type?: string; frameAttrs?: unknown; frameV
 interface MixInvoice { items?: (MixItem | string | null)[] }
 
 const LABELS: Record<AttrKey, string> = {
-  category: 'Category', rim: 'Rim', shape: 'Shape', material: 'Material', gender: 'Gender', color: 'Colour', size: 'Eye size', power: 'Reading power',
+  category: 'Category', readingType: 'Reading type', rim: 'Rim', shape: 'Shape', material: 'Material', gender: 'Gender',
+  color: 'Colour', size: 'Eye size', power: 'Addition',
 };
 const CATEGORY_LABELS: Record<string, string> = { optical: 'Optical', sunglass: 'Sunglass', reading: 'Reading', kids: 'Kids' };
 
@@ -35,6 +36,7 @@ export function attrValue(key: AttrKey, a: FrameAttrs): string | null {
   if (key === 'category') return CATEGORY_LABELS[v as string] ?? String(v);
   if (key === 'size') return `${v} mm`;
   if (key === 'power') return `+${Number(v).toFixed(2)}`;
+  if (key === 'readingType') return String(v);
   const s = String(v).trim();
   return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
 }
@@ -114,7 +116,7 @@ export function buildFrameMix(input: { invoices: MixInvoice[]; frames: any[] }) 
   }
 
   const views = ATTR_KEYS.map((key) => {
-    const base = key === 'power' ? readingUnits : soldUnits;
+    const base = key === 'power' || key === 'readingType' ? readingUnits : soldUnits;
     const rows = [...dims.get(key)!.entries()]
       .map(([value, c]) => ({
         value,

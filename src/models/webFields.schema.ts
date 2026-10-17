@@ -40,7 +40,9 @@ export interface IFrameVariant {
   label?: string;
   /** Eye size (lens width) in mm, when the model comes in more than one size. */
   size?: number;
-  /** Reading power in dioptres (reading glasses), e.g. 1.5 for +1.50. */
+  /** Reading glasses: Single Vision / Bifocal / Progressive. */
+  readingType?: string;
+  /** Reading addition in dioptres, e.g. 1.5 for +1.50. */
   power?: number;
   stock: number;
 }
@@ -61,6 +63,8 @@ export interface IWebFields {
   longevity?: string;
   atarSizes?: IAtarSize[];
   frameSize?: IFrameSize;
+  /** Eye sizes (mm) the model comes in; one bill line logs the one sold. */
+  sizes?: number[];
   colorVariants?: IColorVariant[];
   colors?: IFrameColorSwatch[];
   frameVariants?: IFrameVariant[];
@@ -118,6 +122,7 @@ export const WebFieldsSchema = new Schema<IWebFields>(
       default: undefined,
       _id: false,
     },
+    sizes: { type: [Number], default: undefined },
     colorVariants: {
       type: [{ color: { type: String, trim: true }, slug: { type: String, trim: true, lowercase: true } }],
       default: undefined,
@@ -133,6 +138,7 @@ export const WebFieldsSchema = new Schema<IWebFields>(
         colors: { type: [{ name: { type: String, trim: true }, hex: { type: String, trim: true } }], default: [] },
         label:  { type: String, trim: true },
         size:   { type: Number },
+        readingType: { type: String, trim: true },
         power:  { type: Number },
         stock:  { type: Number, default: 0 },
       }],
