@@ -12,7 +12,7 @@
  */
 
 import { isCatchAllFrame } from './catchAllProducts';
-import { ATTR_KEYS, type AttrKey, type FrameAttrs, frameDocAttrs, lineFrameAttrs } from './frameAttributes';
+import { ATTR_KEYS, type AttrKey, type FrameAttrs, formatPower, frameDocAttrs, lineFrameAttrs } from './frameAttributes';
 import { frameVariantName } from './invoiceLineProduct';
 
 interface MixItem { frame?: unknown; type?: string; frameAttrs?: unknown; frameVariantLabel?: string | null; quantity?: number; price?: number; costPrice?: number }
@@ -20,7 +20,7 @@ interface MixInvoice { items?: (MixItem | string | null)[] }
 
 const LABELS: Record<AttrKey, string> = {
   category: 'Category', readingType: 'Reading type', rim: 'Rim', shape: 'Shape', material: 'Material', gender: 'Gender',
-  color: 'Colour', size: 'Eye size', power: 'Addition',
+  color: 'Colour', size: 'Eye size', power: 'Reading power',
 };
 const CATEGORY_LABELS: Record<string, string> = { optical: 'Optical', sunglass: 'Sunglass', reading: 'Reading', kids: 'Kids' };
 
@@ -35,7 +35,7 @@ export function attrValue(key: AttrKey, a: FrameAttrs): string | null {
   if (v === undefined || v === null || v === '') return null;
   if (key === 'category') return CATEGORY_LABELS[v as string] ?? String(v);
   if (key === 'size') return `${v} mm`;
-  if (key === 'power') return `+${Number(v).toFixed(2)}`;
+  if (key === 'power') return formatPower(Number(v));
   if (key === 'readingType') return String(v);
   const s = String(v).trim();
   return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();

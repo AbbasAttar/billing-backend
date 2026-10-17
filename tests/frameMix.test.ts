@@ -20,6 +20,7 @@ describe('frame attributes', () => {
     expect(frameVariantName({ colors: [{ name: 'Black' }] })).toBe('Black');
     expect(frameVariantName({ colors: [{ name: 'Black' }], size: 52 })).toBe('Black · 52mm');
     expect(frameVariantName({ colors: [], power: 1.5 })).toBe('+1.50');
+    expect(frameVariantName({ colors: [], power: -0.75 })).toBe('-0.75');
     expect(frameVariantName({ colors: [], readingType: 'Bifocal', power: 2.25 })).toBe('Bifocal · +2.25');
     expect(frameVariantName({ label: 'Custom', colors: [], power: 2 })).toBe('Custom');
   });
@@ -34,6 +35,7 @@ describe('frame attributes', () => {
 
   it('cleans counter input and lets the line override the record', () => {
     expect(cleanFrameAttrs({ category: 'SUNGLASS', shape: ' ', size: '52', bogus: 1 })).toEqual({ category: 'sunglass', size: 52 });
+    expect(cleanFrameAttrs({ power: '-1.25', size: -3 })).toEqual({ power: -1.25 });
     expect(lineFrameAttrs({ frameAttrs: { color: 'Red' }, frameVariantLabel: 'Black · 52mm' }, square)).toMatchObject({ color: 'Red', size: 52, shape: 'Square' });
     expect(saleSnapshot(bare, null, { shape: 'Round' })).toEqual({ rim: 'Half Rim', shape: 'Round' });
   });
@@ -84,7 +86,7 @@ describe('buildFrameMix', () => {
     expect(cat.rows.find((r) => r.value === 'Reading')).toMatchObject({ units: 2, revenue: 400 });
     expect(cat.rows.find((r) => r.value === 'Sunglass')).toMatchObject({ units: 1, marginPct: null });
     expect(view('shape').rows.map((r) => r.value)).toEqual(['Square', 'Aviator']); // tie on units: more stock first
-    expect(view('power')).toMatchObject({ label: 'Addition', soldUnits: 2, taggedUnits: 2 });
+    expect(view('power')).toMatchObject({ label: 'Reading power', soldUnits: 2, taggedUnits: 2 });
     expect(view('readingType').rows[0]).toMatchObject({ value: 'Bifocal', units: 2 });
   });
 

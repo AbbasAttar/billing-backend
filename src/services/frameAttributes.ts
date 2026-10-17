@@ -35,7 +35,7 @@ export interface FrameAttrs {
   color?: string;
   /** Eye size (lens width) in mm, e.g. 52. */
   size?: number;
-  /** Reading addition in dioptres, e.g. 1.5 for +1.50. */
+  /** Reading power in dioptres: +1.00…+3.00 additions or -0.25…-2.50 minus, e.g. 1.5 for +1.50. */
   power?: number;
 }
 
@@ -61,6 +61,13 @@ const num = (v: unknown) => {
   const n = typeof v === 'string' ? Number(v) : v;
   return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : undefined;
 };
+/** Reading power: plus (addition) or minus readymade glasses, never 0. */
+const power = (v: unknown) => {
+  const n = typeof v === 'string' ? Number(v) : v;
+  return typeof n === 'number' && Number.isFinite(n) && n !== 0 ? n : undefined;
+};
+/** "+1.50" / "-0.75": the sign is always shown. */
+export const formatPower = (p: number) => `${p > 0 ? '+' : '-'}${Math.abs(p).toFixed(2)}`;
 const category = (v: unknown): FrameCategory | undefined => {
   const s = text(v)?.toLowerCase();
   return (FRAME_CATEGORIES as readonly string[]).includes(s ?? '') ? (s as FrameCategory) : undefined;
@@ -84,7 +91,7 @@ export function cleanFrameAttrs(input: unknown): FrameAttrs {
     gender: text(a.gender)?.toLowerCase(),
     color: text(a.color),
     size: num(a.size),
-    power: num(a.power),
+    power: power(a.power),
   };
   for (const k of ATTR_KEYS) if (out[k] === undefined) delete out[k];
   return out;

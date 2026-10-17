@@ -10,7 +10,7 @@ export const frameVariantName = (v: any) =>
     (v.colors ?? []).map((c: any) => c.name).join(' + '),
     v.size ? `${v.size}mm` : '',
     v.readingType ?? '',
-    v.power ? `+${Number(v.power).toFixed(2)}` : '',
+    v.power ? `${v.power > 0 ? '+' : '-'}${Math.abs(Number(v.power)).toFixed(2)}` : '',
   ].filter(Boolean).join(' · ');
 
 /** Unit cost of a frame or fragrance (its size / grade first), as a new bill line would take it. */
