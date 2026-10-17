@@ -1,4 +1,5 @@
 import { createFirestoreModel, BaseDoc } from '../lib/firestoreModel';
+import type { FrameAttrs } from '../services/frameAttributes';
 
 export interface IInvoiceItem extends BaseDoc {
   type?: string;
@@ -33,6 +34,8 @@ export interface IInvoiceItem extends BaseDoc {
   lensIndex?: string;
   lensCoating?: string;
   frameVariantLabel?: string;
+  /** Frame line: what was sold (category, shape, material, colour, eye size, reading power…), snapshot at billing. */
+  frameAttrs?: FrameAttrs;
   rightEyeNumber?: string;
   leftEyeNumber?: string;
   lensCompany?: string;

@@ -1,12 +1,16 @@
 import { createFirestoreModel, BaseDoc } from '../lib/firestoreModel';
 import { searchTokenHook } from '../lib/searchTokens';
 import { IWebFields } from './webFields.schema';
+import type { FrameCategory } from '../services/frameAttributes';
 
 export interface IFrame extends BaseDoc {
   companyName: string;
   name: string;
   houseName?: string;
+  /** Rim type: Full Rim / Half Rim / Rimless. */
   type?: string;
+  /** optical / sunglass / reading / kids (see services/frameAttributes.ts). */
+  category?: FrameCategory;
   costPrice?: number;
   sellPrice?: number;
   mrp?: number;

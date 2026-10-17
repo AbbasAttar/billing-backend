@@ -13,6 +13,7 @@ import { WholesaleItem } from '../models/WholesaleItem.model';
 import { applyWsStock, resolveWsTarget, wholesaleReadIds } from '../services/wholesaleStock';
 import { applyRecipeStock, recipeFor, recipeIngredientIds } from '../services/recipeStock';
 import { frameVariantName, moveOptionStock, productCost } from '../services/invoiceLineProduct';
+import { cleanFrameAttrs, learnFromSale, saleSnapshot } from '../services/frameAttributes';
 import { SiteSetting } from '../models/SiteSetting.model';
 import { financialYear, formatInvoiceNo } from '../utils/invoiceNumber';
 import { InvoiceCounter } from '../models/InvoiceCounter.model';
@@ -513,6 +514,9 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
               update['web.frameVariants'] = copy;
             }
           }
+          // Log what was sold, and teach the frame record any model detail tagged at the counter.
+          enhanced._frameAttrs = saleSnapshot(frame, item.frameVariantLabel, item.frameAttrs);
+          Object.assign(update, learnFromSale(frame, cleanFrameAttrs(item.frameAttrs)));
           frameUpdates.set(id, update);
         } else if (item.type === 'fragrance' && isValidId(item.fragrance)) {
           const id = idOf(item.fragrance);
@@ -613,6 +617,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         if (item.type === 'frame' && item.frame) {
           doc.frame = item.frame;
           if (item.frameVariantLabel) doc.frameVariantLabel = item.frameVariantLabel;
+          if (item._frameAttrs && Object.keys(item._frameAttrs).length) doc.frameAttrs = item._frameAttrs;
         }
         if (item.type === 'fragrance' && item.fragrance) {
           doc.fragrance = item.fragrance;
@@ -1119,8 +1124,10 @@ export const addItemToInvoice = async (req: Request, res: Response, next: NextFu
       async (invoice, items, t) => {
         // Read the product first (all reads come before writes) so the line carries its cost.
         let productCostPrice: number | null = null;
+        let frameDoc: any = null;
         if ((body.type === 'frame' || body.frame) && isValidId(body.frame)) {
-          productCostPrice = productCost('frame', await t.get<any>(Frame, idOf(body.frame)));
+          frameDoc = await t.get<any>(Frame, idOf(body.frame));
+          productCostPrice = productCost('frame', frameDoc);
         } else if ((body.type === 'fragrance' || body.fragrance) && isValidId(body.fragrance)) {
           productCostPrice = productCost('fragrance', await t.get<any>(Fragrance, idOf(body.fragrance)), body.fragranceGrade);
         }
@@ -1137,7 +1144,13 @@ export const addItemToInvoice = async (req: Request, res: Response, next: NextFu
           invoiceNumber: invoice.invoiceNumber,
         };
         if (productCostPrice !== null) doc.costPrice = productCostPrice;
-        if ((body.type === 'frame' || body.frame) && body.frame) doc.frame = body.frame;
+        if ((body.type === 'frame' || body.frame) && body.frame) {
+          doc.frame = body.frame;
+          const attrs = saleSnapshot(frameDoc, body.frameVariantLabel, body.frameAttrs);
+          if (Object.keys(attrs).length) doc.frameAttrs = attrs;
+          const learned = learnFromSale(frameDoc, cleanFrameAttrs(body.frameAttrs));
+          if (frameDoc && Object.keys(learned).length) await t.update(Frame, idOf(body.frame), { $set: learned }, frameDoc);
+        }
         if ((body.type === 'fragrance' || body.fragrance) && body.fragrance) {
           doc.fragrance = body.fragrance;
           if (body.fragranceGrade) doc.fragranceGrade = body.fragranceGrade;
@@ -1317,6 +1330,15 @@ export const updateItemInInvoice = async (req: Request, res: Response, next: Nex
         const existing = items.get(itemId) ?? null;
         const update: Record<string, any> = { ...descriptive, quantity, price };
         if (fragranceGrade !== undefined) update.fragranceGrade = fragranceGrade;
+        // Frame tags edited on a saved line: merged into its snapshot; model details also go to the frame.
+        let frameLearn: { id: string; doc: any; set: Record<string, unknown> } | null = null;
+        if (req.body.frameAttrs !== undefined && existing?.frame) {
+          const sent = cleanFrameAttrs(req.body.frameAttrs);
+          update.frameAttrs = { ...cleanFrameAttrs(existing.frameAttrs), ...sent };
+          const frameId = isValidId(req.body.frame) ? idOf(req.body.frame) : idOf(existing.frame);
+          const doc = await t.get<any>(Frame, frameId);
+          frameLearn = { id: frameId, doc, set: learnFromSale(doc, sent) };
+        }
 
         // A different frame / fragrance (or colour / grade) picked on the line: the line points to
         // it and takes its cost; stock of the old option goes back, the new option's comes off.
@@ -1338,7 +1360,16 @@ export const updateItemInInvoice = async (req: Request, res: Response, next: Nex
             for (const [id, set] of pending) await t.update(Model, id, { $set: set }, docs.get(id) ?? null);
             update[kind] = newId;
             update.costPrice = productCost(kind, next, newLabel);
+            if (kind === 'frame') {
+              // Same model, other piece: keep the line's model tags, re-read colour / size / power.
+              const { color: _c, size: _s, power: _p, ...modelTags } = cleanFrameAttrs(existing.frameAttrs);
+              const kept = newId === oldId ? modelTags : {};
+              update.frameAttrs = saleSnapshot(next, newLabel, { ...kept, ...cleanFrameAttrs(req.body.frameAttrs) });
+            }
           }
+        }
+        if (frameLearn && Object.keys(frameLearn.set).length) {
+          await t.update(Frame, frameLearn.id, { $set: frameLearn.set }, frameLearn.doc);
         }
         await t.update(InvoiceItem, itemId, update, existing);
         if (existing) items.set(itemId, { ...existing, ...update });

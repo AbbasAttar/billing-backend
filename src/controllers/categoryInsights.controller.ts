@@ -7,6 +7,7 @@ import { WholesaleItem } from '../models/WholesaleItem.model';
 import { buildFragranceInsights } from '../services/categoryInsights';
 import { wholesaleEntries } from '../services/wholesaleCatalog';
 import { buildOpticsInsights } from '../services/opticsInsights';
+import { buildFrameMix } from '../services/frameMix';
 
 const ALLOWED_DAYS = [30, 90, 180, 365];
 
@@ -39,12 +40,13 @@ export const getOpticsInsights = async (req: Request, res: Response, next: NextF
     const [invoices, previousInvoices, frames, lensStock] = await Promise.all([
       periodInvoices(from, now),
       periodInvoices(prevFrom, prevTo),
-      Frame.find({}).select('name companyName type costPrice sellPrice stock createdAt isArchived').lean(),
+      Frame.find({}).select('name houseName companyName type category costPrice sellPrice storePrice mrp stock createdAt isArchived web').lean(),
       LensStock.find({}).select('lensType material coating color sph cyl add quantity').lean(),
     ]);
     res.json({
       from: from.toISOString(), to: now.toISOString(),
       ...buildOpticsInsights({ invoices: invoices as any, previousInvoices: previousInvoices as any, frames: frames as any, lensStock: lensStock as any, days, now }),
+      frameMix: buildFrameMix({ invoices: invoices as any, frames: frames as any }),
     });
   } catch (e) {
     next(e);

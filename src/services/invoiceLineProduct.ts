@@ -3,8 +3,14 @@
  * colour / grade when a line's product changes.
  */
 
-/** Same label rule as the admin UI uses to name a frame colour variant. */
-export const frameVariantName = (v: any) => v.label || (v.colors ?? []).map((c: any) => c.name).join(' + ');
+/** Same label rule as the admin UI uses to name a frame variant: colours, then eye size and reading power. */
+export const frameVariantName = (v: any) =>
+  v.label ||
+  [
+    (v.colors ?? []).map((c: any) => c.name).join(' + '),
+    v.size ? `${v.size}mm` : '',
+    v.power ? `+${Number(v.power).toFixed(2)}` : '',
+  ].filter(Boolean).join(' · ');
 
 /** Unit cost of a frame or fragrance (its size / grade first), as a new bill line would take it. */
 export function productCost(kind: 'frame' | 'fragrance', doc: any, label?: string | null): number {

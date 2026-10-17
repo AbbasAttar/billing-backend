@@ -38,6 +38,10 @@ export interface IFrameColorSwatch {
 export interface IFrameVariant {
   colors: IFrameColorSwatch[];
   label?: string;
+  /** Eye size (lens width) in mm, when the model comes in more than one size. */
+  size?: number;
+  /** Reading power in dioptres (reading glasses), e.g. 1.5 for +1.50. */
+  power?: number;
   stock: number;
 }
 
@@ -128,6 +132,8 @@ export const WebFieldsSchema = new Schema<IWebFields>(
       type: [{
         colors: { type: [{ name: { type: String, trim: true }, hex: { type: String, trim: true } }], default: [] },
         label:  { type: String, trim: true },
+        size:   { type: Number },
+        power:  { type: Number },
         stock:  { type: Number, default: 0 },
       }],
       default: undefined,

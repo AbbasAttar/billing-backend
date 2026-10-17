@@ -5,6 +5,8 @@ export interface CreateFrameItemInput {
   price: number;
   costPrice?: number;
   frameVariantLabel?: string;
+  /** Attributes tagged at the counter (see services/frameAttributes.ts); fill or override the frame record's. */
+  frameAttrs?: Record<string, unknown>;
   lensBrand?: string;
   name?: string;
 }

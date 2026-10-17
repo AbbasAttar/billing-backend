@@ -3,6 +3,8 @@ import { Frame } from '../models/Frame.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
 import { calculateDefaultFramePricing } from '../utils/pricing.utils';
 import { tokenSearch, SEARCH_MARKERS } from '../services/tokenSearch';
+import { isCatchAllFrame } from '../services/catchAllProducts';
+import { cleanFrameAttrs, missingModelAttrs, tagFrameSet } from '../services/frameAttributes';
 
 function buildFrameQuery(q: string) {
   if (!q) return {};
@@ -350,3 +352,59 @@ export const getFrameSold = async (req: Request, res: Response, next: NextFuncti
   }
 };
 
+
+// ── FRAME TAGS ────────────────────────────────────────────────────────────────
+
+/**
+ * GET /frames/tag-queue — frames still missing category / shape / material / eye size / colour,
+ * best sellers first, then the most stock. Tagging a model also fixes the reports for its old sales.
+ */
+export const getFrameTagQueue = async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const [frames, items] = await Promise.all([
+      Frame.find({ isArchived: { $ne: true } }).lean(),
+      InvoiceItem.find({}).select('frame quantity').lean(),
+    ]);
+    const sold = new Map<string, number>();
+    for (const it of items as any[]) {
+      if (!it.frame) continue;
+      const id = String(it.frame?._id ?? it.frame);
+      sold.set(id, (sold.get(id) ?? 0) + (it.quantity > 0 ? it.quantity : 1));
+    }
+    const active = (frames as any[]).filter((f) => !isCatchAllFrame(f));
+    const queue = active
+      .map((f) => ({ f, missing: missingModelAttrs(f), sold: sold.get(String(f._id)) ?? 0 }))
+      .filter((x) => x.missing.length > 0 && (x.sold > 0 || (x.f.stock ?? 0) > 0))
+      .sort((a, b) => b.sold - a.sold || (b.f.stock ?? 0) - (a.f.stock ?? 0));
+    res.json({
+      total: active.length,
+      remaining: queue.length,
+      frames: queue.slice(0, 150).map(({ f, missing, sold: units }) => ({
+        _id: f._id, name: f.name, houseName: f.houseName, companyName: f.companyName, type: f.type, category: f.category,
+        stock: f.stock ?? 0, sellPrice: f.sellPrice, sold: units, missing,
+        web: { shape: f.web?.shape, material: f.web?.material, gender: f.web?.gender, color: f.web?.color, frameSize: f.web?.frameSize, frameVariants: f.web?.frameVariants },
+      })),
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/** PATCH /frames/:id/tags — record category, rim, shape, material, gender, colour, eye size. */
+export const tagFrame = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const set = tagFrameSet(cleanFrameAttrs(req.body));
+    if (!Object.keys(set).length) {
+      res.status(400).json({ message: 'Nothing to tag.' });
+      return;
+    }
+    const frame = await Frame.findByIdAndUpdate(req.params.id, { $set: set }, { new: true });
+    if (!frame) {
+      res.status(404).json({ message: 'Frame not found' });
+      return;
+    }
+    res.json(frame);
+  } catch (error) {
+    next(error);
+  }
+};

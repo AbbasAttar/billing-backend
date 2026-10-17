@@ -2,6 +2,7 @@ import { Frame, IFrame } from '../models/Frame.model';
 import { Fragrance, IFragrance } from '../models/Fragrance.model';
 import { OpticalLens, IOpticalLens } from '../models/OpticalLens.model';
 import { ContactLens, IContactLens } from '../models/ContactLens.model';
+import { frameVariantName } from './invoiceLineProduct';
 
 export type PublicCategory =
   | 'frames'
@@ -110,7 +111,8 @@ function frameToPublic(f: IFrame): PublicProduct {
     frameVariants: web.frameVariants?.length
       ? web.frameVariants.map((v: any) => ({
           colors: (v.colors ?? []).map((c: any) => ({ name: c.name, hex: c.hex })),
-          label: v.label,
+          // Full name (colour · eye size · power) so an online order matches the variant billed in store.
+          label: frameVariantName(v),
           stock: v.stock ?? 0,
         }))
       : undefined,
