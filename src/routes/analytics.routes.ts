@@ -10,7 +10,7 @@ import {
     getUnitEconomicsAnalytics,
     getSalesDistributionAnalytics,
 } from '../controllers/analytics.controller';
-import { getFragranceInsights, getOpticsInsights } from '../controllers/categoryInsights.controller';
+import { getFragranceInsights, getOpticsInsights, getReadingInsights } from '../controllers/categoryInsights.controller';
 import { getAnalyticsOverview } from '../controllers/analyticsOverview.controller';
 
 const router = Router();
@@ -27,5 +27,6 @@ router.get('/fragrance-type-mix', getFragranceTypeMix);
 router.get('/lens-type-demand',   getLensTypeDemand);
 router.get('/insights/optics',    getOpticsInsights);
 router.get('/insights/fragrance', getFragranceInsights);
+router.get('/insights/reading',   getReadingInsights);
 
 export default router;

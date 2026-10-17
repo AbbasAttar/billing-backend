@@ -8,6 +8,7 @@ import { buildFragranceInsights } from '../services/categoryInsights';
 import { wholesaleEntries } from '../services/wholesaleCatalog';
 import { buildOpticsInsights } from '../services/opticsInsights';
 import { buildFrameMix } from '../services/frameMix';
+import { buildReadingStock } from '../services/readingStock';
 
 const ALLOWED_DAYS = [30, 90, 180, 365];
 
@@ -68,6 +69,20 @@ export const getFragranceInsights = async (req: Request, res: Response, next: Ne
     const entries = wholesaleEntries((fragrances as any[]).filter((f) => !f.isArchived)).map((e) => ({ ...e, _id: e._id }));
     const unmoved = (wholesale as any[]).filter((w) => !w.migratedTo);
     res.json({ from: from.toISOString(), to: now.toISOString(), ...buildFragranceInsights({ invoices: invoices as any, fragrances: fragrances as any, wholesale: [...entries, ...unmoved] as any, legacyWholesale: wholesale as any, previousInvoices: previousInvoices as any, days, now }) });
+  } catch (e) {
+    next(e);
+  }
+};
+
+/** GET /analytics/insights/reading?days=… — reading glasses on the shelf by power and colour, and what sold. */
+export const getReadingInsights = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { days, now, from } = windowFor(req);
+    const [invoices, frames] = await Promise.all([
+      periodInvoices(from, now),
+      Frame.find({}).select('name houseName companyName type category readingType costPrice sellPrice storePrice mrp stock isArchived web').lean(),
+    ]);
+    res.json({ from: from.toISOString(), to: now.toISOString(), ...buildReadingStock({ invoices: invoices as any, frames: frames as any, days }) });
   } catch (e) {
     next(e);
   }
