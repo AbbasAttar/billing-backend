@@ -36,6 +36,8 @@ export interface IInvoiceItem extends BaseDoc {
   frameVariantLabel?: string;
   /** Frame line: what was sold (category, shape, material, colour, eye size, reading power…), snapshot at billing. */
   frameAttrs?: FrameAttrs;
+  /** Frame line whose pieces came off the frame's total stock (bills since that started); restores add them back. */
+  frameStockTaken?: boolean;
   rightEyeNumber?: string;
   leftEyeNumber?: string;
   lensCompany?: string;

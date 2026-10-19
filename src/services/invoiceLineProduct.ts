@@ -40,3 +40,29 @@ export function moveOptionStock(kind: 'frame' | 'fragrance', id: string, doc: an
   update[key] = copy;
   pending.set(id, update);
 }
+
+/**
+ * Moves `delta` pieces on a frame: its total stock and, when a variant is named, that variant too.
+ * Recorded in `pending` (one $set per frame). Stock never goes below 0.
+ */
+export function moveFrameStock(id: string, doc: any, label: string | null | undefined, delta: number, pending: Map<string, any>) {
+  if (!doc || !delta) return;
+  const update = pending.get(id) ?? {};
+  const current = typeof update.stock === 'number' ? update.stock : Number(doc.stock) || 0;
+  update.stock = Math.max(0, current + delta);
+  pending.set(id, update);
+  moveOptionStock('frame', id, doc, label, delta, pending);
+}
+
+/**
+ * Frame lines billed since total stock started moving carry `frameStockTaken`; older lines only ever
+ * took their variant. Putting a line's pieces back follows the same rule, so old bills do not add
+ * stock that was never taken off.
+ */
+export function restoreFrameLine(item: any, doc: any, pending: Map<string, any>) {
+  if (!item?.frame || !doc) return;
+  const qty = item.quantity || 1;
+  const id = String(item.frame?._id ?? item.frame);
+  if (item.frameStockTaken) moveFrameStock(id, doc, item.frameVariantLabel, qty, pending);
+  else moveOptionStock('frame', id, doc, item.frameVariantLabel, qty, pending);
+}

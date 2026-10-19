@@ -12,7 +12,7 @@ import { Fragrance } from '../models/Fragrance.model';
 import { WholesaleItem } from '../models/WholesaleItem.model';
 import { applyWsStock, resolveWsTarget, wholesaleReadIds } from '../services/wholesaleStock';
 import { applyRecipeStock, recipeFor, recipeIngredientIds } from '../services/recipeStock';
-import { frameVariantName, moveOptionStock, productCost } from '../services/invoiceLineProduct';
+import { frameVariantName, moveFrameStock, moveOptionStock, productCost, restoreFrameLine } from '../services/invoiceLineProduct';
 import { cleanFrameAttrs, learnFromSale, saleSnapshot } from '../services/frameAttributes';
 import { SiteSetting } from '../models/SiteSetting.model';
 import { financialYear, formatInvoiceNo } from '../utils/invoiceNumber';
@@ -503,21 +503,15 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         } else if (item.type === 'frame' && isValidId(item.frame)) {
           const id = idOf(item.frame);
           const frame = frames.get(id);
-          const update = frameUpdates.get(id) ?? { sellPrice: item.price };
-          update.sellPrice = item.price;
-          const variants = update['web.frameVariants'] ?? frame?.web?.frameVariants;
-          if (item.frameVariantLabel && variants?.length) {
-            const idx = variants.findIndex((v: any) => frameVariantName(v) === item.frameVariantLabel);
-            if (idx >= 0) {
-              const copy = variants.map((v: any) => ({ ...v }));
-              copy[idx].stock = Math.max(0, (copy[idx].stock || 0) - (item.quantity || 1));
-              update['web.frameVariants'] = copy;
-            }
+          frameUpdates.set(id, { ...(frameUpdates.get(id) ?? {}), sellPrice: item.price });
+          // The pieces sold come off the frame's total stock and off the variant picked.
+          if (frame) {
+            moveFrameStock(id, frame, item.frameVariantLabel, -(item.quantity || 1), frameUpdates);
+            enhanced._frameStockTaken = true;
           }
           // Log what was sold, and teach the frame record any model detail tagged at the counter.
           enhanced._frameAttrs = saleSnapshot(frame, item.frameVariantLabel, item.frameAttrs);
-          Object.assign(update, learnFromSale(frame, cleanFrameAttrs(item.frameAttrs)));
-          frameUpdates.set(id, update);
+          Object.assign(frameUpdates.get(id)!, learnFromSale(frame, cleanFrameAttrs(item.frameAttrs)));
         } else if (item.type === 'fragrance' && isValidId(item.fragrance)) {
           const id = idOf(item.fragrance);
           const fragrance = fragrances.get(id);
@@ -618,6 +612,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
           doc.frame = item.frame;
           if (item.frameVariantLabel) doc.frameVariantLabel = item.frameVariantLabel;
           if (item._frameAttrs && Object.keys(item._frameAttrs).length) doc.frameAttrs = item._frameAttrs;
+          if (item._frameStockTaken) doc.frameStockTaken = true;
         }
         if (item.type === 'fragrance' && item.fragrance) {
           doc.fragrance = item.fragrance;
@@ -1008,29 +1003,21 @@ export const deleteInvoice = async (req: Request, res: Response, next: NextFunct
       const itemIds: string[] = (invoice.items ?? []).map(idOf);
       const items = await t.getMany<any>(InvoiceItem, itemIds);
 
-      // Restore frame variant stock for frame items that had a colour selected.
-      const frameIds = [...items.values()].filter((i) => i.frame && i.frameVariantLabel).map((i) => idOf(i.frame));
+      // Put frame pieces back (total and variant for newer lines, variant only for older ones).
+      const frameIds = [...new Set([...items.values()].filter((i) => i.frame).map((i) => idOf(i.frame)))];
       const frames = await t.getMany<any>(Frame, frameIds);
       const wholesaleIds = [...items.values()].filter((i) => i.wholesaleItem).map((i) => idOf(i.wholesaleItem));
       const wsRead = wholesaleReadIds(wholesaleIds);
       const wholesaleItems = await t.getMany<any>(WholesaleItem, wsRead.legacyIds);
       for (const old of wholesaleItems.values()) if (old?.migratedTo) wsRead.fragranceIds.add(String(old.migratedTo));
       const wsFragrances = await t.getMany<any>(Fragrance, [...wsRead.fragranceIds]);
-      const restored = new Map<string, any[]>();
+      const restored = new Map<string, any>();
       for (const item of items.values()) {
-        if (!item.frame || !item.frameVariantLabel) continue;
-        const id = idOf(item.frame);
-        const variants = restored.get(id) ?? frames.get(id)?.web?.frameVariants?.map((v: any) => ({ ...v }));
-        if (!variants?.length) continue;
-        const idx = variants.findIndex((v: any) => frameVariantName(v) === item.frameVariantLabel);
-        if (idx >= 0) {
-          variants[idx].stock = (variants[idx].stock || 0) + item.quantity;
-          restored.set(id, variants);
-        }
+        if (item.frame) restoreFrameLine(item, frames.get(idOf(item.frame)), restored);
       }
 
-      for (const [id, variants] of restored) {
-        await t.update(Frame, id, { $set: { 'web.frameVariants': variants } }, frames.get(id) ?? null);
+      for (const [id, set] of restored) {
+        await t.update(Frame, id, { $set: set }, frames.get(id) ?? null);
       }
 
       // Put billed wholesale units back on the shelf (on the fragrance record since the catalogue merge).
@@ -1148,8 +1135,15 @@ export const addItemToInvoice = async (req: Request, res: Response, next: NextFu
           doc.frame = body.frame;
           const attrs = saleSnapshot(frameDoc, body.frameVariantLabel, body.frameAttrs);
           if (Object.keys(attrs).length) doc.frameAttrs = attrs;
-          const learned = learnFromSale(frameDoc, cleanFrameAttrs(body.frameAttrs));
-          if (frameDoc && Object.keys(learned).length) await t.update(Frame, idOf(body.frame), { $set: learned }, frameDoc);
+          // The pieces come off the frame's total stock and the variant picked.
+          const pending = new Map<string, any>();
+          if (frameDoc) {
+            if (body.frameVariantLabel) doc.frameVariantLabel = body.frameVariantLabel;
+            moveFrameStock(idOf(body.frame), frameDoc, body.frameVariantLabel, -(body.quantity || 1), pending);
+            doc.frameStockTaken = true;
+          }
+          const set = { ...(pending.get(idOf(body.frame)) ?? {}), ...learnFromSale(frameDoc, cleanFrameAttrs(body.frameAttrs)) };
+          if (frameDoc && Object.keys(set).length) await t.update(Frame, idOf(body.frame), { $set: set }, frameDoc);
         }
         if ((body.type === 'fragrance' || body.fragrance) && body.fragrance) {
           doc.fragrance = body.fragrance;
@@ -1224,9 +1218,20 @@ export const removeItemFromInvoice = async (req: Request, res: Response, next: N
 
     await mutateInvoice(
       invoiceId,
-      (invoice, items, t) => {
+      async (invoice, items, t) => {
         if (invoice.items.length <= 1) throw new InvoiceHttpError(400, 'Invoice must have at least one item');
         if (isNaN(index) || index < 0 || index >= invoice.items.length) throw new InvoiceHttpError(400, 'Invalid item index');
+
+        // A removed frame line puts its pieces back (read before any write).
+        const removed = items.get(invoice.items[index]);
+        if (removed?.frame) {
+          const frameId = idOf(removed.frame);
+          const frameDoc = await t.get<any>(Frame, frameId);
+          const pending = new Map<string, any>();
+          restoreFrameLine(removed, frameDoc, pending);
+          const set = pending.get(frameId);
+          if (set) await t.update(Frame, frameId, { $set: set }, frameDoc);
+        }
 
         const [removedId] = invoice.items.splice(index, 1);
         t.delete(InvoiceItem, removedId);
@@ -1349,15 +1354,28 @@ export const updateItemInInvoice = async (req: Request, res: Response, next: Nex
           const labelKey = kind === 'frame' ? 'frameVariantLabel' : 'fragranceGrade';
           const oldLabel = existing[labelKey] ?? null;
           const newLabel = update[labelKey] !== undefined ? update[labelKey] || null : oldLabel;
-          if (newId !== oldId || newLabel !== oldLabel) {
+          const changed = newId !== oldId || newLabel !== oldLabel;
+          // Frame lines that took total stock also follow a quantity change.
+          const qtyChanged = kind === 'frame' && existing.frameStockTaken && (existing.quantity || 1) !== (quantity || 1);
+          let next: any = null;
+          if (changed || qtyChanged) {
             const Model = kind === 'frame' ? Frame : Fragrance;
             const docs = await t.getMany<any>(Model, [...new Set([oldId, newId])]);
-            const next = docs.get(newId);
+            next = docs.get(newId);
             if (!next) throw new InvoiceHttpError(404, `The new ${kind} was not found.`);
             const pending = new Map<string, any>();
-            moveOptionStock(kind, oldId, docs.get(oldId), oldLabel, existing.quantity || 1, pending);
-            moveOptionStock(kind, newId, next, newLabel, -(quantity || 1), pending);
+            if (kind === 'frame') {
+              // Old pieces back (as they were taken), new pieces off total and variant.
+              restoreFrameLine(existing, docs.get(oldId), pending);
+              moveFrameStock(newId, next, newLabel, -(quantity || 1), pending);
+              update.frameStockTaken = true;
+            } else {
+              moveOptionStock(kind, oldId, docs.get(oldId), oldLabel, existing.quantity || 1, pending);
+              moveOptionStock(kind, newId, next, newLabel, -(quantity || 1), pending);
+            }
             for (const [id, set] of pending) await t.update(Model, id, { $set: set }, docs.get(id) ?? null);
+          }
+          if (changed) {
             update[kind] = newId;
             update.costPrice = productCost(kind, next, newLabel);
             if (kind === 'frame') {
