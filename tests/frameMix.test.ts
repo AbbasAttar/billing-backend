@@ -100,3 +100,14 @@ describe('buildFrameMix', () => {
     expect(view('rim').rows.find((r) => r.value === 'Half rim')).toMatchObject({ inStock: 2, stockCost: 600 });
   });
 });
+
+describe('models in several shapes', () => {
+  const mixed = { _id: 'mx', name: 'Box 52', companyName: 'Tulsi', category: 'optical', web: { shapes: ['Round', 'Square'], material: 'Metal' } };
+  it('leaves the shape to the sale and never learns one', () => {
+    expect(frameDocAttrs(mixed).shape).toBeUndefined();
+    expect(lineFrameAttrs({ frameAttrs: { shape: 'Square' } }, mixed).shape).toBe('Square');
+    expect(learnFromSale(mixed, { shape: 'Round' })).toEqual({});
+    expect(missingModelAttrs(mixed)).not.toContain('shape');
+    expect(frameDocAttrs({ ...mixed, web: { shapes: ['Oval'] } }).shape).toBe('Oval');
+  });
+});

@@ -57,6 +57,8 @@ export interface IWebFields {
   tags: string[];
   gender?: 'men' | 'women' | 'unisex' | 'kids';
   shape?: string;
+  /** Shapes a mixed model comes in; each sale logs the one sold. Single-shape models use `shape`. */
+  shapes?: string[];
   color?: string;
   material?: string;
   fragranceFamily?: string[];
@@ -104,6 +106,7 @@ export const WebFieldsSchema = new Schema<IWebFields>(
     tags: { type: [String], default: [], index: true },
     gender: { type: String, enum: ['men', 'women', 'unisex', 'kids'] },
     shape: { type: String, trim: true },
+    shapes: { type: [String], default: undefined },
     color: { type: String, trim: true },
     material: { type: String, trim: true },
     fragranceFamily: { type: [String], default: [] },

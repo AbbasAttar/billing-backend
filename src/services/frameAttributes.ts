@@ -5,7 +5,7 @@
  * Where each attribute lives on a frame record (one place each, no copies):
  *   category, readingType → frame.category, frame.readingType
  *   rim       → frame.type                 (Full Rim / Half Rim / Rimless)
- *   shape, material, gender → frame.web.*
+ *   shape, material, gender → frame.web.* (a model in several shapes lists them in web.shapes)
  *   colours the model comes in → frame.web.colors[] (older records: frame.web.color)
  *   eye sizes the model comes in → frame.web.sizes[] (older records: frame.web.frameSize.lensWidth)
  *   a piece with its own stock → frame.web.frameVariants[] (colors, size, readingType, power)
@@ -110,6 +110,14 @@ export function modelColors(frame: any): string[] {
   return one ? [one] : [];
 }
 
+/** Shapes the model comes in (its list, else its one shape). */
+export function modelShapes(frame: any): string[] {
+  const list = (frame?.web?.shapes ?? []).map(text).filter(Boolean) as string[];
+  if (list.length) return uniq(list);
+  const one = text(frame?.web?.shape);
+  return one ? [one] : [];
+}
+
 /** Eye sizes the model comes in (its list, else the older single lens width). */
 export function modelSizes(frame: any): number[] {
   const list = (frame?.web?.sizes ?? []).map(num).filter(Boolean) as number[];
@@ -135,7 +143,8 @@ export function frameDocAttrs(frame: any, variantLabel?: string | null): FrameAt
     category: frame.category ?? guessCategory(frame),
     readingType: v?.readingType ?? frame.readingType,
     rim: frame.type,
-    shape: frame.web?.shape,
+    // Several shapes: the sale has to say which one.
+    shape: (() => { const s = modelShapes(frame); return s.length === 1 ? s[0] : undefined; })(),
     material: frame.web?.material,
     gender: frame.web?.gender,
     color: variantColor ?? (colors.length === 1 ? colors[0] : undefined),
@@ -161,8 +170,11 @@ export function learnFromSale(frame: any, attrs: FrameAttrs): Record<string, unk
   const set: Record<string, unknown> = {};
   // A guessed category is not recorded, so a tagged one may still be saved.
   const has: FrameAttrs = { ...frameDocAttrs(frame), category: category(frame.category), readingType: readingType(frame.readingType) };
+  const mixedShapes = modelShapes(frame).length > 1;
   for (const k of MODEL_KEYS) {
     if (attrs[k] === undefined || has[k] !== undefined) continue;
+    // A model in several shapes keeps its list; one sale's shape is not the model's.
+    if (k === 'shape' && mixedShapes) continue;
     if (k === 'category' || k === 'readingType') set[k] = attrs[k];
     else if (k === 'rim') set.type = attrs.rim;
     else set[`web.${k}`] = attrs[k];
@@ -192,7 +204,8 @@ export function missingModelAttrs(frame: any): QueueKey[] {
   const out: QueueKey[] = [];
   if (!frame?.category && !a.category) out.push('category');
   if (a.category === 'reading' && !readingType(frame?.readingType) && !variants.some((v) => readingType(v.readingType))) out.push('readingType');
-  for (const k of ['shape', 'material'] as const) if (a[k] === undefined) out.push(k);
+  if (!modelShapes(frame).length) out.push('shape');
+  if (a.material === undefined) out.push('material');
   if (a.category !== 'reading' && !modelSizes(frame).length && !variants.some((v) => num(v.size))) out.push('size');
   if (!modelColors(frame).length && !variants.some((v) => v.colors?.length)) out.push('color');
   return out;
