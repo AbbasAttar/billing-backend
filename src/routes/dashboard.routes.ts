@@ -19,6 +19,8 @@ import {
   getRecallTasks,
   markRecallSent,
   snoozeRecall,
+  logRecallOutcome,
+  setRecallPreference,
 } from '../controllers/dashboard.controller';
 
 const router = Router();
@@ -28,6 +30,8 @@ router.get('/daily-tasks',      getDailyTasks);
 router.get('/recalls',          getRecallTasks);
 router.post('/recalls/mark-sent', markRecallSent);
 router.post('/recalls/snooze',  snoozeRecall);
+router.post('/recalls/outcome', logRecallOutcome);
+router.post('/recalls/preference', setRecallPreference);
 router.get('/opportunity-score', getOpportunityScore);
 router.get('/profit-leakage',   getProfitLeakage);
 router.get('/command-center',   getCommandCenter);

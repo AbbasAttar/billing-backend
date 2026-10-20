@@ -6,45 +6,209 @@ import { OpticalLens } from '../models/OpticalLens.model';
 import { Fragrance } from '../models/Fragrance.model';
 import { Prescription } from '../models/Prescription.model';
 import { MarketingEvent } from '../models/MarketingEvent.model';
+import { gunzipSync, gzipSync } from 'node:zlib';
 import { getDb } from '../lib/firestoreDb';
 import { recordReads } from '../lib/readMeter';
+import { isCatchAllFragrance, isWholesaleMixFragrance } from './catchAllProducts';
 
 // Ensure models are registered
 const _m = [Invoice, Customer, InvoiceItem, Frame, OpticalLens, Fragrance, Prescription, MarketingEvent];
 
 export const STORE_MAPS_LINK = 'https://maps.app.goo.gl/dpwXnG3nhBd6gWv29?g_st=ac';
 
-export type RecallType = '4_month_tuneup' | '12_month_eye_test' | 'fragrance_refill';
+// ── Recall rules ─────────────────────────────────────────────────────────────
+//
+// Every recall counts from the customer's latest purchase in its category, so buying again
+// cancels a pending recall and starts the next one from the new bill. Service recalls are
+// phoned (trust, two-way: "the frame is loose"); sales pitches go on WhatsApp with photos and
+// are phoned only when the customer replies.
 
-export interface RecallCustomerItem {
+export type RecallType =
+  | 'frame_fit_check'
+  | 'frame_maintenance'
+  | 'eye_test'
+  | 'frame_upgrade'
+  | 'fragrance_refill'
+  | 'fragrance_new';
+
+export type RecallKind = 'service' | 'refill' | 'sales';
+export type RecallChannel = 'call' | 'whatsapp';
+/** 'auto' follows each recall's own channel (call for service, WhatsApp for sales pitches). */
+export type ContactPreference = 'auto' | 'call' | 'whatsapp' | 'no_contact';
+export type RecallOutcome =
+  | 'visit_promised'
+  | 'not_needed'
+  | 'no_answer'
+  | 'wrong_number'
+  | 'do_not_contact'
+  | 'whatsapp_sent';
+
+export const RECALL_TYPES: RecallType[] = [
+  'frame_fit_check',
+  'frame_maintenance',
+  'eye_test',
+  'frame_upgrade',
+  'fragrance_refill',
+  'fragrance_new',
+];
+export const RECALL_OUTCOMES: RecallOutcome[] = [
+  'visit_promised',
+  'not_needed',
+  'no_answer',
+  'wrong_number',
+  'do_not_contact',
+  'whatsapp_sent',
+];
+export const CONTACT_PREFERENCES: ContactPreference[] = ['auto', 'call', 'whatsapp', 'no_contact'];
+
+interface RecallRule {
+  label: string;
+  kind: RecallKind;
+  channel: RecallChannel;
+}
+
+export const RECALL_RULES: Record<RecallType, RecallRule> = {
+  frame_fit_check: { label: 'Frame fit check', kind: 'service', channel: 'call' },
+  frame_maintenance: { label: '6-month frame service', kind: 'service', channel: 'call' },
+  eye_test: { label: 'Yearly eye test', kind: 'service', channel: 'call' },
+  frame_upgrade: { label: 'New frame (upgrade)', kind: 'sales', channel: 'whatsapp' },
+  fragrance_refill: { label: 'Fragrance refill', kind: 'refill', channel: 'call' },
+  fragrance_new: { label: 'New fragrance', kind: 'sales', channel: 'whatsapp' },
+};
+
+const KIND_PRIORITY: Record<RecallKind, number> = { service: 3, refill: 2, sales: 1 };
+
+/** Days after the anchor purchase in which each recall is open. */
+const WINDOWS = {
+  frame_fit_check: [7, 20],
+  frame_maintenance: [165, 220],
+  eye_test: [330, 420],
+  frame_upgrade: [540, 760],
+} as const;
+
+/** Bills older than this are never loaded (the frame-upgrade window ends at 760 days). */
+const LOOKBACK_DAYS = 765;
+/** At most one contact per customer in this many days, across all recall types. */
+const CONTACT_GAP_DAYS = 30;
+/** Calls staff are asked to make per day; the rest wait for the next days. */
+export const DAILY_CALL_TARGET = 20;
+/** After this many unanswered calls the recall moves to WhatsApp. */
+const MAX_NO_ANSWER = 2;
+/** Sales pitches skip customers who bought anything this recently. */
+const SALES_QUIET_DAYS = 30;
+
+/** Usual days for a fragrance to run out, by type (one unit); tuned once repeat data builds up. */
+const REFILL_DAYS_BY_TYPE: Record<string, number> = {
+  attar: 45,
+  perfume: 75,
+  bakhoor: 40,
+  'body spray': 45,
+  essence: 45,
+};
+const REFILL_DEFAULT_DAYS = 60;
+/** Refill window: from a few days before the expected day until this long after it. */
+const REFILL_EARLY_DAYS = 5;
+const REFILL_LATE_DAYS = 45;
+const FRAGRANCE_NEW_MAX_DAYS = 400;
+
+// ── Response types ───────────────────────────────────────────────────────────
+
+export type RecallItemKind = 'frame' | 'lens' | 'fragrance' | 'other';
+
+/** One line of a past bill, as shown in the recall row's purchase history. */
+export interface RecallHistoryLine {
+  kind: RecallItemKind;
+  name: string;
+  /** Grade / size for fragrances, lens type for lenses, colour / shape for frames. */
+  detail?: string;
+  quantity: number;
+  price: number;
+  fragranceId?: string;
+}
+
+export interface RecallHistoryInvoice {
+  invoiceId: string;
+  invoiceNumber?: string;
+  billDate: string;
+  total: number;
+  items: RecallHistoryLine[];
+}
+
+/** A fragrance to pitch: one they bought before (refill) or a new arrival they have not tried. */
+export interface RecallPitchProduct {
+  fragranceId: string;
+  name: string;
+  detail?: string;
+  /** Refill: times bought in the window. */
+  timesBought?: number;
+  /** Refill: last price paid; new: current retail price. */
+  price?: number;
+  lastBoughtAt?: string;
+}
+
+export interface RecallPitchMessage {
+  messageText: string;
+  waLink: string;
+}
+
+/** One customer to contact today, for their most important due recall. */
+export interface RecallTask {
   customerId: string;
   name: string;
   phone: string;
-  lastBillDate: string;
-  daysElapsed: number;
-  lastItemSummary: string;
-  waLink: string;
-  messageText: string;
   recallType: RecallType;
-  isContacted: boolean;
+  kind: RecallKind;
+  /** How to reach them today: the rule's channel, unless the customer prefers otherwise or missed calls. */
+  channel: RecallChannel;
+  label: string;
+  /** Why they are due, in plain words ("Frame bought 12 days ago"). */
+  reason: string;
+  daysElapsed: number;
+  lastBillDate: string;
+  lastItemSummary: string;
+  /** Other recalls due at the same time; handled in the same contact. */
+  otherReasons: { recallType: RecallType; label: string }[];
+  /** What to say on the call. */
+  callScript: string;
+  /** Full WhatsApp message for this recall. */
+  messageText: string;
+  waLink: string;
+  /** Short WhatsApp after a call ("as discussed" + store location). */
+  followUp: RecallPitchMessage;
+  contactPreference: ContactPreference;
+  noAnswerCount: number;
+  lastOutcome?: RecallOutcome | null;
   lastContactedAt?: string | null;
   lastContactType?: string | null;
+  /** Most recent bills (newest first) within the window, with their lines. */
+  history: RecallHistoryInvoice[];
+  /** Fragrance recalls: what to pitch, with a ready WhatsApp message for each option. */
+  refillPicks?: RecallPitchProduct[];
+  newPicks?: RecallPitchProduct[];
+  refillPitch?: RecallPitchMessage | null;
+  newPitch?: RecallPitchMessage | null;
 }
 
 export interface RecallTasksResponse {
   generatedAt: string;
   storeMapsLink: string;
-  tuneupRecalls: RecallCustomerItem[];
-  annualEyeTestRecalls: RecallCustomerItem[];
-  fragranceRecalls: RecallCustomerItem[];
+  dailyCallTarget: number;
+  /** Customers to phone, most important first. */
+  calls: RecallTask[];
+  /** Customers to message on WhatsApp. */
+  messages: RecallTask[];
+  /** Contacted in the last 30 days (with the outcome). */
+  done: RecallTask[];
   counts: {
-    tuneupCount: number;
-    annualEyeTestCount: number;
-    fragranceCount: number;
-    totalDue: number;
-    contactedThisMonthCount: number;
+    calls: number;
+    messages: number;
+    done: number;
+    /** Open tasks per recall type (calls + messages). */
+    byType: Record<RecallType, number>;
   };
 }
+
+// ── Small helpers ────────────────────────────────────────────────────────────
 
 const cleanPhone = (raw: string): string => (raw || '').replace(/\D/g, '');
 
@@ -60,21 +224,254 @@ const buildWaLink = (phone: string, message: string): string => {
   return `https://wa.me/${intlPhone}?text=${encodeURIComponent(message)}`;
 };
 
+const DAY_MS = 86_400_000;
+
 const diffInDays = (d1: Date, d2: Date) => {
-  return Math.floor((d1.getTime() - d2.getTime()) / (1000 * 60 * 60 * 24));
+  return Math.floor((d1.getTime() - d2.getTime()) / DAY_MS);
+};
+
+const toDate = (v: any): Date | null => {
+  if (!v) return null;
+  const d = v instanceof Date ? v : typeof v?.toDate === 'function' ? v.toDate() : new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+
+const idOf = (v: any): string | null => {
+  if (!v) return null;
+  if (typeof v === 'string') return v;
+  const id = v._id || v.id;
+  return id ? String(id) : null;
+};
+
+const fragranceName = (f: any): string =>
+  f?.name ? (f.companyName ? `${f.name} (${f.companyName})` : f.name) : 'Perfume / Attar';
+
+const median = (values: number[]): number => {
+  const s = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+};
+
+// ── Purchase history & pitch helpers ─────────────────────────────────────────
+
+const HISTORY_MAX_INVOICES = 5;
+const HISTORY_MAX_LINES = 8;
+const PITCH_MAX = 3;
+/** Fragrances added within this many days count as "new arrivals" for the pitch. */
+const NEW_ARRIVAL_DAYS = 120;
+
+const isFrameLine = (item: any) => !!(item.frame || item.type === 'frame');
+const isLensLine = (item: any) =>
+  !!(
+    item.opticalLens ||
+    item.lensBrand ||
+    item.lensName ||
+    item.lensType ||
+    item.type === 'lens' ||
+    item.type === 'opticalLens' ||
+    item.prescription ||
+    (item.spherical !== null && item.spherical !== undefined) ||
+    item.rightEyeNumber
+  );
+const isFragranceLine = (item: any) => {
+  if (!(item.fragrance || item.type === 'fragrance')) return false;
+  // Mixed wholesale orders are not a retail customer's bottle.
+  return !(typeof item.fragrance === 'object' && isWholesaleMixFragrance(item.fragrance));
+};
+
+/** One bill line in plain words; null for lines that carry nothing to show. */
+const historyLine = (item: any): RecallHistoryLine | null => {
+  if (!item || typeof item !== 'object') return null;
+  const quantity = Number(item.quantity) || 1;
+  const price = Number(item.price) || 0;
+
+  if (item.fragrance || item.type === 'fragrance') {
+    const f = typeof item.fragrance === 'object' ? item.fragrance : null;
+    return {
+      kind: 'fragrance',
+      name: fragranceName(f),
+      detail: item.fragranceGrade || undefined,
+      quantity,
+      price,
+      fragranceId: idOf(item.fragrance) ?? undefined,
+    };
+  }
+  if (isFrameLine(item)) {
+    const f = typeof item.frame === 'object' ? item.frame : null;
+    const attrs = item.frameAttrs || {};
+    return {
+      kind: 'frame',
+      name: f?.name ? [f.companyName, f.name].filter(Boolean).join(' ') : item.frameVariantLabel || 'Frame',
+      detail: [item.frameVariantLabel && f?.name ? item.frameVariantLabel : null, attrs.color, attrs.shape]
+        .filter(Boolean)
+        .join(' · ') || undefined,
+      quantity,
+      price,
+    };
+  }
+  if (item.opticalLens || item.lensBrand || item.lensName || item.lensType || item.type === 'lens' || item.type === 'opticalLens') {
+    return {
+      kind: 'lens',
+      name: [item.lensBrand, item.lensName].filter(Boolean).join(' ') || 'Lenses',
+      detail: item.lensType || item.lensCategory || undefined,
+      quantity,
+      price,
+    };
+  }
+  if (item.itemName) return { kind: 'other', name: item.itemName, quantity, price };
+  return null;
+};
+
+const inStock = (f: any): boolean =>
+  (Number(f.stock) || 0) > 0 || (f.variants || []).some((v: any) => (Number(v.stock) || 0) > 0);
+
+const retailPrice = (f: any): number | undefined => {
+  const prices = (f.variants || []).map((v: any) => Number(v.sellPrice)).filter((p: number) => p > 0);
+  if (prices.length > 0) return Math.min(...prices);
+  return Number(f.sellPrice) || undefined;
+};
+
+/**
+ * New arrivals to suggest: retail fragrances in stock that the customer has not bought, preferring
+ * their usual type (attar / perfume…) and gender, newest first.
+ */
+const pickNewArrivals = (
+  catalog: any[],
+  bought: { fragranceId: string; type?: string; gender?: string }[],
+  referenceDate: Date,
+): RecallPitchProduct[] => {
+  const boughtIds = new Set(bought.map((b) => b.fragranceId));
+  const types = new Set(bought.map((b) => b.type).filter(Boolean));
+  const genders = new Set(bought.map((b) => b.gender).filter(Boolean));
+  const cutoff = referenceDate.getTime() - NEW_ARRIVAL_DAYS * DAY_MS;
+
+  const score = (f: any) =>
+    (types.has(f.type) ? 2 : 0) + (!f.gender || f.gender === 'unisex' || genders.size === 0 || genders.has(f.gender) ? 1 : 0);
+  const added = (f: any) => toDate(f.createdAt)?.getTime() ?? 0;
+
+  const candidates = catalog.filter(
+    (f) =>
+      f.type !== 'packaging' &&
+      f.channels?.retail !== false &&
+      !isCatchAllFragrance(f) &&
+      !boughtIds.has(idOf(f) as string) &&
+      inStock(f),
+  );
+  const recent = candidates.filter((f) => added(f) >= cutoff);
+  const pool = recent.length >= PITCH_MAX ? recent : candidates;
+
+  return pool
+    .sort((a, b) => score(b) - score(a) || added(b) - added(a))
+    .slice(0, PITCH_MAX)
+    .map((f) => ({
+      fragranceId: idOf(f) as string,
+      name: fragranceName(f),
+      detail: f.scent?.sellingLine || undefined,
+      price: retailPrice(f),
+    }));
+};
+
+const pitchLabel = (p: RecallPitchProduct) => (p.detail && p.timesBought ? `${p.name} – ${p.detail}` : p.name);
+
+// ── Messages ────────────────────────────────────────────────────────────────
+
+const SIGN_OFF = `Attarwala Optical House, Dahod
+📍 ${STORE_MAPS_LINK}`;
+
+const refillMessage = (name: string, picks: RecallPitchProduct[]) => `Assalamu Alaikum / Namaste ${name}! 🌸
+
+Hope you are enjoying ${picks.map(pitchLabel).join(', ')} from Attarwala. Your bottle may be running low — we have it in stock and can keep it ready for you.
+
+Reply "REFILL" and we'll pack it, or drop by and try a complimentary tester of our new arrivals.
+
+${SIGN_OFF}`;
+
+const newArrivalMessage = (name: string, last: RecallPitchProduct | undefined, picks: RecallPitchProduct[]) => `Assalamu Alaikum / Namaste ${name}! ✨
+
+New fragrances just arrived at Attarwala.${last ? ` Since you enjoyed ${last.name}, we think you'll love:` : ' Handpicked for you:'}
+${picks.map((p) => `• ${p.name}${p.price ? ` – from ₹${p.price}` : ''}`).join('\n')}
+
+Visit us to try them, or reply and we'll suggest one for you.
+
+${SIGN_OFF}`;
+
+const followUpMessage = (name: string) => `Hi ${name}, as discussed on the call — here is our store location. See you soon!
+
+${SIGN_OFF}`;
+
+interface MessageContext {
+  name: string;
+  days: number;
+  item: string;
+  refillPicks: RecallPitchProduct[];
+  newPicks: RecallPitchProduct[];
+}
+
+/** Call script (what staff say) and WhatsApp message for each recall type. */
+const MESSAGES: Record<RecallType, (c: MessageContext) => { script: string; message: string }> = {
+  frame_fit_check: (c) => ({
+    script: `Namaste ${c.name}ji, Attarwala Optical se bol rahe hain. ${c.days} din pehle aapne ${c.item} liya tha — chashma theek fit ho raha hai? Naak ya kaan par dabav to nahi? Kabhi bhi aa jaiye, free adjustment kar denge.`,
+    message: `Namaste ${c.name}! Thank you for choosing Attarwala Optical House. 👓
+
+How are your new spectacles fitting? If they press on the nose or ears or slip down, visit us any time for a free adjustment.
+
+${SIGN_OFF}`,
+  }),
+  frame_maintenance: (c) => ({
+    script: `Namaste ${c.name}ji, Attarwala Optical se. Aapke chashme ko 6 mahine ho gaye — screw tight, nose-pad aur ultrasonic cleaning free mein kar dete hain. Is hafte kab aa sakte hain?`,
+    message: `Namaste ${c.name}! It has been about 6 months since you bought your spectacles from Attarwala Optical House. 👓
+
+Visit us for a complimentary screw tightening, nose-pad check and ultrasonic cleaning — it takes just a few minutes.
+
+${SIGN_OFF}`,
+  }),
+  eye_test: (c) => ({
+    script: `Namaste ${c.name}ji, Attarwala Optical se. Aapka last eye checkup lagbhag ek saal pehle hua tha — number badal sakta hai. Free eye test ke liye is hafte aa jaiye, aapka purana record hamare paas hai.`,
+    message: `Namaste ${c.name}! Your yearly eye check-up is due at Attarwala Optical House. 👁️
+
+Vision can change over a year. Visit us for a free eye test — your previous prescription is saved with us.
+
+${SIGN_OFF}`,
+  }),
+  frame_upgrade: (c) => ({
+    script: `Namaste ${c.name}ji, Attarwala Optical se. Aapka chashma ab lagbhag ${Math.round(c.days / 30)} mahine purana hai — frame theek hai? Naye designs aaye hain, WhatsApp par photos bheje hain.`,
+    message: `Namaste ${c.name}! It has been a while since you got your spectacles from Attarwala Optical House. 👓
+
+Is your frame still in good shape? If you are thinking of a new look, our latest designs have arrived — reply and we'll send photos, or drop by to try them on.
+
+${SIGN_OFF}`,
+  }),
+  fragrance_refill: (c) => ({
+    script: `Assalamu Alaikum / Namaste ${c.name}ji, Attarwala se. Aapne ${c.refillPicks[0]?.name ?? c.item} liya tha — khatam hone wala hoga? Pack karke ready rakh dein? Naye attar bhi aaye hain, aakar try kar lijiye.`,
+    message: c.refillPicks.length > 0 ? refillMessage(c.name, c.refillPicks) : refillMessage(c.name, [{ fragranceId: '', name: c.item }]),
+  }),
+  fragrance_new: (c) => ({
+    script: `Assalamu Alaikum / Namaste ${c.name}ji, Attarwala se. Naye attar aur perfume aaye hain${c.newPicks[0] ? ` — jaise ${c.newPicks[0].name}` : ''}. WhatsApp par details bheji hain, kabhi aakar try kar lijiye.`,
+    message:
+      c.newPicks.length > 0
+        ? newArrivalMessage(c.name, c.refillPicks[0], c.newPicks)
+        : `Assalamu Alaikum / Namaste ${c.name}! ✨
+
+Hope you are enjoying your fragrance from Attarwala. Looking for your next favourite scent? Visit us to explore our attars and perfumes, or reply for a recommendation.
+
+${SIGN_OFF}`,
+  }),
 };
 
 // ── Snapshot ─────────────────────────────────────────────────────────────────
 //
-// Recalls need every invoice of the last 455 days plus its items and customer (about 2,700 reads),
-// and an in-memory cache is lost on every Cloud Function cold start. The computed result is
-// therefore stored in Firestore (snapshots/recalls) and reused for the rest of the day: one read
-// per request instead of a full recompute. "Mark sent" and "snooze" patch the stored copy in place.
+// Recalls need every invoice of the lookback window plus its items and customer, and an
+// in-memory cache is lost on every Cloud Function cold start. The computed result is therefore
+// stored in Firestore (snapshots/recalls) and reused for the rest of the day: one read per
+// request instead of a full recompute. Outcomes, preferences and snoozes patch the stored copy.
 
 const SNAPSHOT_COLLECTION = 'snapshots';
 const SNAPSHOT_DOC = 'recalls';
 const SNAPSHOT_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 const SNAPSHOT_MAX_BYTES = 900_000;
+/** Bump when the response shape changes, so an older stored snapshot is recomputed. */
+const SNAPSHOT_VERSION = 3;
+// Stored gzipped (base64): the plain JSON is several hundred KB, close to the document size limit.
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 const istDay = (ms: number) => new Date(ms + IST_OFFSET_MS).toISOString().slice(0, 10);
@@ -91,27 +488,27 @@ async function loadSnapshot(): Promise<{ data: RecallTasksResponse; computedAt: 
   const snap = await getDb().collection(SNAPSHOT_COLLECTION).doc(SNAPSHOT_DOC).get();
   recordReads(SNAPSHOT_COLLECTION, 1);
   if (!snap.exists) return null;
-  const doc = snap.data() as { payload?: string; computedAt?: { toMillis?: () => number } | Date } | undefined;
-  if (!doc?.payload) return null;
+  const doc = snap.data() as { payload?: string; gz?: string; version?: number; computedAt?: { toMillis?: () => number } | Date } | undefined;
+  if (!doc?.gz || doc.version !== SNAPSHOT_VERSION) return null;
   const computedAt =
     doc.computedAt instanceof Date ? doc.computedAt.getTime() : (doc.computedAt as any)?.toMillis?.() ?? 0;
   try {
-    return { data: JSON.parse(doc.payload) as RecallTasksResponse, computedAt };
+    return { data: JSON.parse(gunzipSync(Buffer.from(doc.gz, 'base64')).toString('utf8')) as RecallTasksResponse, computedAt };
   } catch {
     return null;
   }
 }
 
 async function saveSnapshot(data: RecallTasksResponse, computedAt = Date.now()): Promise<void> {
-  const payload = JSON.stringify(data);
-  if (Buffer.byteLength(payload) > SNAPSHOT_MAX_BYTES) {
+  const gz = gzipSync(JSON.stringify(data)).toString('base64');
+  if (gz.length > SNAPSHOT_MAX_BYTES) {
     console.warn('[recalls] snapshot too large to store; serving computed result only');
     return;
   }
   await getDb()
     .collection(SNAPSHOT_COLLECTION)
     .doc(SNAPSHOT_DOC)
-    .set({ payload, computedAt: new Date(computedAt) });
+    .set({ gz, version: SNAPSHOT_VERSION, computedAt: new Date(computedAt) });
 }
 
 export const getCustomerRecalls = async (referenceDate: Date = new Date(), forceRefresh = false): Promise<RecallTasksResponse> => {
@@ -138,315 +535,494 @@ export const getCustomerRecalls = async (referenceDate: Date = new Date(), force
   return response;
 };
 
-const countsFor = (
-  tuneup: RecallCustomerItem[],
-  annual: RecallCustomerItem[],
-  fragrance: RecallCustomerItem[],
-  contactedThisMonthCount: number,
-): RecallTasksResponse['counts'] => {
-  const open = (list: RecallCustomerItem[]) => list.filter((r) => !r.isContacted).length;
-  return {
-    tuneupCount: open(tuneup),
-    annualEyeTestCount: open(annual),
-    fragranceCount: open(fragrance),
-    totalDue: open(tuneup) + open(annual) + open(fragrance),
-    contactedThisMonthCount,
-  };
+const countsFor = (data: Pick<RecallTasksResponse, 'calls' | 'messages' | 'done'>): RecallTasksResponse['counts'] => {
+  const byType = Object.fromEntries(RECALL_TYPES.map((t) => [t, 0])) as Record<RecallType, number>;
+  for (const t of [...data.calls, ...data.messages]) byType[t.recallType]++;
+  return { calls: data.calls.length, messages: data.messages.length, done: data.done.length, byType };
 };
 
-/** Applies a "mark sent" or "snooze" to the stored snapshot without recomputing it. */
-async function patchSnapshot(customerId: string, change: { contacted?: { type: RecallType; at: Date }; snoozed?: boolean }) {
+/** Applies a contact outcome, preference change or snooze to the stored snapshot without recomputing it. */
+async function patchSnapshot(
+  customerId: string,
+  change:
+    | { kind: 'outcome'; outcome: RecallOutcome; at: Date; recallType: RecallType; noAnswerCount: number }
+    | { kind: 'preference'; preference: ContactPreference }
+    | { kind: 'snooze' },
+) {
   try {
     const stored = await loadSnapshot();
     if (!stored) return;
     const data = stored.data;
-    const lists = [data.tuneupRecalls, data.annualEyeTestRecalls, data.fragranceRecalls];
-    let contactedThisMonthCount = data.counts.contactedThisMonthCount;
+    const mine = (t: RecallTask) => t.customerId === customerId;
+    const task = data.calls.find(mine) ?? data.messages.find(mine);
+    data.calls = data.calls.filter((t) => !mine(t));
+    data.messages = data.messages.filter((t) => !mine(t));
 
-    if (change.snoozed) {
-      data.tuneupRecalls = data.tuneupRecalls.filter((r) => r.customerId !== customerId);
-      data.annualEyeTestRecalls = data.annualEyeTestRecalls.filter((r) => r.customerId !== customerId);
-      data.fragranceRecalls = data.fragranceRecalls.filter((r) => r.customerId !== customerId);
+    if (change.kind === 'outcome' && task) {
+      data.done = [
+        {
+          ...task,
+          lastOutcome: change.outcome,
+          lastContactedAt: change.at.toISOString(),
+          lastContactType: change.recallType,
+          noAnswerCount: change.noAnswerCount,
+        },
+        ...data.done.filter((t) => !mine(t)),
+      ];
     }
-    if (change.contacted) {
-      const { type, at } = change.contacted;
-      const mine = lists.flat().filter((r) => r.customerId === customerId);
-      const wasRecentlyContacted = mine.some(
-        (r) => r.lastContactedAt && Date.now() - new Date(r.lastContactedAt).getTime() <= 30 * 86_400_000,
-      );
-      for (const r of mine) {
-        r.lastContactedAt = at.toISOString();
-        r.lastContactType = type;
-        r.isContacted = r.recallType === type;
-      }
-      if (mine.length > 0 && !wasRecentlyContacted) contactedThisMonthCount++;
+    if (change.kind === 'preference' && task && change.preference !== 'no_contact') {
+      const channel = channelFor(RECALL_RULES[task.recallType].channel, change.preference, task.noAnswerCount);
+      const updated = { ...task, contactPreference: change.preference, channel };
+      (channel === 'call' ? data.calls : data.messages).push(updated);
+      sortTasks(data.calls);
+      sortTasks(data.messages);
     }
 
-    data.counts = countsFor(data.tuneupRecalls, data.annualEyeTestRecalls, data.fragranceRecalls, contactedThisMonthCount);
+    data.counts = countsFor(data);
     await saveSnapshot(data, stored.computedAt);
   } catch (err: any) {
     console.warn('[recalls] could not patch snapshot:', err?.message);
   }
 }
 
-const computeRecalls = async (referenceDate: Date): Promise<RecallTasksResponse> => {
-  const refTime = referenceDate.getTime();
+// ── Computing the recall list ────────────────────────────────────────────────
 
-  // Maximum recall lookback is 450 days (annual eye test window: 330 to 450 days).
-  // Strict date bound: NEVER load historical invoices older than 455 days.
-  const minDate = new Date(refTime - 455 * 86_400_000);
+const channelFor = (ruleChannel: RecallChannel, preference: ContactPreference, noAnswerCount: number): RecallChannel => {
+  if (preference === 'whatsapp') return 'whatsapp';
+  if (noAnswerCount >= MAX_NO_ANSWER) return 'whatsapp';
+  if (preference === 'call') return 'call';
+  return ruleChannel;
+};
 
-  const invoices: any[] = await Invoice.find({ billDate: { $gte: minDate } })
-    .select('customer items billDate createdAt')
-    .populate('customer', 'name mobileNumber phone lastContactedAt lastContactType snoozedUntil')
-    .populate({
-      path: 'items',
-      select: 'frame opticalLens fragrance prescription lensBrand lensName frameVariantLabel type price spherical rightEyeNumber',
-    })
-    .sort({ billDate: -1 })
-    .lean();
+const taskPriority = (t: RecallTask) => KIND_PRIORITY[t.kind] * 10_000 + Math.min(t.daysElapsed, 9_999);
 
-  type CustAggregate = {
-    customerId: string;
-    name: string;
-    phone: string;
-    lastContactedAt?: Date | null;
-    lastContactType?: string | null;
-    snoozedUntil?: Date | null;
-    lastAnyBillDate: Date;
-    lastOpticalBillDate: Date | null;
-    lastOpticalItemSummary: string;
-    lastFragranceBillDate: Date | null;
-    lastFragranceItemSummary: string;
-  };
+const sortTasks = (list: RecallTask[]) => list.sort((a, b) => taskPriority(b) - taskPriority(a));
 
+/** Expected days until a fragrance runs out: the customer's own buying gap, else a default by type and quantity. */
+export const expectedRefillDays = (purchaseDates: Date[], lastType?: string, lastQuantity = 1): number => {
+  const days = [...new Set(purchaseDates.map((d) => Math.floor(d.getTime() / DAY_MS)))].sort((a, b) => a - b);
+  if (days.length >= 2) {
+    const gaps = days.slice(1).map((d, i) => d - days[i]);
+    return Math.round(Math.min(180, Math.max(20, median(gaps))));
+  }
+  const base = REFILL_DAYS_BY_TYPE[lastType ?? ''] ?? REFILL_DEFAULT_DAYS;
+  const qty = Math.min(Math.max(1, lastQuantity), 4);
+  return Math.round(base * (1 + 0.5 * (qty - 1)));
+};
+
+type CustAggregate = {
+  customerId: string;
+  name: string;
+  phone: string;
+  lastContactedAt: Date | null;
+  lastContactType: string | null;
+  lastOutcome: RecallOutcome | null;
+  snoozedUntil: Date | null;
+  nextAttemptAt: Date | null;
+  contactPreference: ContactPreference;
+  phoneInvalid: boolean;
+  noAnswerCount: number;
+  recallContacts: Partial<Record<RecallType, Date>>;
+  lastAnyBillDate: Date;
+  lastFrameBill: { date: Date; summary: string } | null;
+  lastLensBill: { date: Date; summary: string } | null;
+  lastFragranceBill: { date: Date; summary: string; type?: string; quantity: number } | null;
+  fragranceBillDates: Date[];
+  history: RecallHistoryInvoice[];
+  /** Every fragrance bought in the window, keyed by fragrance id + grade. */
+  fragrancesBought: Map<string, RecallPitchProduct & { type?: string; gender?: string }>;
+};
+
+const aggregateCustomers = (invoices: any[]): Map<string, CustAggregate> => {
   const customerMap = new Map<string, CustAggregate>();
 
   for (const inv of invoices) {
     const cust = inv.customer;
-    if (!cust?._id) continue;
-    const cid = String(cust._id);
-    const billDate = new Date(inv.billDate || inv.createdAt);
+    if (!cust?._id && !cust?.id) continue;
+    const cid = String(cust._id || cust.id);
+    const billDate = toDate(inv.billDate) ?? toDate(inv.createdAt);
+    if (!billDate) continue;
 
-    let hasOptical = false;
-    let opticalSummaryParts: string[] = [];
-    let hasFragrance = false;
-    let fragranceSummaryParts: string[] = [];
+    const items = (inv.items || []).filter((x: any) => x && typeof x === 'object');
+    const lines: RecallHistoryLine[] = [];
+    const frameParts: string[] = [];
+    const lensParts: string[] = [];
+    const fragranceLines: any[] = [];
 
-    for (const item of (inv.items || [])) {
-      if (item.frame || item.type === 'frame') {
-        hasOptical = true;
-        opticalSummaryParts.push(item.frameVariantLabel || 'Frame');
-      }
-      if (item.opticalLens || item.lensBrand || item.lensName || item.type === 'lens') {
-        hasOptical = true;
-        opticalSummaryParts.push(item.lensBrand || item.lensName || 'Lenses');
-      }
-      if (item.prescription || (item.spherical !== null && item.spherical !== undefined) || item.rightEyeNumber) {
-        hasOptical = true;
-      }
-      if (item.fragrance || item.type === 'fragrance') {
-        hasFragrance = true;
-        fragranceSummaryParts.push(item.fragranceVariantLabel || 'Perfume / Attar');
-      }
+    for (const item of items) {
+      const line = historyLine(item);
+      if (line) lines.push(line);
+      if (isFrameLine(item)) frameParts.push(line?.name || 'Frame');
+      if (isLensLine(item)) lensParts.push(item.lensBrand || item.lensName || 'Lenses');
+      if (isFragranceLine(item)) fragranceLines.push(item);
     }
 
-    const entry = customerMap.get(cid) ?? {
-      customerId: cid,
-      name: cust.name || 'Valued Customer',
-      phone: cust.mobileNumber || cust.phone || '',
-      lastContactedAt: cust.lastContactedAt ? new Date(cust.lastContactedAt) : null,
-      lastContactType: cust.lastContactType || null,
-      snoozedUntil: cust.snoozedUntil ? new Date(cust.snoozedUntil) : null,
-      lastAnyBillDate: billDate,
-      lastOpticalBillDate: null,
-      lastOpticalItemSummary: '',
-      lastFragranceBillDate: null,
-      lastFragranceItemSummary: '',
-    };
-
-    if (billDate > entry.lastAnyBillDate) {
-      entry.lastAnyBillDate = billDate;
+    let entry = customerMap.get(cid);
+    if (!entry) {
+      const recallContacts: Partial<Record<RecallType, Date>> = {};
+      for (const [k, v] of Object.entries(cust.recallContacts || {})) {
+        const d = toDate(v);
+        if (d) recallContacts[k as RecallType] = d;
+      }
+      entry = {
+        customerId: cid,
+        name: cust.name || 'Valued Customer',
+        phone: cust.mobileNumber || cust.phone || '',
+        lastContactedAt: toDate(cust.lastContactedAt),
+        lastContactType: cust.lastContactType || null,
+        lastOutcome: cust.lastContactOutcome || null,
+        snoozedUntil: toDate(cust.snoozedUntil),
+        nextAttemptAt: toDate(cust.nextAttemptAt),
+        contactPreference: CONTACT_PREFERENCES.includes(cust.contactPreference) ? cust.contactPreference : 'auto',
+        phoneInvalid: !!cust.phoneInvalid,
+        noAnswerCount: Number(cust.noAnswerCount) || 0,
+        recallContacts,
+        lastAnyBillDate: billDate,
+        lastFrameBill: null,
+        lastLensBill: null,
+        lastFragranceBill: null,
+        fragranceBillDates: [],
+        history: [],
+        fragrancesBought: new Map(),
+      };
+      customerMap.set(cid, entry);
     }
 
-    if (hasOptical) {
-      if (!entry.lastOpticalBillDate || billDate > entry.lastOpticalBillDate) {
-        entry.lastOpticalBillDate = billDate;
-        entry.lastOpticalItemSummary = opticalSummaryParts.slice(0, 2).join(' + ') || 'Optical Glasses';
+    // Invoices arrive newest first, so the first few seen are the latest bills.
+    if (entry.history.length < HISTORY_MAX_INVOICES && lines.length > 0) {
+      entry.history.push({
+        invoiceId: String(inv._id || inv.id),
+        invoiceNumber: inv.invoiceNumber,
+        billDate: billDate.toISOString(),
+        total: Number(inv.total) || 0,
+        items: lines.slice(0, HISTORY_MAX_LINES),
+      });
+    }
+
+    if (billDate > entry.lastAnyBillDate) entry.lastAnyBillDate = billDate;
+
+    if (frameParts.length > 0 && (!entry.lastFrameBill || billDate > entry.lastFrameBill.date)) {
+      entry.lastFrameBill = { date: billDate, summary: [...frameParts, ...lensParts].slice(0, 2).join(' + ') };
+    }
+    if (lensParts.length > 0 && (!entry.lastLensBill || billDate > entry.lastLensBill.date)) {
+      entry.lastLensBill = { date: billDate, summary: [...frameParts, ...lensParts].slice(0, 2).join(' + ') };
+    }
+
+    if (fragranceLines.length > 0) {
+      entry.fragranceBillDates.push(billDate);
+      if (!entry.lastFragranceBill || billDate > entry.lastFragranceBill.date) {
+        const first = fragranceLines[0];
+        const f = typeof first.fragrance === 'object' ? first.fragrance : null;
+        entry.lastFragranceBill = {
+          date: billDate,
+          summary: fragranceLines
+            .slice(0, 2)
+            .map((it) => {
+              const l = historyLine(it);
+              return l ? [l.name, l.detail].filter(Boolean).join(' ') : 'Perfume / Attar';
+            })
+            .join(', '),
+          type: f?.type,
+          quantity: fragranceLines.reduce((s, it) => s + (Number(it.quantity) || 1), 0),
+        };
+      }
+      for (const item of fragranceLines) {
+        const fid = idOf(item.fragrance);
+        if (!fid) continue;
+        const f = typeof item.fragrance === 'object' ? item.fragrance : null;
+        if (f && isCatchAllFragrance(f)) continue; // "Attar" with no real product: nothing to pitch
+        const grade = item.fragranceGrade || undefined;
+        const key = `${fid}|${grade ?? ''}`;
+        const seen = entry.fragrancesBought.get(key);
+        if (seen) {
+          seen.timesBought = (seen.timesBought ?? 0) + 1;
+        } else {
+          entry.fragrancesBought.set(key, {
+            fragranceId: fid,
+            name: fragranceName(f),
+            detail: grade,
+            timesBought: 1,
+            price: Number(item.price) || undefined,
+            lastBoughtAt: billDate.toISOString(),
+            type: f?.type,
+            gender: f?.gender,
+          });
+        }
       }
     }
-
-    if (hasFragrance) {
-      if (!entry.lastFragranceBillDate || billDate > entry.lastFragranceBillDate) {
-        entry.lastFragranceBillDate = billDate;
-        entry.lastFragranceItemSummary = fragranceSummaryParts.slice(0, 2).join(', ') || 'Perfume / Attar';
-      }
-    }
-
-    customerMap.set(cid, entry);
   }
 
-  const tuneupRecalls: RecallCustomerItem[] = [];
-  const annualEyeTestRecalls: RecallCustomerItem[] = [];
-  const fragranceRecalls: RecallCustomerItem[] = [];
-  let contactedCount = 0;
+  return customerMap;
+};
 
-  for (const entry of customerMap.values()) {
-    if (!entry.phone) continue;
+interface DueRecall {
+  type: RecallType;
+  anchor: Date;
+  days: number;
+  reason: string;
+  item: string;
+}
 
-    // Check if snoozed
-    if (entry.snoozedUntil && entry.snoozedUntil > referenceDate) {
+/** Recalls whose window is open for this customer, ignoring contact history. */
+const dueRecalls = (entry: CustAggregate, referenceDate: Date): DueRecall[] => {
+  const due: DueRecall[] = [];
+  const inWindow = (days: number, [from, to]: readonly [number, number]) => days >= from && days <= to;
+
+  if (entry.lastFrameBill) {
+    const { date, summary } = entry.lastFrameBill;
+    const days = diffInDays(referenceDate, date);
+    const item = summary || 'spectacles';
+    if (inWindow(days, WINDOWS.frame_fit_check)) {
+      due.push({ type: 'frame_fit_check', anchor: date, days, item, reason: `Frame bought ${days} days ago — check fitting` });
+    }
+    if (inWindow(days, WINDOWS.frame_maintenance)) {
+      due.push({ type: 'frame_maintenance', anchor: date, days, item, reason: `Frame is ${Math.round(days / 30)} months old — free service` });
+    }
+    if (inWindow(days, WINDOWS.frame_upgrade) && diffInDays(referenceDate, entry.lastAnyBillDate) > SALES_QUIET_DAYS) {
+      due.push({ type: 'frame_upgrade', anchor: date, days, item, reason: `Frame is ${Math.round(days / 30)} months old — new designs` });
+    }
+  }
+
+  if (entry.lastLensBill) {
+    const { date, summary } = entry.lastLensBill;
+    const days = diffInDays(referenceDate, date);
+    if (inWindow(days, WINDOWS.eye_test)) {
+      due.push({ type: 'eye_test', anchor: date, days, item: summary || 'glasses', reason: `Last eye check ${Math.round(days / 30)} months ago` });
+    }
+  }
+
+  if (entry.lastFragranceBill) {
+    const { date, summary, type, quantity } = entry.lastFragranceBill;
+    const days = diffInDays(referenceDate, date);
+    const expected = expectedRefillDays(entry.fragranceBillDates, type, quantity);
+    const item = summary || 'fragrance';
+    if (days >= expected - REFILL_EARLY_DAYS && days <= expected + REFILL_LATE_DAYS) {
+      due.push({ type: 'fragrance_refill', anchor: date, days, item, reason: `Bought ${days} days ago — usually runs out in ~${expected} days` });
+    } else if (
+      days > expected + REFILL_LATE_DAYS &&
+      days <= FRAGRANCE_NEW_MAX_DAYS &&
+      diffInDays(referenceDate, entry.lastAnyBillDate) > SALES_QUIET_DAYS
+    ) {
+      due.push({ type: 'fragrance_new', anchor: date, days, item, reason: `No fragrance bought for ${days} days` });
+    }
+  }
+
+  return due;
+};
+
+/**
+ * Builds today's recall tasks from bills (newest first, items and customer populated) and the
+ * fragrance catalog. Pure, so it can be tested without Firestore.
+ */
+export const buildRecallTasks = (invoices: any[], catalog: any[], referenceDate: Date): RecallTasksResponse => {
+  const calls: RecallTask[] = [];
+  const messages: RecallTask[] = [];
+  const done: RecallTask[] = [];
+
+  for (const entry of aggregateCustomers(invoices).values()) {
+    if (!entry.phone || entry.phoneInvalid || entry.contactPreference === 'no_contact') continue;
+    if (entry.snoozedUntil && entry.snoozedUntil > referenceDate) continue;
+
+    // A recall already handled for the purchase it counts from is finished until they buy again.
+    const open = dueRecalls(entry, referenceDate).filter((d) => {
+      const contacted = entry.recallContacts[d.type];
+      return !contacted || contacted < d.anchor;
+    });
+
+    const daysSinceContact = entry.lastContactedAt ? diffInDays(referenceDate, entry.lastContactedAt) : Infinity;
+    const recentlyContacted = daysSinceContact <= CONTACT_GAP_DAYS;
+    // Unanswered calls are retried (from the next day) instead of waiting out the contact gap.
+    const retrying = entry.lastOutcome === 'no_answer' && entry.noAnswerCount > 0;
+    const waitingForRetry = !!entry.nextAttemptAt && entry.nextAttemptAt > referenceDate;
+
+    const doneTask = () => {
+      const type = (entry.lastContactType as RecallType) || null;
+      if (!type || !RECALL_RULES[type]) return;
+      const due = dueRecalls(entry, referenceDate).find((d) => d.type === type);
+      done.push(
+        makeTask(entry, due ?? { type, anchor: entry.lastAnyBillDate, days: diffInDays(referenceDate, entry.lastAnyBillDate), reason: RECALL_RULES[type].label, item: '' }, [], catalog, referenceDate),
+      );
+    };
+
+    if (open.length === 0 || waitingForRetry || (recentlyContacted && !retrying)) {
+      if (recentlyContacted) doneTask();
       continue;
     }
 
-    const daysSinceAnyBill = diffInDays(referenceDate, entry.lastAnyBillDate);
-
-    // Rule: Exclude active customers who shopped within the last 30 days
-    if (daysSinceAnyBill <= 30) continue;
-
-    // Check contact cooldown (30 days)
-    const daysSinceContact = entry.lastContactedAt
-      ? diffInDays(referenceDate, entry.lastContactedAt)
-      : 9999;
-    const isRecentlyContacted = daysSinceContact <= 30;
-    if (isRecentlyContacted) contactedCount++;
-
-    // ── 1. 4-Month Frame Spa / Tune-Up (110 to 180 days) ─────────────────────
-    if (entry.lastOpticalBillDate) {
-      const daysSinceLastOptical = diffInDays(referenceDate, entry.lastOpticalBillDate);
-
-      if (daysSinceLastOptical >= 110 && daysSinceLastOptical <= 180) {
-        const msg = `Hi ${entry.name}, it has been 4 months since your last eyewear purchase at Attarwala Optical! 👓✨
-
-Frames naturally loosen and lose alignment over time. Drop by this week for a complimentary ultrasonic lens wash, screw tightening, and frame alignment!
-
-📍 Store Location: ${STORE_MAPS_LINK}
-(Bring a family member along for a free 2-min vision screening while you wait!)`;
-
-        tuneupRecalls.push({
-          customerId: entry.customerId,
-          name: entry.name,
-          phone: entry.phone,
-          lastBillDate: entry.lastOpticalBillDate.toISOString(),
-          daysElapsed: daysSinceLastOptical,
-          lastItemSummary: entry.lastOpticalItemSummary || 'Eyewear Frame/Lenses',
-          messageText: msg,
-          waLink: buildWaLink(entry.phone, msg),
-          recallType: '4_month_tuneup',
-          isContacted: isRecentlyContacted && entry.lastContactType === '4_month_tuneup',
-          lastContactedAt: entry.lastContactedAt ? entry.lastContactedAt.toISOString() : null,
-          lastContactType: entry.lastContactType,
-        });
-      }
-
-      // ── 2. 12-Month Annual Vision Check (330 to 450 days) ───────────────────
-      if (daysSinceLastOptical >= 330 && daysSinceLastOptical <= 450) {
-        const msg = `Hi ${entry.name}, your annual eye prescription checkup is now due at Attarwala Optical! 👁️
-
-Vision powers shift subtly over a year. Stop by this week for your free 5-minute digital vision re-test! Your previous prescription is securely saved in our records.
-
-📍 Store Location: ${STORE_MAPS_LINK}`;
-
-        annualEyeTestRecalls.push({
-          customerId: entry.customerId,
-          name: entry.name,
-          phone: entry.phone,
-          lastBillDate: entry.lastOpticalBillDate.toISOString(),
-          daysElapsed: daysSinceLastOptical,
-          lastItemSummary: entry.lastOpticalItemSummary || 'Prescription Glasses',
-          messageText: msg,
-          waLink: buildWaLink(entry.phone, msg),
-          recallType: '12_month_eye_test',
-          isContacted: isRecentlyContacted && entry.lastContactType === '12_month_eye_test',
-          lastContactedAt: entry.lastContactedAt ? entry.lastContactedAt.toISOString() : null,
-          lastContactType: entry.lastContactType,
-        });
-      }
-    }
-
-    // ── 3. Fragrance Refill & Seasonal Sample (90 to 160 days / 3–5 months) ───
-    if (entry.lastFragranceBillDate) {
-      const daysSinceFragrance = diffInDays(referenceDate, entry.lastFragranceBillDate);
-
-      if (daysSinceFragrance >= 90 && daysSinceFragrance <= 160) {
-        const msg = `Hi ${entry.name}, it has been about 3–4 months since your last fragrance visit at Attarwala! 🌸
-
-Your favorite bottle might be running low. Drop by this week to top up your bottle or explore our new seasonal luxury attar & perfume arrivals — and receive a complimentary 3ml luxury tester sample on us!
-
-📍 Store Location: ${STORE_MAPS_LINK}
-(P.S. Get a free 2-min digital eye checkup while you test our new perfumes!)`;
-
-        fragranceRecalls.push({
-          customerId: entry.customerId,
-          name: entry.name,
-          phone: entry.phone,
-          lastBillDate: entry.lastFragranceBillDate.toISOString(),
-          daysElapsed: daysSinceFragrance,
-          lastItemSummary: entry.lastFragranceItemSummary || 'Perfume / Attar',
-          messageText: msg,
-          waLink: buildWaLink(entry.phone, msg),
-          recallType: 'fragrance_refill',
-          isContacted: isRecentlyContacted && entry.lastContactType === 'fragrance_refill',
-          lastContactedAt: entry.lastContactedAt ? entry.lastContactedAt.toISOString() : null,
-          lastContactType: entry.lastContactType,
-        });
-      }
-    }
+    open.sort((a, b) => KIND_PRIORITY[RECALL_RULES[b.type].kind] - KIND_PRIORITY[RECALL_RULES[a.type].kind] || b.days - a.days);
+    const [main, ...rest] = open;
+    const task = makeTask(entry, main, rest, catalog, referenceDate);
+    (task.channel === 'call' ? calls : messages).push(task);
   }
 
-  tuneupRecalls.sort((a, b) => b.daysElapsed - a.daysElapsed);
-  annualEyeTestRecalls.sort((a, b) => b.daysElapsed - a.daysElapsed);
-  fragranceRecalls.sort((a, b) => b.daysElapsed - a.daysElapsed);
+  sortTasks(calls);
+  sortTasks(messages);
+  done.sort((a, b) => (b.lastContactedAt ?? '').localeCompare(a.lastContactedAt ?? ''));
 
-  const response: RecallTasksResponse = {
+  const data = { calls, messages, done };
+  return {
     generatedAt: referenceDate.toISOString(),
     storeMapsLink: STORE_MAPS_LINK,
-    tuneupRecalls,
-    annualEyeTestRecalls,
-    fragranceRecalls,
-    counts: {
-      tuneupCount: tuneupRecalls.filter(r => !r.isContacted).length,
-      annualEyeTestCount: annualEyeTestRecalls.filter(r => !r.isContacted).length,
-      fragranceCount: fragranceRecalls.filter(r => !r.isContacted).length,
-      totalDue:
-        tuneupRecalls.filter(r => !r.isContacted).length +
-        annualEyeTestRecalls.filter(r => !r.isContacted).length +
-        fragranceRecalls.filter(r => !r.isContacted).length,
-      contactedThisMonthCount: contactedCount,
-    }
+    dailyCallTarget: DAILY_CALL_TARGET,
+    ...data,
+    counts: countsFor(data),
   };
-
-  return response;
 };
 
-export const markCustomerRecallSent = async (
+const makeTask = (
+  entry: CustAggregate,
+  due: DueRecall,
+  others: DueRecall[],
+  catalog: any[],
+  referenceDate: Date,
+): RecallTask => {
+  const rule = RECALL_RULES[due.type];
+  const isFragrance = due.type === 'fragrance_refill' || due.type === 'fragrance_new';
+  const bought = isFragrance
+    ? [...entry.fragrancesBought.values()].sort(
+        (a, b) => (b.timesBought ?? 0) - (a.timesBought ?? 0) || (b.lastBoughtAt ?? '').localeCompare(a.lastBoughtAt ?? ''),
+      )
+    : [];
+  const refillPicks: RecallPitchProduct[] = bought.slice(0, PITCH_MAX).map(({ type: _t, gender: _g, ...p }) => p);
+  const newPicks = isFragrance ? pickNewArrivals(catalog, bought, referenceDate) : [];
+
+  const { script, message } = MESSAGES[due.type]({ name: entry.name, days: due.days, item: due.item, refillPicks, newPicks });
+  const follow = followUpMessage(entry.name);
+  const refillText = refillPicks.length > 0 ? refillMessage(entry.name, refillPicks) : null;
+  const newText = newPicks.length > 0 ? newArrivalMessage(entry.name, refillPicks[0], newPicks) : null;
+
+  return {
+    customerId: entry.customerId,
+    name: entry.name,
+    phone: entry.phone,
+    recallType: due.type,
+    kind: rule.kind,
+    channel: channelFor(rule.channel, entry.contactPreference, entry.noAnswerCount),
+    label: rule.label,
+    reason: due.reason,
+    daysElapsed: due.days,
+    lastBillDate: due.anchor.toISOString(),
+    lastItemSummary: due.item,
+    otherReasons: others.map((o) => ({ recallType: o.type, label: RECALL_RULES[o.type].label })),
+    callScript: script,
+    messageText: message,
+    waLink: buildWaLink(entry.phone, message),
+    followUp: { messageText: follow, waLink: buildWaLink(entry.phone, follow) },
+    contactPreference: entry.contactPreference,
+    noAnswerCount: entry.noAnswerCount,
+    lastOutcome: entry.lastOutcome,
+    lastContactedAt: entry.lastContactedAt ? entry.lastContactedAt.toISOString() : null,
+    lastContactType: entry.lastContactType,
+    history: entry.history,
+    ...(isFragrance
+      ? {
+          refillPicks,
+          newPicks,
+          refillPitch: refillText ? { messageText: refillText, waLink: buildWaLink(entry.phone, refillText) } : null,
+          newPitch: newText ? { messageText: newText, waLink: buildWaLink(entry.phone, newText) } : null,
+        }
+      : {}),
+  };
+};
+
+const computeRecalls = async (referenceDate: Date): Promise<RecallTasksResponse> => {
+  const minDate = new Date(referenceDate.getTime() - LOOKBACK_DAYS * DAY_MS);
+
+  const [invoices, catalog]: [any[], any[]] = await Promise.all([
+    Invoice.find({ billDate: { $gte: minDate } })
+      .select('customer items billDate createdAt invoiceNumber total')
+      .populate(
+        'customer',
+        'name mobileNumber phone lastContactedAt lastContactType lastContactOutcome snoozedUntil nextAttemptAt contactPreference phoneInvalid noAnswerCount recallContacts',
+      )
+      .populate({
+        path: 'items',
+        select:
+          'frame opticalLens fragrance prescription lensBrand lensName lensType lensCategory frameVariantLabel frameAttrs fragranceGrade itemName type quantity price spherical rightEyeNumber',
+        populate: [
+          { path: 'frame', select: 'name companyName' },
+          { path: 'fragrance', select: 'name companyName type gender' },
+        ],
+      })
+      .sort({ billDate: -1 })
+      .lean(),
+    // Candidates for the "try something new" pitch on fragrance recalls.
+    Fragrance.find({ isArchived: false })
+      .select('name companyName type gender channels sellPrice stock variants scent createdAt')
+      .lean(),
+  ]);
+
+  return buildRecallTasks(invoices, catalog, referenceDate);
+};
+
+// ── Recording contacts ───────────────────────────────────────────────────────
+
+/**
+ * Records how a recall contact went. "No answer" schedules a retry for the next day (and moves the
+ * recall to WhatsApp after two misses); every other outcome closes the recall for the purchase it
+ * counts from and starts the 30-day contact gap.
+ */
+export const logRecallOutcome = async (
   customerId: string,
   recallType: RecallType,
-  notes?: string
+  outcome: RecallOutcome,
+  options: { channel?: RecallChannel; note?: string; staff?: string } = {},
 ) => {
-  const customer = await Customer.findById(customerId);
+  if (!RECALL_TYPES.includes(recallType)) throw new Error('Unknown recall type');
+  if (!RECALL_OUTCOMES.includes(outcome)) throw new Error('Unknown outcome');
+  const customer: any = await Customer.findById(customerId);
   if (!customer) throw new Error('Customer not found');
 
-  customer.lastContactedAt = new Date();
+  const now = new Date();
+  const channel: RecallChannel = options.channel ?? (outcome === 'whatsapp_sent' ? 'whatsapp' : 'call');
+  customer.lastContactedAt = now;
   customer.lastContactType = recallType;
-  if (notes) {
-    customer.notes = customer.notes ? `${customer.notes} | ${notes}` : notes;
+  customer.lastContactOutcome = outcome;
+
+  if (outcome === 'no_answer') {
+    customer.noAnswerCount = (Number(customer.noAnswerCount) || 0) + 1;
+    customer.nextAttemptAt = new Date(now.getTime() + 20 * 60 * 60 * 1000); // tomorrow's list
+  } else {
+    customer.noAnswerCount = 0;
+    customer.nextAttemptAt = null;
+    customer.recallContacts = { ...(customer.recallContacts || {}), [recallType]: now };
   }
+  if (outcome === 'wrong_number') customer.phoneInvalid = true;
+  if (outcome === 'do_not_contact') customer.contactPreference = 'no_contact';
+  if (options.note) customer.notes = customer.notes ? `${customer.notes} | ${options.note}` : options.note;
+
   await customer.save();
   invalidateRecallCache();
-  await patchSnapshot(customerId, { contacted: { type: recallType, at: customer.lastContactedAt as Date } });
+  await patchSnapshot(customerId, { kind: 'outcome', outcome, at: now, recallType, noAnswerCount: customer.noAnswerCount });
 
   await MarketingEvent.create({
-    eventType: 'message_sent',
+    eventType: channel === 'call' ? 'call_logged' : 'message_sent',
     customerId: customer._id,
     payload: {
-      channel: 'manual_whatsapp',
+      channel: channel === 'call' ? 'phone_call' : 'manual_whatsapp',
       recallType,
-      contactedAt: new Date(),
-    }
+      outcome,
+      ...(options.staff ? { staff: options.staff } : {}),
+      contactedAt: now,
+    },
   });
 
-  return { success: true, customerId, contactedAt: customer.lastContactedAt };
+  return { success: true, customerId, outcome, contactedAt: now, noAnswerCount: customer.noAnswerCount };
+};
+
+/** Old "mark sent" action: a WhatsApp message went out. */
+export const markCustomerRecallSent = async (customerId: string, recallType: RecallType, notes?: string) =>
+  logRecallOutcome(customerId, recallType, 'whatsapp_sent', { channel: 'whatsapp', note: notes });
+
+export const setContactPreference = async (customerId: string, preference: ContactPreference) => {
+  if (!CONTACT_PREFERENCES.includes(preference)) throw new Error('Unknown contact preference');
+  const customer: any = await Customer.findById(customerId);
+  if (!customer) throw new Error('Customer not found');
+  customer.contactPreference = preference;
+  await customer.save();
+  invalidateRecallCache();
+  await patchSnapshot(customerId, { kind: 'preference', preference });
+  return { success: true, customerId, contactPreference: preference };
 };
 
 export const snoozeCustomerRecall = async (customerId: string, days = 14) => {
@@ -456,7 +1032,7 @@ export const snoozeCustomerRecall = async (customerId: string, days = 14) => {
   customer.snoozedUntil = new Date(Date.now() + days * 86400000);
   await customer.save();
   invalidateRecallCache();
-  await patchSnapshot(customerId, { snoozed: true });
+  await patchSnapshot(customerId, { kind: 'snooze' });
 
   return { success: true, customerId, snoozedUntil: customer.snoozedUntil };
 };

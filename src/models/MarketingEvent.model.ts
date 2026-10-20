@@ -7,6 +7,7 @@ export const MARKETING_EVENT_TYPES = [
   'message_sent',
   'message_delivered',
   'message_replied',
+  'call_logged',
   'conversion_logged',
   'cache_invalidated',
 ] as const;

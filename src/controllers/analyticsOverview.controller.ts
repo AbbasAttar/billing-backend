@@ -87,7 +87,7 @@ export const getAnalyticsOverview = async (req: Request, res: Response, next: Ne
     let recallsDue: number | null = null;
     try {
       const { getCustomerRecalls } = await import('../services/recallEngine');
-      recallsDue = (await getCustomerRecalls(now)).counts.annualEyeTestCount;
+      recallsDue = (await getCustomerRecalls(now)).counts.byType.eye_test;
     } catch {
       recallsDue = null; // recalls are a nice-to-have; the page still loads without them
     }

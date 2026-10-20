@@ -30,6 +30,8 @@ describe('access policy', () => {
     ['GET', '/reports/lens-reorder'],
     ['GET', '/dashboard/recalls'],
     ['POST', '/dashboard/recalls/mark-sent'],
+    ['POST', '/dashboard/recalls/outcome'],
+    ['POST', '/dashboard/recalls/preference'],
     ['GET', '/dashboard/daily-tasks'],
   ])('staff may %s %s', (m, p) => expect(requiredRole(m, p)).toBe('staff'));
 

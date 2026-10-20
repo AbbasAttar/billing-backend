@@ -72,7 +72,7 @@ export function requiredRole(method: string, path: string): StaffRole {
   const p = path.replace(/\/+$/, '') || '/';
 
   if (m === 'GET' && STAFF_DASHBOARD.test(p)) return 'staff';
-  if ((m === 'POST') && /^\/dashboard\/recalls\/(mark-sent|snooze)$/.test(p)) return 'staff';
+  if ((m === 'POST') && /^\/dashboard\/recalls\/(mark-sent|snooze|outcome|preference)$/.test(p)) return 'staff';
 
   const area = p.split('/')[1] ?? '';
   if (!STAFF_AREAS.includes(area)) return 'admin';

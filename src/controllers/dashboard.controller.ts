@@ -1101,6 +1101,41 @@ export const markRecallSent = async (req: Request, res: Response, next: NextFunc
     }
 };
 
+// ── POST /api/dashboard/recalls/outcome ─────────────────────────────────────
+export const logRecallOutcome = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const { logRecallOutcome: log, RECALL_TYPES, RECALL_OUTCOMES } = await import('../services/recallEngine');
+        const { customerId, recallType, outcome, channel, note } = req.body;
+        if (!customerId || !RECALL_TYPES.includes(recallType) || !RECALL_OUTCOMES.includes(outcome)) {
+            res.status(400).json({ message: 'customerId, a valid recallType and a valid outcome are required' });
+            return;
+        }
+        const result = await log(customerId, recallType, outcome, {
+            channel: channel === 'whatsapp' || channel === 'call' ? channel : undefined,
+            note: typeof note === 'string' ? note.slice(0, 500) : undefined,
+            staff: req.user?.email ?? undefined,
+        });
+        res.json(result);
+    } catch (error) {
+        next(error);
+    }
+};
+
+// ── POST /api/dashboard/recalls/preference ──────────────────────────────────
+export const setRecallPreference = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const { setContactPreference, CONTACT_PREFERENCES } = await import('../services/recallEngine');
+        const { customerId, preference } = req.body;
+        if (!customerId || !CONTACT_PREFERENCES.includes(preference)) {
+            res.status(400).json({ message: 'customerId and a valid preference are required' });
+            return;
+        }
+        res.json(await setContactPreference(customerId, preference));
+    } catch (error) {
+        next(error);
+    }
+};
+
 // ── POST /api/dashboard/recalls/snooze ──────────────────────────────────────
 export const snoozeRecall = async (req: Request, res: Response, next: NextFunction) => {
     try {

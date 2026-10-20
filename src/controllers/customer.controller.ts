@@ -64,7 +64,9 @@ export const createCustomer = async (req: Request, res: Response, next: NextFunc
 
 export const updateCustomer = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const customer = await Customer.findByIdAndUpdate(req.params.id, req.body, {
+    // A corrected number clears a "wrong number" reported from recalls.
+    const update = typeof req.body?.mobileNumber === 'string' ? { ...req.body, phoneInvalid: false } : req.body;
+    const customer = await Customer.findByIdAndUpdate(req.params.id, update, {
       new: true,
       runValidators: true,
     });
