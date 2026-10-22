@@ -76,6 +76,8 @@ export interface IFragrance extends BaseDoc {
   variants: IFragranceVariant[];
   isArchived?: boolean;
   archivedAt?: Date;
+  /** Same-name products marked as really different, so the duplicate check skips the pair. */
+  notDuplicateOf?: string[];
   web?: IWebFields;
   createdAt?: Date;
   updatedAt?: Date;

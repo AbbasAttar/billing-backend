@@ -536,6 +536,78 @@ export const getDailyWholesalerSummary = async (
   }
 };
 
+// Builds (unsaved) the lab-queue line for a direct order — shared with optician fitting jobs.
+export function buildDirectLabItem(orderData: any) {
+  const {
+    customerName,
+    customerPhone,
+    frameName,
+    frameCode,
+    lensType,
+    lensCompany,
+    lensMaterial,
+    lensCoating,
+    lensColor,
+    lensIndex,
+    eye,
+    quantity,
+    price,
+    notes,
+    rightSpherical,
+    rightCylinder,
+    rightAxis,
+    rightAddition,
+    leftSpherical,
+    leftCylinder,
+    leftAxis,
+    leftAddition,
+    isSameNumber,
+  } = orderData;
+
+  const frameLabel = frameName
+    ? frameCode
+      ? `${frameName} (${frameCode})`
+      : frameName
+    : undefined;
+
+  return new InvoiceItem({
+    type: 'opticalLens',
+    userName: customerName?.trim() || 'Walk-in Client',
+    lensType: lensType || 'Single Vision',
+    lensCompany: lensCompany || 'Local',
+    lensMaterial: lensMaterial || 'Fiber',
+    lensCoating: lensCoating || 'Hard Coat',
+    lensColor: lensColor || 'White',
+    lensIndex: lensIndex || '',
+    frameVariantLabel: frameLabel,
+    eye: eye || 'both',
+    quantity: typeof quantity === 'number' && quantity > 0 ? quantity : 1,
+    price: typeof price === 'number' ? price : 0,
+    lensLabel: notes?.trim() || (customerPhone ? `Phone: ${customerPhone}` : undefined),
+    isCustomLens: true,
+    isSameNumber: !!isSameNumber,
+    fulfillmentSource: 'ordered',
+    sentToWholesaler: false,
+    labStatus: 'pending',
+    rightSpherical: rightSpherical !== undefined && rightSpherical !== '' && rightSpherical !== null ? Number(rightSpherical) : null,
+    rightCylinder: rightCylinder !== undefined && rightCylinder !== '' && rightCylinder !== null ? Number(rightCylinder) : null,
+    rightAxis: rightAxis !== undefined && rightAxis !== '' && rightAxis !== null ? Number(rightAxis) : null,
+    rightAddition: rightAddition !== undefined && rightAddition !== '' && rightAddition !== null ? Number(rightAddition) : null,
+    leftSpherical: isSameNumber
+      ? (rightSpherical !== undefined && rightSpherical !== '' && rightSpherical !== null ? Number(rightSpherical) : null)
+      : (leftSpherical !== undefined && leftSpherical !== '' && leftSpherical !== null ? Number(leftSpherical) : null),
+    leftCylinder: isSameNumber
+      ? (rightCylinder !== undefined && rightCylinder !== '' && rightCylinder !== null ? Number(rightCylinder) : null)
+      : (leftCylinder !== undefined && leftCylinder !== '' && leftCylinder !== null ? Number(leftCylinder) : null),
+    leftAxis: isSameNumber
+      ? (rightAxis !== undefined && rightAxis !== '' && rightAxis !== null ? Number(rightAxis) : null)
+      : (leftAxis !== undefined && leftAxis !== '' && leftAxis !== null ? Number(leftAxis) : null),
+    leftAddition: isSameNumber
+      ? (rightAddition !== undefined && rightAddition !== '' && rightAddition !== null ? Number(rightAddition) : null)
+      : (leftAddition !== undefined && leftAddition !== '' && leftAddition !== null ? Number(leftAddition) : null),
+  });
+}
+
 // ── POST /api/wholesaler-queue/direct-order ──────────────────────────────────
 // Allows logging a custom customer lens directly into the wholesale lab queue without an invoice (supports single order or batch)
 export const createDirectLabOrder = async (
@@ -553,75 +625,7 @@ export const createDirectLabOrder = async (
     const createdItems: any[] = [];
 
     for (const orderData of rawOrders) {
-      const {
-        customerName,
-        customerPhone,
-        frameName,
-        frameCode,
-        lensType,
-        lensCompany,
-        lensMaterial,
-        lensCoating,
-        lensColor,
-        lensIndex,
-        eye,
-        quantity,
-        price,
-        notes,
-        rightSpherical,
-        rightCylinder,
-        rightAxis,
-        rightAddition,
-        leftSpherical,
-        leftCylinder,
-        leftAxis,
-        leftAddition,
-        isSameNumber,
-      } = orderData;
-
-      const frameLabel = frameName
-        ? frameCode
-          ? `${frameName} (${frameCode})`
-          : frameName
-        : undefined;
-
-      const itemDoc = new InvoiceItem({
-        type: 'opticalLens',
-        userName: customerName?.trim() || 'Walk-in Client',
-        lensType: lensType || 'Single Vision',
-        lensCompany: lensCompany || 'Local',
-        lensMaterial: lensMaterial || 'Fiber',
-        lensCoating: lensCoating || 'Hard Coat',
-        lensColor: lensColor || 'White',
-        lensIndex: lensIndex || '',
-        frameVariantLabel: frameLabel,
-        eye: eye || 'both',
-        quantity: typeof quantity === 'number' && quantity > 0 ? quantity : 1,
-        price: typeof price === 'number' ? price : 0,
-        lensLabel: notes?.trim() || (customerPhone ? `Phone: ${customerPhone}` : undefined),
-        isCustomLens: true,
-        isSameNumber: !!isSameNumber,
-        fulfillmentSource: 'ordered',
-        sentToWholesaler: false,
-        labStatus: 'pending',
-        rightSpherical: rightSpherical !== undefined && rightSpherical !== '' && rightSpherical !== null ? Number(rightSpherical) : null,
-        rightCylinder: rightCylinder !== undefined && rightCylinder !== '' && rightCylinder !== null ? Number(rightCylinder) : null,
-        rightAxis: rightAxis !== undefined && rightAxis !== '' && rightAxis !== null ? Number(rightAxis) : null,
-        rightAddition: rightAddition !== undefined && rightAddition !== '' && rightAddition !== null ? Number(rightAddition) : null,
-        leftSpherical: isSameNumber
-          ? (rightSpherical !== undefined && rightSpherical !== '' && rightSpherical !== null ? Number(rightSpherical) : null)
-          : (leftSpherical !== undefined && leftSpherical !== '' && leftSpherical !== null ? Number(leftSpherical) : null),
-        leftCylinder: isSameNumber
-          ? (rightCylinder !== undefined && rightCylinder !== '' && rightCylinder !== null ? Number(rightCylinder) : null)
-          : (leftCylinder !== undefined && leftCylinder !== '' && leftCylinder !== null ? Number(leftCylinder) : null),
-        leftAxis: isSameNumber
-          ? (rightAxis !== undefined && rightAxis !== '' && rightAxis !== null ? Number(rightAxis) : null)
-          : (leftAxis !== undefined && leftAxis !== '' && leftAxis !== null ? Number(leftAxis) : null),
-        leftAddition: isSameNumber
-          ? (rightAddition !== undefined && rightAddition !== '' && rightAddition !== null ? Number(rightAddition) : null)
-          : (leftAddition !== undefined && leftAddition !== '' && leftAddition !== null ? Number(leftAddition) : null),
-      });
-
+      const itemDoc = buildDirectLabItem(orderData);
       await itemDoc.save();
       createdItems.push(itemDoc);
     }

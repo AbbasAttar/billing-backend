@@ -31,6 +31,7 @@ const STAFF_AREAS = [
   'lens-pricing',
   'coatings',
   'wholesaler-queue',
+  'fitting', // lens fitting jobs for other opticians
   'purchases',
   'customer-requirements',
   'notifications',
@@ -48,8 +49,8 @@ const ADMIN_ONLY: Array<[RegExp, RegExp]> = [
   [/^DELETE$/, /^\/(?!(wholesaler-queue|prescriptions|purchases|customer-requirements)\/[^/]+$|notifications\/fcm-token$).*/],
   // Archiving products hides them from sale.
   [/^PATCH$/, /\/archive$/],
-  // Merging duplicate products moves stock and archives one.
-  [/^POST$/, /^\/fragrances\/[^/]+\/merge$/],
+  // Merging duplicate products moves stock and archives one; marking a pair as different hides it from the check.
+  [/^POST$/, /^\/fragrances\/[^/]+\/(merge|not-duplicate)$/],
   // Invoice numbering and corrections to money already recorded.
   [/^POST$/, /^\/invoices\/renumber$/],
   [/^PATCH$/, /^\/invoices\/[^/]+\/payment\/[^/]+$/],

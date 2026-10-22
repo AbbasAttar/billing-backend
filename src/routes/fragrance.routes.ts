@@ -9,6 +9,7 @@ import {
   deleteFragrance,
   getFragranceRevenueSummary,
   mergeFragrance,
+  markNotDuplicate,
 } from '../controllers/fragrance.controller';
 import { getFragrancePresets, updateFragrancePresets } from '../controllers/fragrancePresets.controller';
 
@@ -24,6 +25,7 @@ router.post('/', createFragrance);
 router.put('/:id', updateFragrance);
 router.patch('/:id/archive', archiveFragrance);
 router.post('/:id/merge', mergeFragrance);
+router.post('/:id/not-duplicate', markNotDuplicate);
 router.delete('/:id', deleteFragrance);
 
 export default router;

@@ -9,6 +9,10 @@ import { wholesaleEntries } from '../services/wholesaleCatalog';
 import { buildOpticsInsights } from '../services/opticsInsights';
 import { buildFrameMix } from '../services/frameMix';
 import { buildReadingStock } from '../services/readingStock';
+import { buildFittingInsights } from '../services/fittingInsights';
+import { FittingJob } from '../models/FittingJob.model';
+import { FittingParty } from '../models/FittingParty.model';
+import { FittingStatement } from '../models/FittingStatement.model';
 
 const ALLOWED_DAYS = [30, 90, 180, 365];
 
@@ -38,16 +42,30 @@ export const getOpticsInsights = async (req: Request, res: Response, next: NextF
   try {
     const { days, now, from } = windowFor(req);
     const { prevFrom, prevTo } = previousWindow(from, days);
-    const [invoices, previousInvoices, frames, lensStock] = await Promise.all([
+    const [invoices, previousInvoices, frames, lensStock, fittingJobs, prevFittingJobs, openFittingJobs, fittingParties, fittingStatements] = await Promise.all([
       periodInvoices(from, now),
       periodInvoices(prevFrom, prevTo),
       Frame.find({}).select('name houseName companyName type category costPrice sellPrice storePrice mrp stock createdAt isArchived web').lean(),
       LensStock.find({}).select('lensType material coating color sph cyl add quantity').lean(),
+      FittingJob.find({ date: { $gte: from, $lte: now } }).lean(),
+      FittingJob.find({ date: { $gte: prevFrom, $lte: prevTo } }).lean(),
+      FittingJob.find({ billed: false }).lean(),
+      FittingParty.find({}).lean(),
+      FittingStatement.find({}).select('party total status paidAt').lean(),
     ]);
     res.json({
       from: from.toISOString(), to: now.toISOString(),
       ...buildOpticsInsights({ invoices: invoices as any, previousInvoices: previousInvoices as any, frames: frames as any, lensStock: lensStock as any, days, now }),
       frameMix: buildFrameMix({ invoices: invoices as any, frames: frames as any }),
+      fitting: buildFittingInsights({
+        jobs: fittingJobs as any,
+        previousJobs: prevFittingJobs as any,
+        openJobs: openFittingJobs as any,
+        parties: fittingParties as any,
+        statements: fittingStatements as any,
+        from,
+        now,
+      }),
     });
   } catch (e) {
     next(e);

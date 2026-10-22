@@ -208,3 +208,37 @@ export const mergeFragrance = async (req: Request, res: Response, next: NextFunc
     next(error);
   }
 };
+
+/**
+ * POST /fragrances/:id/not-duplicate { otherId, undo? } — mark two same-name products as different
+ * so the duplicate check stops pairing them (owner only). Stored on both: `notDuplicateOf` ids.
+ */
+export const markNotDuplicate = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const id = String(req.params.id);
+    const otherId = typeof req.body?.otherId === 'string' ? req.body.otherId : '';
+    const undo = req.body?.undo === true;
+    if (!otherId || otherId === id) {
+      res.status(400).json({ message: 'Pick two different products' });
+      return;
+    }
+    const [a, b]: any[] = await Promise.all([Fragrance.findById(id).lean(), Fragrance.findById(otherId).lean()]);
+    if (!a || !b) {
+      res.status(404).json({ message: 'Fragrance not found' });
+      return;
+    }
+    const withPair = (doc: any, other: string) => {
+      const ids = new Set<string>((doc.notDuplicateOf ?? []).map(String));
+      if (undo) ids.delete(other);
+      else ids.add(other);
+      return [...ids];
+    };
+    await Promise.all([
+      Fragrance.findByIdAndUpdate(id, { $set: { notDuplicateOf: withPair(a, otherId) } }),
+      Fragrance.findByIdAndUpdate(otherId, { $set: { notDuplicateOf: withPair(b, id) } }),
+    ]);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+};
