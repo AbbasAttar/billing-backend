@@ -21,7 +21,7 @@ export interface OxItem {
   quantity?: number; price?: number; costPrice?: number;
 }
 export interface OxInvoice { billDate: Date | string; items?: (OxItem | string | null)[] }
-export interface OxFrame { _id: unknown; name?: string; companyName?: string; type?: string; costPrice?: number; stock?: number; createdAt?: Date | string; isArchived?: boolean }
+export interface OxFrame { _id: unknown; name?: string; companyName?: string; type?: string; costPrice?: number; stock?: number; inwardDate?: Date | string; createdAt?: Date | string; isArchived?: boolean }
 export interface OxLensStock { lensType?: string; material?: string; coating?: string; color?: string; sph?: number; cyl?: number; add?: number | null; quantity?: number }
 
 export interface Guidance { level: 'high' | 'medium' | 'info'; title: string; detail: string; href?: string }
@@ -238,8 +238,9 @@ export function buildOpticsInsights(input: {
     stockByBrand.set(k, (stockByBrand.get(k) ?? 0) + stock);
     const value = f.costPrice && f.costPrice > 0 ? stock * f.costPrice : null;
     if (value === null) framesNoCost += 1; else stockValue += value;
-    if (f.createdAt) {
-      const t = new Date(f.createdAt).getTime();
+    const arrival = f.inwardDate || f.createdAt;
+    if (arrival) {
+      const t = new Date(arrival).getTime();
       if (!Number.isNaN(t)) {
         oldestEntry = oldestEntry === null ? t : Math.min(oldestEntry, t);
         const ageDays = Math.floor((now.getTime() - t) / DAY);

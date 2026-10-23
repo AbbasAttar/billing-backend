@@ -45,7 +45,7 @@ export const getOpticsInsights = async (req: Request, res: Response, next: NextF
     const [invoices, previousInvoices, frames, lensStock, fittingJobs, prevFittingJobs, openFittingJobs, fittingParties, fittingStatements] = await Promise.all([
       periodInvoices(from, now),
       periodInvoices(prevFrom, prevTo),
-      Frame.find({}).select('name houseName companyName type category costPrice sellPrice storePrice mrp stock createdAt isArchived web').lean(),
+      Frame.find({}).select('name houseName companyName type category costPrice sellPrice storePrice mrp stock inwardDate createdAt isArchived web').lean(),
       LensStock.find({}).select('lensType material coating color sph cyl add quantity').lean(),
       FittingJob.find({ date: { $gte: from, $lte: now } }).lean(),
       FittingJob.find({ date: { $gte: prevFrom, $lte: prevTo } }).lean(),

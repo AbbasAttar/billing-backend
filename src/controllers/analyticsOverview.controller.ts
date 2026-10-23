@@ -49,7 +49,7 @@ export const getAnalyticsOverview = async (req: Request, res: Response, next: Ne
       period.targetMonth ? MonthlyTarget.findOne({ month: period.targetMonth }).lean() : Promise.resolve(null),
       Invoice.find({ hasDue: true }).select({ total: 1, payments: 1, billDate: 1 }).lean(),
       InvoiceItem.find({ isLabItem: true, isOpenLabJob: true }).select('createdAt labStatus sentToWholesaler').lean(),
-      Frame.find({}).select('name stock createdAt isArchived').lean(),
+      Frame.find({}).select('name stock inwardDate createdAt isArchived').lean(),
       LensStock.find({}).select('quantity reorderLevel').lean(),
       Promise.resolve(null),
       Fragrance.find({}).lean(),
@@ -79,7 +79,7 @@ export const getAnalyticsOverview = async (req: Request, res: Response, next: Ne
     const labOverdue = (openLab as any[]).filter((i) => i.createdAt && now.getTime() - new Date(i.createdAt).getTime() > LAB_TURNAROUND_DAYS * DAY).length;
     // Out of stock, not merely "at re-order level": most powers hold 1 pair against a level of 2, which made nearly all look low.
     const lowPowers = (lensStock as any[]).filter((s) => (s.quantity ?? 0) <= 0).length;
-    const agedFrames = (frames as any[]).filter((f) => !f.isArchived && !isCatchAllFrame(f) && (f.stock ?? 0) > 0 && f.createdAt && now.getTime() - new Date(f.createdAt).getTime() > 180 * DAY).length;
+    const agedFrames = (frames as any[]).filter((f) => !f.isArchived && !isCatchAllFrame(f) && (f.stock ?? 0) > 0 && (f.inwardDate || f.createdAt) && now.getTime() - new Date(f.inwardDate || f.createdAt).getTime() > 180 * DAY).length;
     void wholesale;
     const wsLow = wholesaleEntries((fragrances as any[]).filter((f) => !f.isArchived))
       .filter((w) => !w.isOrdered && (w.stock <= 0 || (w.reorderLevel != null && w.stock <= w.reorderLevel))).length;

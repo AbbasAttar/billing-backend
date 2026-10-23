@@ -25,6 +25,8 @@ export interface IFrame extends BaseDoc {
   isArchived?: boolean;
   archivedAt?: Date;
   web?: IWebFields;
+  /** Delivery date the frame came in; older frames fall back to createdAt for stock age. */
+  inwardDate?: Date | string;
   createdAt?: Date;
   updatedAt?: Date;
 }
