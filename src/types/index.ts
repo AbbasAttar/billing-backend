@@ -106,6 +106,14 @@ export interface CreateInvoiceInput {
   }>;
   discount?: number;          // optional discount in rupees (default 0)
   billDate?: string;          // ISO date string (default: today)
+  /** Items the customer brings back from earlier bills, credited against this bill. */
+  returns?: Array<{
+    invoiceItem: string;      // InvoiceItem id on the earlier bill
+    invoice?: string;         // that earlier bill's id (older lines have no link back to it)
+    quantity?: number;        // default 1
+    amount?: number;          // credit in rupees; default and maximum = what was paid for those pieces
+    label?: string;           // shown on the bill, e.g. "Ray-Ban RB2140 frame"
+  }>;
 }
 
 export type ExpenseCategory =

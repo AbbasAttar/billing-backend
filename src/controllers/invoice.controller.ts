@@ -149,6 +149,21 @@ const idOf = (v: any): string => (v && typeof v === 'object' ? String(v._id ?? v
 
 const sumSettled = (payments: IPayment[]) => payments.reduce((sum, p) => sum + p.amount + (p.writeoff ?? 0), 0);
 
+/** Credit for items returned from earlier bills (exchange); comes off the total like a discount. */
+const returnCreditOf = (invoice: any): number => Number(invoice.returnCredit) || 0;
+
+/** An item from an earlier bill being returned on a new bill, validated before the transaction. */
+interface ReturnPlan {
+  itemId: string;
+  invoiceId: string;
+  invoiceNumber?: string;
+  type?: string;
+  label: string;
+  quantity: number;
+  amount: number;
+  frameId?: string;
+}
+
 
 interface CatalogLensFilter {
   brand: string;
@@ -206,7 +221,7 @@ function recalcFromItems(invoice: any, items: Map<string, any>): void {
     totalCogs += (typeof item.costPrice === 'number' ? item.costPrice : 0) * item.quantity;
   }
   invoice.subtotal = subtotal;
-  invoice.total = subtotal - (invoice.discount ?? 0);
+  invoice.total = Math.max(0, subtotal - (invoice.discount ?? 0) - returnCreditOf(invoice));
   invoice.totalCogs = Number(totalCogs.toFixed(2));
   const net = Math.max(0, Number((invoice.total - totalCogs - (invoice.packagingCost ?? 0) - (invoice.paymentProcessingFee ?? 0)).toFixed(2)));
   invoice.netContributionMargin = net;
@@ -274,7 +289,76 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       res.status(403).json({ message: 'Only the owner can make a free (₹0) bill.' });
       return;
     }
-    const total = subtotal - discount;
+    // ── Returns: items from earlier bills of this customer, credited against this bill ──
+    const returnPlans: ReturnPlan[] = [];
+    const returnInputs = Array.isArray(body.returns) ? body.returns : [];
+    if (returnInputs.length > 0) {
+      if (!isValidId(customerIdRaw)) {
+        res.status(400).json({ message: 'Pick the existing customer to return an item from their earlier bill.' });
+        return;
+      }
+      const wanted = new Map<string, number>();
+      for (const r of returnInputs) {
+        const qty = r.quantity ?? 1;
+        if (!isValidId(r.invoiceItem) || !Number.isInteger(qty) || qty < 1) {
+          res.status(400).json({ message: 'Each returned item needs a bill line and a whole quantity of 1 or more.' });
+          return;
+        }
+        if (r.amount !== undefined && (typeof r.amount !== 'number' || r.amount < 0)) {
+          res.status(400).json({ message: 'Return credit must be zero or more.' });
+          return;
+        }
+        wanted.set(r.invoiceItem, (wanted.get(r.invoiceItem) ?? 0) + qty);
+      }
+      for (const r of returnInputs) {
+        const line: any = await InvoiceItem.findById(r.invoiceItem);
+        // Older bill lines carry no link to their bill, so the screen sends the bill it was picked from.
+        const linked = line?.invoice ?? line?.invoiceId;
+        const origId = isValidId(r.invoice) ? String(r.invoice) : linked ? idOf(linked) : '';
+        const orig: any = origId ? await Invoice.findById(origId) : null;
+        const onBill = !!orig && (orig.items ?? []).map(idOf).includes(String(r.invoiceItem));
+        if (!line || !orig || !onBill) {
+          res.status(404).json({ message: "The returned item's earlier bill was not found." });
+          return;
+        }
+        if (idOf(orig.customer) !== String(customerIdRaw)) {
+          res.status(400).json({ message: `Bill #${orig.invoiceNumber ?? ''} belongs to another customer.` });
+          return;
+        }
+        const left = (line.quantity || 0) - (line.returnedQty || 0);
+        if (wanted.get(r.invoiceItem)! > left) {
+          res.status(400).json({ message: `Only ${Math.max(0, left)} piece(s) of that line on bill #${orig.invoiceNumber ?? ''} can still be returned.` });
+          return;
+        }
+        const qty = r.quantity ?? 1;
+        // Credit up to the line's billed price; the old bill's discount is not taken off (staff can lower it).
+        const maxAmount = Number((line.price * qty).toFixed(2));
+        const amount = r.amount ?? maxAmount;
+        if (amount > maxAmount + 0.01) {
+          res.status(400).json({ message: `Return credit can be at most ₹${maxAmount.toLocaleString('en-IN')} (its billed price).` });
+          return;
+        }
+        const plan: ReturnPlan = {
+          itemId: r.invoiceItem,
+          invoiceId: origId,
+          invoiceNumber: orig.invoiceNumber,
+          type: line.type,
+          label: r.label?.trim() || line.itemName || line.lensLabel || line.frameVariantLabel || line.type || 'Item',
+          quantity: qty,
+          amount,
+        };
+        if (line.frame) plan.frameId = idOf(line.frame);
+        returnPlans.push(plan);
+      }
+    }
+    const returnCredit = Number(returnPlans.reduce((sum, p) => sum + p.amount, 0).toFixed(2));
+    const total = Number((subtotal - discount - returnCredit).toFixed(2));
+    if (total < 0) {
+      res.status(400).json({
+        message: `Return credit (₹${returnCredit.toLocaleString('en-IN')}) is more than this bill. Lower the credit or add the new item.`,
+      });
+      return;
+    }
 
     const { initialPayment, initialPayments: initialPaymentsInput } = body;
     const initialPayments: Array<{ date: Date; amount: number; method: 'cash' | 'online' }> = [];
@@ -366,6 +450,8 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       }
     }
 
+    for (const p of returnPlans) if (p.frameId) productIds.frames.add(p.frameId);
+
     const customerKey = existingCustomer ? idOf(existingCustomer._id) : null;
     const [financialSetting, priorInvoicesCount] = await Promise.all([
       SiteSetting.findOne({ key: 'retail_financial_settings' }).lean(),
@@ -404,6 +490,18 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
           .map((it) => recipeFor(fragrances.get(idOf(it.fragrance)), it.fragranceGrade || it.fragranceVariantLabel)),
       ).filter((id) => !fragrances.has(id));
       if (recipeIds.length) for (const [id, doc] of await t.getMany<any>(Fragrance, recipeIds)) fragrances.set(id, doc);
+
+      // Returned lines read again inside the transaction, so two bills cannot return the same piece.
+      const returnLines = await t.getMany<any>(InvoiceItem, [...new Set(returnPlans.map((p) => p.itemId))]);
+      const returnedNow = new Map<string, number>();
+      for (const p of returnPlans) {
+        const line = returnLines.get(p.itemId);
+        const taken = (returnedNow.get(p.itemId) ?? 0) + p.quantity;
+        if (!line || taken > (line.quantity || 0) - (line.returnedQty || 0)) {
+          throw new InvoiceHttpError(409, 'That item was already returned on another bill. Refresh and try again.');
+        }
+        returnedNow.set(p.itemId, taken);
+      }
 
       const deductions: StockDeduction[] = [];
       for (const item of items as any[]) {
@@ -456,6 +554,11 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       const frameUpdates = new Map<string, any>();
       const fragranceUpdates = new Map<string, any>();
       const wholesaleStock = new Map<string, number>();
+
+      // Returned frames go back on the shelf (before this bill's frames come off).
+      for (const p of returnPlans) {
+        if (p.frameId) restoreFrameLine({ ...returnLines.get(p.itemId), quantity: p.quantity }, frames.get(p.frameId), frameUpdates);
+      }
 
       for (const [i, item] of (items as any[]).entries()) {
         const enhanced: any = { ...item };
@@ -679,6 +782,21 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         itemIds.push(created.id);
       }
 
+      // Returned pieces' cost comes back, so the two bills together show the margin of what was kept.
+      for (const p of returnPlans) {
+        const line = returnLines.get(p.itemId);
+        totalCogs -= (typeof line?.costPrice === 'number' ? line.costPrice : 0) * p.quantity;
+      }
+      for (const [lineId, qty] of returnedNow) {
+        const line = returnLines.get(lineId);
+        await t.update(
+          InvoiceItem,
+          lineId,
+          { returnedQty: (line.returnedQty || 0) + qty, returnedInInvoice: invoiceDocId, returnedAt: billDate },
+          line,
+        );
+      }
+
       const netContributionMargin = Math.max(0, Number((total - totalCogs - packagingCost - paymentProcessingFee).toFixed(2)));
       await t.create(
         Invoice,
@@ -688,6 +806,20 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
           subtotal,
           discount,
           total,
+          ...(returnPlans.length
+            ? {
+                returnCredit,
+                returns: returnPlans.map((p) => ({
+                  invoiceItem: p.itemId,
+                  invoice: p.invoiceId,
+                  invoiceNumber: p.invoiceNumber,
+                  type: p.type,
+                  label: p.label,
+                  quantity: p.quantity,
+                  amount: p.amount,
+                })),
+              }
+            : {}),
           billDate,
           payments: initialPayments,
           invoiceNumber,
@@ -786,14 +918,14 @@ export const updateInvoice = async (req: Request, res: Response, next: NextFunct
 
       if (discount !== undefined) {
         if (typeof discount !== 'number' || discount < 0) throw new InvoiceHttpError(400, 'Discount must be a non-negative number.');
-        if (discount > invoice.subtotal) {
-          throw new InvoiceHttpError(400, 'Discount cannot be greater than the subtotal.');
+        if (discount > invoice.subtotal - returnCreditOf(invoice) + 0.01) {
+          throw new InvoiceHttpError(400, 'Discount cannot be greater than the subtotal less the return credit.');
         }
         if (invoice.subtotal > 0 && discount === invoice.subtotal && discount !== invoice.discount && !isAdminRequest(req)) {
           throw new InvoiceHttpError(403, 'Only the owner can make a free (₹0) bill.');
         }
         invoice.discount = discount;
-        invoice.total = Math.max(0, invoice.subtotal - discount);
+        invoice.total = Math.max(0, invoice.subtotal - discount - returnCreditOf(invoice));
       }
 
       if (payments !== undefined) {
@@ -899,7 +1031,7 @@ export const addPayment = async (req: Request, res: Response, next: NextFunction
 
       if (discountAmount > 0) {
         invoice.discount = newDiscount;
-        invoice.total = invoice.subtotal - newDiscount;
+        invoice.total = Math.max(0, invoice.subtotal - newDiscount - returnCreditOf(invoice));
       }
 
       const paymentDate = date ? new Date(date) : new Date();
@@ -1004,7 +1136,14 @@ export const deleteInvoice = async (req: Request, res: Response, next: NextFunct
       const items = await t.getMany<any>(InvoiceItem, itemIds);
 
       // Put frame pieces back (total and variant for newer lines, variant only for older ones).
-      const frameIds = [...new Set([...items.values()].filter((i) => i.frame).map((i) => idOf(i.frame)))];
+      // Lines this bill took back from earlier bills: the return is undone with the bill.
+      const returns: any[] = invoice.returns ?? [];
+      const returnLines = await t.getMany<any>(InvoiceItem, [...new Set(returns.map((r) => String(r.invoiceItem)))]);
+      const frameIds = [
+        ...new Set(
+          [...items.values(), ...returnLines.values()].filter((i) => i.frame).map((i) => idOf(i.frame)),
+        ),
+      ];
       const frames = await t.getMany<any>(Frame, frameIds);
       const wholesaleIds = [...items.values()].filter((i) => i.wholesaleItem).map((i) => idOf(i.wholesaleItem));
       const wsRead = wholesaleReadIds(wholesaleIds);
@@ -1013,7 +1152,18 @@ export const deleteInvoice = async (req: Request, res: Response, next: NextFunct
       const wsFragrances = await t.getMany<any>(Fragrance, [...wsRead.fragranceIds]);
       const restored = new Map<string, any>();
       for (const item of items.values()) {
-        if (item.frame) restoreFrameLine(item, frames.get(idOf(item.frame)), restored);
+        // Pieces already returned were put back when they came in.
+        const kept = (item.quantity || 1) - (item.returnedQty || 0);
+        if (item.frame && kept > 0) restoreFrameLine({ ...item, quantity: kept }, frames.get(idOf(item.frame)), restored);
+      }
+      const unreturned = new Map<string, number>();
+      for (const r of returns) {
+        const line = returnLines.get(String(r.invoiceItem));
+        if (!line) continue;
+        // Negative quantity takes the returned pieces back off the shelf, the same way they went on.
+        if (line.frame) restoreFrameLine({ ...line, quantity: -r.quantity }, frames.get(idOf(line.frame)), restored);
+        const lineId = String(r.invoiceItem);
+        unreturned.set(lineId, (unreturned.get(lineId) ?? 0) + r.quantity);
       }
 
       for (const [id, set] of restored) {
@@ -1042,6 +1192,10 @@ export const deleteInvoice = async (req: Request, res: Response, next: NextFunct
       }
       for (const [id, update] of fragranceStock) {
         await t.update(Fragrance, id, { $set: update }, wsFragrances.get(id) ?? null);
+      }
+      for (const [lineId, qty] of unreturned) {
+        const line = returnLines.get(lineId);
+        await t.update(InvoiceItem, lineId, { returnedQty: Math.max(0, (line?.returnedQty || 0) - qty) }, line ?? null);
       }
       for (const id of itemIds) t.delete(InvoiceItem, id);
       t.delete(Invoice, invoiceId);

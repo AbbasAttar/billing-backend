@@ -7,6 +7,19 @@ export interface IPayment {
   writeoff?: number;
 }
 
+/** An item brought back from an earlier bill and credited on this one (exchange / return). */
+export interface IReturnLine {
+  /** The original bill line (InvoiceItem id); its `returnedQty` goes up by `quantity`. */
+  invoiceItem: string;
+  invoice: string;
+  invoiceNumber?: string;
+  type?: string;
+  label: string;
+  quantity: number;
+  /** Credit given for these pieces, in rupees (at most what was paid for them). */
+  amount: number;
+}
+
 export type AcquisitionSource =
   | 'google_maps'
   | 'instagram'
@@ -28,6 +41,9 @@ export interface IInvoice extends BaseDoc {
   storePriceTotal?: number;
   realDiscount?: number;
   payments: IPayment[];
+  /** Items returned from earlier bills and credited here; total = subtotal - discount - returnCredit. */
+  returns?: IReturnLine[];
+  returnCredit?: number;
   billDate: Date;
   billClearDate?: Date;
   invoiceNumber?: string;

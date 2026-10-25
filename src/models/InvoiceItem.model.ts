@@ -38,6 +38,10 @@ export interface IInvoiceItem extends BaseDoc {
   frameAttrs?: FrameAttrs;
   /** Frame line whose pieces came off the frame's total stock (bills since that started); restores add them back. */
   frameStockTaken?: boolean;
+  /** Pieces of this line the customer brought back (credited on `returnedInInvoice`, stock put back). */
+  returnedQty?: number;
+  returnedInInvoice?: string;
+  returnedAt?: Date;
   rightEyeNumber?: string;
   leftEyeNumber?: string;
   lensCompany?: string;
