@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { Invoice } from '../models/Invoice.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
-import { Expense } from '../models/Expense.model';
+import { ExpenseLog } from '../models/ExpenseLog.model';
 import { MonthlyTarget } from '../models/MonthlyTarget.model';
 import { Frame } from '../models/Frame.model';
 import { LensStock } from '../models/LensStock.model';
@@ -30,6 +30,15 @@ const change = (now: number | null, before: number | null) =>
   now === null || before === null || before === 0 ? null : Number((((now - before) / Math.abs(before)) * 100).toFixed(1));
 
 /**
+ * Expenses come from the expense log (old entries were copied into it). Payments marked
+ * personal count as home spending, whatever category they were logged under.
+ */
+async function expenseLogIn(from: Date, to: Date) {
+  const logs = await ExpenseLog.find({ date: { $gte: from, $lte: to } }).select('amount category date paymentMethod scope').lean();
+  return logs.map((l: any) => ({ ...l, category: l.scope === 'personal' ? 'home' : l.category }));
+}
+
+/**
  * GET /analytics/overview?period=mtd|last_month|30d|90d — the main analytics page: KPIs with the
  * comparison period, target progress, what needs attention, daily sales, category mix, cash in/out
  * (stock purchases apart from running costs) and customers.
@@ -44,8 +53,8 @@ export const getAnalyticsOverview = async (req: Request, res: Response, next: Ne
       Invoice.find({ billDate: { $gte: period.compareFrom, $lte: period.compareTo } }).select(INVOICE_FIELDS).populate('items').lean(),
       paidIn(period.from, period.to),
       paidIn(period.compareFrom, period.compareTo),
-      Expense.find({ date: { $gte: period.from, $lte: period.to }, isVoid: { $ne: true } }).select('amount category date paymentMethod').lean(),
-      Expense.find({ date: { $gte: period.compareFrom, $lte: period.compareTo }, isVoid: { $ne: true } }).select('amount category date paymentMethod').lean(),
+      expenseLogIn(period.from, period.to),
+      expenseLogIn(period.compareFrom, period.compareTo),
       period.targetMonth ? MonthlyTarget.findOne({ month: period.targetMonth }).lean() : Promise.resolve(null),
       Invoice.find({ hasDue: true }).select({ total: 1, payments: 1, billDate: 1 }).lean(),
       InvoiceItem.find({ isLabItem: true, isOpenLabJob: true }).select('createdAt labStatus sentToWholesaler').lean(),

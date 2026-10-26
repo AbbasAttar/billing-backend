@@ -23,6 +23,7 @@ import paymentsRoutes from './routes/payments.routes';
 import salesRoutes from './routes/sales.routes';
 import inventoryIntelligenceRoutes from './routes/inventory.routes';
 import personalExpenseRoutes from './routes/personalExpense.routes';
+import expenseLedgerRoutes from './routes/expenseLedger.routes';
 import monthlyTargetRoutes from './routes/monthlyTarget.routes';
 import coatingRoutes from './routes/coating.routes';
 import lensPricingRoutes from './routes/lensPricing.routes';
@@ -159,6 +160,7 @@ adminRouter.use('/payments', paymentsRoutes);
 adminRouter.use('/sales', salesRoutes);
 adminRouter.use('/inventory', inventoryIntelligenceRoutes);
 adminRouter.use('/personal-expenses', personalExpenseRoutes);
+adminRouter.use('/ledger', expenseLedgerRoutes); // expense log, recurring bills, vendor accounts
 adminRouter.use('/monthly-targets', monthlyTargetRoutes);
 adminRouter.use('/coatings', coatingRoutes);
 adminRouter.use('/lens-pricing', lensPricingRoutes);

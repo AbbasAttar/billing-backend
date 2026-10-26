@@ -21,8 +21,9 @@ export interface OvInvoice {
 }
 export interface OvExpense { date?: Date | string; amount?: number; category?: string; paymentMethod?: string }
 
-export const STOCK_EXPENSE_CATEGORIES = ['stock', 'vendor_order'];
-export const HOME_EXPENSE_CATEGORIES = ['home_expense'];
+// Old `expenses` categories plus the expense-log ones (vendor, home).
+export const STOCK_EXPENSE_CATEGORIES = ['stock', 'vendor_order', 'vendor'];
+export const HOME_EXPENSE_CATEGORIES = ['home_expense', 'home'];
 
 const DAY = 86_400_000;
 const idOf = (v: unknown) => (v && typeof v === 'object' && '_id' in (v as object) ? String((v as { _id: unknown })._id) : String(v ?? ''));
