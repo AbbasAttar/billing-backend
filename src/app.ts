@@ -60,6 +60,7 @@ import fittingRoutes from './routes/fitting.routes';
 import customerRequirementRoutes from './routes/customerRequirement.routes';
 import aiChatRoutes from './routes/aiChat.routes';
 import wholesaleItemRoutes from './routes/wholesaleItem.routes';
+import billFeedbackRoutes from './routes/billFeedback.routes';
 import { handleWebhook } from './controllers/razorpay.controller';
 
 const app = express();
@@ -172,6 +173,7 @@ adminRouter.use('/marketing', marketingRoutes);
 adminRouter.use('/campaigns', campaignRoutes);
 adminRouter.use('/automation', automationRoutes);
 adminRouter.use('/lost-sales', lostSaleRoutes);
+adminRouter.use('/bill-feedback', billFeedbackRoutes); // online-bill ratings and review funnel
 adminRouter.use('/saving-goals', savingGoalRoutes);
 adminRouter.use('/recurring-expenses', recurringExpenseRoutes);
 adminRouter.use('/contact-lenses', contactLensRoutes);

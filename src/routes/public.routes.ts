@@ -19,6 +19,7 @@ import {
   getInvoiceById,
   getInvoicePayInfo,
 } from '../controllers/public.controller';
+import { createReviewDraft, getPublicBill, recordBillEvent, submitBillFeedback } from '../controllers/billFeedback.controller';
 
 import { uploadPrescription } from '../controllers/upload.controller';
 import { publicCache, publicRateLimit } from '../middleware/publicCache';
@@ -46,6 +47,12 @@ router.get('/colors', publicCache(3600, 7200), getPublicColors);
 
 // Pay-online link from the WhatsApp invoice / reminder: invoice number and balance only.
 router.get('/pay/:id', getInvoicePayInfo);
+
+// Online bill from the WhatsApp invoice, with its rating prompt and review-funnel beacons.
+router.get('/bill/:id', getPublicBill);
+router.post('/bill/:id/event', recordBillEvent);
+router.post('/bill/:id/feedback', submitBillFeedback);
+router.post('/bill/:id/review-draft', createReviewDraft);
 
 // Per-user data: never cached. Identity comes from the customer session token.
 router.use(['/my-orders', '/my-invoices', '/orders', '/invoices'], attachCustomer);
