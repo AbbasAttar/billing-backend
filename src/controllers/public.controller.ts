@@ -419,6 +419,37 @@ export const getOrderById = async (req: Request, res: Response, next: NextFuncti
 
 // GET /api/public/invoices/:id?phone=xxx
 // Returns full in-store invoice detail with prescription info, verified by phone ownership.
+// GET /api/public/pay/:id — what the WhatsApp "pay online" link needs, by invoice id alone.
+// Only the invoice number and amounts: no name, phone or items, since anyone with the link can read it.
+export const getInvoicePayInfo = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const id = String(req.params.id ?? '');
+    if (!/^[A-Za-z0-9_-]{6,64}$/.test(id)) {
+      res.status(404).json({ success: false, message: 'Invoice not found' });
+      return;
+    }
+    const invoice = await Invoice.findById(id).lean() as any;
+    if (!invoice) {
+      res.status(404).json({ success: false, message: 'Invoice not found' });
+      return;
+    }
+    const paid = (invoice.payments ?? []).reduce(
+      (s: number, p: any) => s + (Number(p.amount) || 0) + (Number(p.writeoff) || 0), 0
+    );
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      success: true,
+      data: {
+        invoiceNumber: invoice.invoiceNumber ?? String(invoice._id).slice(-6),
+        total: invoice.total ?? 0,
+        balance: Math.max(0, Math.round(((invoice.total ?? 0) - paid) * 100) / 100),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 export const getInvoiceById = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;

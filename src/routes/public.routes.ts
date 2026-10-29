@@ -17,6 +17,7 @@ import {
   getOrderById,
   getMyInvoices,
   getInvoiceById,
+  getInvoicePayInfo,
 } from '../controllers/public.controller';
 
 import { uploadPrescription } from '../controllers/upload.controller';
@@ -42,6 +43,9 @@ router.get('/lens-catalog', publicCache(300, 600), getLensCatalog);
 router.get('/lens-pricing-lookup', publicCache(300, 600), getLensPricingLookup);
 router.get('/coatings', publicCache(3600, 7200), getPublicCoatings);
 router.get('/colors', publicCache(3600, 7200), getPublicColors);
+
+// Pay-online link from the WhatsApp invoice / reminder: invoice number and balance only.
+router.get('/pay/:id', getInvoicePayInfo);
 
 // Per-user data: never cached. Identity comes from the customer session token.
 router.use(['/my-orders', '/my-invoices', '/orders', '/invoices'], attachCustomer);

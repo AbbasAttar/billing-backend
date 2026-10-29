@@ -271,6 +271,24 @@ describe('/public per-user endpoints', () => {
     expect(Invoice.findById).not.toHaveBeenCalled();
   });
 
+  it('pay info: invoice number and balance only, by id', async () => {
+    Invoice.findById.mockReturnValue(chain({
+      _id: 'inv1abc', invoiceNumber: 'INV0735/26-27', total: 2000,
+      customer: { name: 'Hatim', mobileNumber: PHONE }, payments: [{ amount: 300 }, { amount: 0, writeoff: 100 }],
+    }));
+    const res = await request(app).get('/api/public/pay/inv1abc');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({ invoiceNumber: 'INV0735/26-27', total: 2000, balance: 1600 });
+    expect(JSON.stringify(res.body)).not.toContain(PHONE);
+    expect(res.headers['cache-control']).toBe('no-store');
+  });
+
+  it('pay info: unknown or malformed id is 404', async () => {
+    Invoice.findById.mockReturnValue(chain(null));
+    expect((await request(app).get('/api/public/pay/nope123')).status).toBe(404);
+    expect((await request(app).get('/api/public/pay/a$b')).status).toBe(404);
+  });
+
   it("invoice detail refuses another customer's invoice", async () => {
     Invoice.findById.mockReturnValue(chain({ _id: 'inv1', customer: { mobileNumber: OTHER }, items: [], payments: [], total: 100 }));
     expect((await request(app).get('/api/public/invoices/inv1').set(bearer())).status).toBe(403);
