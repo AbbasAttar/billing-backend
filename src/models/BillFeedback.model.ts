@@ -17,6 +17,10 @@ export interface IBillFeedback extends BaseDoc {
   comment?: string;
   /** Google-review drafts written for this bill (latest last); also caps AI calls per bill. */
   reviewDrafts?: string[];
+  /** Times the counter opened WhatsApp with this bill's message, and when it first/last did. */
+  sentCount?: number;
+  firstSentAt?: Date;
+  lastSentAt?: Date;
   openCount?: number;
   firstOpenedAt?: Date;
   lastOpenedAt?: Date;

@@ -223,6 +223,34 @@ export const createReviewDraft = async (req: Request, res: Response, next: NextF
   }
 };
 
+// ── POST /api/invoices/:id/whatsapp-sent ─────────────────────────────────────
+// The counter opened WhatsApp with this bill's message: the funnel's "sent" step.
+export const recordBillSent = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const id = String(req.params.id ?? '');
+    if (!isInvoiceId(id)) return notFound(res);
+    const [invoice, existing] = await Promise.all([
+      Invoice.findById(id).populate('customer', 'name').lean() as any,
+      BillFeedback.findById(id).lean() as any,
+    ]);
+    if (!invoice) return notFound(res);
+
+    const now = new Date();
+    await BillFeedback.findByIdAndUpdate(
+      id,
+      {
+        $set: { lastSentAt: now, ...(existing?.firstSentAt ? {} : { firstSentAt: now }) },
+        $inc: { sentCount: 1 },
+        $setOnInsert: seedFields(invoice),
+      },
+      { upsert: true, new: true },
+    );
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // ── GET /api/bill-feedback?days=30 ───────────────────────────────────────────
 // Review funnel for bills dated in the window, plus every rating and comment.
 export const getBillFeedbackSummary = async (req: Request, res: Response, next: NextFunction) => {
@@ -230,15 +258,18 @@ export const getBillFeedbackSummary = async (req: Request, res: Response, next: 
     const days = Math.min(Math.max(parseInt(String(req.query.days ?? '30'), 10) || 30, 1), 365);
     const since = new Date(Date.now() - days * 86_400_000);
 
+    // A bill counts when it was dated, sent or opened in the window, so resending an old bill counts too.
+    // The collection is mirrored and small (one document per bill that was sent or opened).
     const [bills, docs] = await Promise.all([
       Invoice.countDocuments({ billDate: { $gte: since } }),
-      BillFeedback.find({ billDate: { $gte: since } }).lean() as any,
+      BillFeedback.find({}).lean() as any,
     ]);
-
-    const rows = docs as any[];
+    const inWindow = (v: unknown) => v != null && new Date(v as any).getTime() >= since.getTime();
+    const rows = (docs as any[]).filter((d) => inWindow(d.billDate) || inWindow(d.firstSentAt) || inWindow(d.firstOpenedAt));
     const rated = rows.filter((d) => d.rating);
     const funnel = {
       bills,
+      sent: rows.filter((d) => d.firstSentAt).length,
       opened: rows.filter((d) => d.firstOpenedAt).length,
       promptShown: rows.filter((d) => d.promptShownAt).length,
       rated: rated.length,
@@ -264,7 +295,27 @@ export const getBillFeedbackSummary = async (req: Request, res: Response, next: 
         resolvedAt: d.resolvedAt ?? null,
       }));
 
-    res.json({ days, funnel, feedback });
+    // Per IST day, by when each step happened.
+    const dayKey = (v: unknown) => new Date(new Date(v as any).getTime() + 330 * 60_000).toISOString().slice(0, 10);
+    const byDay = new Map<string, { date: string; sent: number; opened: number; rated: number; google: number }>();
+    for (let i = days - 1; i >= 0; i--) {
+      const date = dayKey(Date.now() - i * 86_400_000);
+      byDay.set(date, { date, sent: 0, opened: 0, rated: 0, google: 0 });
+    }
+    const bump = (v: unknown, key: 'sent' | 'opened' | 'rated' | 'google') => {
+      if (!inWindow(v)) return;
+      const day = byDay.get(dayKey(v));
+      if (day) day[key]++;
+    };
+    for (const d of rows) {
+      bump(d.firstSentAt, 'sent');
+      bump(d.firstOpenedAt, 'opened');
+      bump(d.ratedAt, 'rated');
+      bump(d.googleClickedAt, 'google');
+    }
+    const daily = [...byDay.values()].reverse();
+
+    res.json({ days, funnel, daily, feedback });
   } catch (error) {
     next(error);
   }

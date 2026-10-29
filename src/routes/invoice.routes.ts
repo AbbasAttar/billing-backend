@@ -22,6 +22,7 @@ import {
   getMergedInvoicesPage,
   searchInvoices,
 } from '../controllers/invoiceList.controller';
+import { recordBillSent } from '../controllers/billFeedback.controller';
 
 const router = Router();
 
@@ -36,6 +37,8 @@ router.get('/', getAllInvoices);
 router.get('/:id', getInvoiceById);
 router.post('/', createInvoice);
 router.put('/:id', updateInvoice);
+// Counter opened WhatsApp with the bill message (review funnel's "sent" step).
+router.post('/:id/whatsapp-sent', recordBillSent);
 router.patch('/:id/payment', addPayment);
 router.patch('/:id/payment/:paymentIndex', updatePayment);
 router.delete('/:id/payment/:paymentIndex', deletePayment);
