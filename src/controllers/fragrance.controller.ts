@@ -4,6 +4,9 @@ import { Fragrance } from '../models/Fragrance.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
 import { Invoice } from '../models/Invoice.model';
 import { tokenSearch, SEARCH_MARKERS } from '../services/tokenSearch';
+import { FragranceRefill } from '../models/FragranceRefill.model';
+import { parseRefillInput, planRefill } from '../services/fragranceRefill';
+import { runModelTransaction } from '../lib/firestoreModel';
 
 export const getFragranceRevenueSummary = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -141,6 +144,47 @@ export const updateFragrance = async (req: Request, res: Response, next: NextFun
       return;
     }
     res.json(fragrance);
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * POST /:id/refill — add stock to a grade / size (or the plain product), taken from a wholesale
+ * product (its stock goes down) or bought outside, and log it. The cost price is averaged in.
+ */
+export const refillFragrance = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const input = parseRefillInput(req.body);
+    if ('error' in input) {
+      res.status(400).json({ message: input.error });
+      return;
+    }
+    const id = String(req.params.id);
+    const result = await runModelTransaction(async (t) => {
+      const docs = await t.getMany<any>(Fragrance, [id, input.fromFragranceId ?? '']);
+      const plan = planRefill(id, docs, input);
+      if ('error' in plan) return plan;
+      for (const [docId, update] of plan.updates) await t.update(Fragrance, docId, { $set: update }, docs.get(docId) ?? null);
+      const refill = await t.create<any>(FragranceRefill, { ...plan.record, by: req.user?.email ?? null });
+      return { refill };
+    });
+    if ('error' in result) {
+      res.status(result.error === 'Fragrance not found' ? 404 : 400).json({ message: result.error });
+      return;
+    }
+    res.status(201).json({ refill: result.refill, fragrance: await Fragrance.findById(id).lean() });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/** GET /:id/refills — refill history, newest first. */
+export const getFragranceRefills = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const rows: any[] = await FragranceRefill.find({ fragranceId: String(req.params.id) }).lean();
+    rows.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    res.json(rows.slice(0, 100));
   } catch (error) {
     next(error);
   }

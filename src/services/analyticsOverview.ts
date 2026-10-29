@@ -33,7 +33,8 @@ const inRange = (d: Date, from: Date, to: Date) => d.getTime() >= from.getTime()
 const dayKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const asDate = (v: unknown) => (v instanceof Date ? v : new Date(String(v)));
 
-export type PeriodKey = 'mtd' | 'last_month' | '30d' | '90d';
+/** Presets, a calendar month `month:YYYY-MM`, or a financial year (April–March) `fy:YYYY` by its start year. */
+export type PeriodKey = 'mtd' | 'last_month' | '30d' | '90d' | `month:${string}` | `fy:${string}`;
 
 export interface Period {
   key: PeriodKey; label: string; from: Date; to: Date;
@@ -46,20 +47,53 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 const monthKey = (y: number, m: number) => `${y}-${String(m + 1).padStart(2, '0')}`;
 const endOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
 
+/** A whole past calendar month, compared with the month before it. */
+function closedMonth(key: PeriodKey, y: number, m: number): Period {
+  const from = new Date(y, m, 1);
+  const to = endOfDay(new Date(y, m + 1, 0));
+  const days = to.getDate();
+  const compareFrom = new Date(y, m - 1, 1);
+  return {
+    key, label: `${MONTHS[from.getMonth()]} ${from.getFullYear()}`, from, to,
+    compareLabel: `${MONTHS[compareFrom.getMonth()]} ${compareFrom.getFullYear()}`, compareFrom, compareTo: endOfDay(new Date(y, m, 0)),
+    targetMonth: monthKey(y, m), daysInMonth: days, daysElapsed: days,
+  };
+}
+
+const fyLabel = (start: number) => `FY ${start}–${String((start + 1) % 100).padStart(2, '0')}`;
+
+/** Financial year April–March; the current one runs to today and is compared with the same span a year back. */
+function financialYear(start: number, now: Date): Period {
+  const from = new Date(start, 3, 1);
+  const yearEnd = endOfDay(new Date(start + 1, 2, 31));
+  const running = now.getTime() < yearEnd.getTime();
+  const to = running ? endOfDay(now) : yearEnd;
+  const compareFrom = new Date(start - 1, 3, 1);
+  const compareTo = endOfDay(new Date(to.getFullYear() - 1, to.getMonth(), to.getDate()));
+  const days = Math.round((to.getTime() - from.getTime()) / DAY);
+  return {
+    key: `fy:${start}`, label: `${fyLabel(start)}${running ? ' (to date)' : ''}`, from, to,
+    compareLabel: running ? `${fyLabel(start - 1)} same period` : fyLabel(start - 1), compareFrom, compareTo,
+    targetMonth: null, daysInMonth: days, daysElapsed: days,
+  };
+}
+
+/** Financial year (by start year) that a date falls in. */
+export const fyOf = (d: Date) => (d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1);
+
 export function resolvePeriod(key: string | undefined, now = new Date()): Period {
   const y = now.getFullYear();
   const m = now.getMonth();
-  if (key === 'last_month') {
-    const from = new Date(y, m - 1, 1);
-    const to = endOfDay(new Date(y, m, 0));
-    const days = to.getDate();
-    const compareFrom = new Date(y, m - 2, 1);
-    return {
-      key: 'last_month', label: `${MONTHS[from.getMonth()]} ${from.getFullYear()}`, from, to,
-      compareLabel: `${MONTHS[compareFrom.getMonth()]} ${compareFrom.getFullYear()}`, compareFrom, compareTo: endOfDay(new Date(y, m - 1, 0)),
-      targetMonth: monthKey(from.getFullYear(), from.getMonth()), daysInMonth: days, daysElapsed: days,
-    };
+  if (key === 'last_month') return closedMonth('last_month', y, m - 1);
+  const month = /^month:(\d{4})-(\d{2})$/.exec(key ?? '');
+  if (month) {
+    const my = Number(month[1]);
+    const mm = Number(month[2]) - 1;
+    // The current (or a future) month falls through to month to date.
+    if (mm >= 0 && mm < 12 && my * 12 + mm < y * 12 + m) return closedMonth(key as PeriodKey, my, mm);
   }
+  const fy = /^fy:(\d{4})$/.exec(key ?? '');
+  if (fy) return financialYear(Math.min(Number(fy[1]), fyOf(now)), now);
   if (key === '30d' || key === '90d') {
     const n = key === '30d' ? 30 : 90;
     const to = endOfDay(now);

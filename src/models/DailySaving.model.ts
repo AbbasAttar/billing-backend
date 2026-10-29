@@ -6,6 +6,9 @@ export interface IDailySaving extends BaseDoc {
   day: string;
   fixed: number;
   vendor: number;
+  /** part of `fixed` / `vendor` kept online (UPI / bank); the rest is cash. Missing on old entries = all cash. */
+  fixedOnline?: number;
+  vendorOnline?: number;
   note?: string;
   createdAt?: Date;
   updatedAt?: Date;

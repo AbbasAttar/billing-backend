@@ -9,6 +9,12 @@ import { IWebFields } from './webFields.schema';
 export interface IFragranceVariant {
   label: string;
   axis?: 'grade' | 'size';
+  /**
+   * Series products (one range in several types and sizes, e.g. Naseem Classic): the type (scent
+   * name) and size of this option. The label stays the key ("Oud 30ml").
+   */
+  typeName?: string;
+  size?: string;
   /** Size in ml, for sizes (fills prices from a price per ml). */
   sizeMl?: number;
   costPrice?: number;
@@ -48,12 +54,21 @@ export interface IScentProfile {
   similarTo?: string;
 }
 
+/** Series products: the scent of one type (same in every size), with its own family and longevity. */
+export interface ITypeScent extends IScentProfile {
+  typeName: string;
+  family?: string[];
+  longevity?: string;
+}
+
 export interface IFragrance extends BaseDoc {
   type: 'perfume' | 'attar' | 'bakhoor' | 'body spray' | 'essence' | 'packaging';
   gender?: 'men' | 'women' | 'unisex';
   /** Where it is sold / used. Missing = retail only. */
   channels?: { retail?: boolean; wholesale?: boolean; rawMaterial?: boolean };
   scent?: IScentProfile;
+  /** Series products: scent profile per type (the product's own `scent` covers the whole series). */
+  typeScents?: ITypeScent[] | null;
   /** Plain products (no grades / sizes): wholesale price, recipe and wholesale order state. */
   wholesale?: IFragranceVariant['wholesale'] | null;
   recipe?: IFragranceVariant['recipe'] | null;
@@ -83,8 +98,9 @@ export interface IFragrance extends BaseDoc {
   updatedAt?: Date;
 }
 
-const fragranceTokens = searchTokenHook(['name', 'companyName'], (f) => ({
-  text: [f.name, f.companyName],
+// Series type names ("White Musk") are searchable too, so billing finds the product by its type.
+const fragranceTokens = searchTokenHook(['name', 'companyName', 'variants'], (f) => ({
+  text: [f.name, f.companyName, ...((f.variants ?? []) as IFragranceVariant[]).map((v) => v.typeName).filter(Boolean)],
 }));
 
 export const Fragrance = createFirestoreModel<IFragrance>('fragrances', {

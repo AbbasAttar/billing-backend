@@ -4,6 +4,8 @@ import { matchesAllWords, parseSearchQuery } from '../lib/searchTokens';
 
 /** Documents fetched per search before narrowing in memory (multi-word queries, archived rows). */
 const FETCH_CAP = 100;
+/** Words of a multi-word query tried in turn while each one fills FETCH_CAP. */
+const MAX_WORD_TRIES = 3;
 
 export const SEARCH_MARKERS = {
   customers: 'searchTokens_customers',
@@ -39,11 +41,17 @@ export async function tokenSearch(
   const parsed = parseSearchQuery(q);
   if (!parsed) return [];
 
-  const docs: any[] = await model
-    .find({ searchTokens: { $arrayContains: parsed.token } })
-    .limit(FETCH_CAP)
-    .withHiddenFields()
-    .lean();
+  // A common word ("attar") can fill the cap before the wanted document is read, so when one word
+  // hits the cap try the next longest; the first word under the cap has every match.
+  const fetchWord = async (token: string): Promise<any[]> =>
+    model.find({ searchTokens: { $arrayContains: token } }).limit(FETCH_CAP).withHiddenFields().lean();
+  const candidates = [parsed.token, ...[...new Set(parsed.words)].filter((w) => w !== parsed.token).sort((a, b) => b.length - a.length)];
+  let docs: any[] = [];
+  for (const [i, token] of candidates.slice(0, MAX_WORD_TRIES).entries()) {
+    const found = await fetchWord(token);
+    if (i === 0 || found.length < docs.length) docs = found;
+    if (found.length < FETCH_CAP) break;
+  }
 
   return docs
     .filter((d) => matchesAllWords(d.searchTokens, parsed.words) && (!options.predicate || options.predicate(d)))

@@ -18,6 +18,36 @@ describe('resolvePeriod', () => {
     expect(p.compareLabel).toBe('Aug 2026');
     expect(p.to.getDate()).toBe(30);
   });
+  it('a chosen past month is the whole month, compared with the month before', () => {
+    const p = resolvePeriod('month:2026-03', now);
+    expect(p.key).toBe('month:2026-03');
+    expect(p.label).toBe('Mar 2026');
+    expect(p.from).toEqual(new Date(2026, 2, 1));
+    expect(p.to.getDate()).toBe(31);
+    expect(p.compareLabel).toBe('Feb 2026');
+    expect(p.targetMonth).toBe('2026-03');
+  });
+  it('the current month chosen by name is month to date', () => {
+    expect(resolvePeriod('month:2026-10', now).key).toBe('mtd');
+  });
+  it('the running financial year is to date, against the same span a year back', () => {
+    const p = resolvePeriod('fy:2026', now);
+    expect(p.label).toBe('FY 2026–27 (to date)');
+    expect(p.from).toEqual(new Date(2026, 3, 1));
+    expect(p.to.getDate()).toBe(14);
+    expect(p.compareFrom).toEqual(new Date(2025, 3, 1));
+    expect(p.compareTo.getFullYear()).toBe(2025);
+    expect(p.compareTo.getMonth()).toBe(9);
+    expect(p.daysElapsed).toBe(197);
+    expect(p.targetMonth).toBeNull();
+  });
+  it('a past financial year runs April to March', () => {
+    const p = resolvePeriod('fy:2025', now);
+    expect(p.label).toBe('FY 2025–26');
+    expect(p.to).toEqual(new Date(2026, 2, 31, 23, 59, 59, 999));
+    expect(p.compareLabel).toBe('FY 2024–25');
+    expect(p.daysElapsed).toBe(365);
+  });
 });
 
 describe('salesFigures', () => {

@@ -10,6 +10,8 @@ import {
   getFragranceRevenueSummary,
   mergeFragrance,
   markNotDuplicate,
+  refillFragrance,
+  getFragranceRefills,
 } from '../controllers/fragrance.controller';
 import { getFragrancePresets, updateFragrancePresets } from '../controllers/fragrancePresets.controller';
 
@@ -24,6 +26,8 @@ router.get('/:id', getFragranceById);
 router.post('/', createFragrance);
 router.put('/:id', updateFragrance);
 router.patch('/:id/archive', archiveFragrance);
+router.get('/:id/refills', getFragranceRefills);
+router.post('/:id/refill', refillFragrance);
 router.post('/:id/merge', mergeFragrance);
 router.post('/:id/not-duplicate', markNotDuplicate);
 router.delete('/:id', deleteFragrance);

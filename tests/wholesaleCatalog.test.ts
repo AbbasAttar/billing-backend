@@ -28,6 +28,8 @@ describe('wholesale catalogue view', () => {
     expect(stockPerWholesaleUnit('per bottle', 'bottle')).toBe(1);
     expect(stockPerWholesaleUnit('per 100ml', 'tola')).toBeCloseTo(100 / 12);
     expect(stockPerWholesaleUnit('per kg', 'tola')).toBe(1);
+    expect(stockPerWholesaleUnit('per 25g', 'tola')).toBeCloseTo(2.5);
+    expect(stockPerWholesaleUnit('per 25 gm', 'tola')).toBeCloseTo(2.5);
   });
 
   it('lists plain products and options with a wholesale price only', () => {

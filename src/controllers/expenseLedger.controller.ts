@@ -22,8 +22,15 @@ import {
   isMonthKey,
   paidByMonth,
   isDayKey,
+  buildRepaymentSchedule,
+  chequesByMonth,
+  addMonthKey,
+  monthKeyOf,
+  isPaymentStep,
+  PAYMENT_STEP,
 } from '../services/expenseLedger';
 import { DailySaving } from '../models/DailySaving.model';
+import { Cheque, ChequeStatus, ICheque, PLANNED_METHODS, PlannedMethod } from '../models/Cheque.model';
 import { fail, ok } from '../utils/response';
 
 const parseDate = (value?: string): Date | null => {
@@ -46,7 +53,15 @@ const recurringState = (b: IRecurringBill): RecurringState => ({
   parts: b.parts?.length ? b.parts : undefined,
 });
 
-const METHOD_LABEL: Record<ExpenseLogMethod, string> = { cash: 'Cash', upi: 'UPI', card: 'Card', bank_transfer: 'Bank' };
+const METHOD_LABEL: Record<ExpenseLogMethod, string> = { cash: 'Cash', upi: 'UPI', card: 'Card', bank_transfer: 'Bank', cheque: 'Cheque' };
+
+/** A cleared cheque whose expense entry went away is a planned payment again. */
+const releaseCheque = async (expenseLogId?: string) => {
+  if (!expenseLogId) return;
+  const cheque = await Cheque.findOne({ expenseLogId });
+  if (cheque)
+    await Cheque.findByIdAndUpdate(cheque._id, { $set: { status: 'pending' }, $unset: { expenseLogId: '', clearedOn: '' } });
+};
 
 /** Validates split parts from the request; null when none were sent, a string on error. */
 const parseParts = (raw: unknown): RecurringPart[] | null | string => {
@@ -111,6 +126,8 @@ export const updateExpenseLog = async (req: Request, res: Response, next: NextFu
     // Payments from a bill or vendor keep their amount and category; delete and re-pay to change them.
     if (log.source && ((amount !== undefined && amount !== log.amount) || (category !== undefined && category !== log.category)))
       return fail(res, `This entry is a ${log.source.kind} payment. Delete it and pay again to change the amount.`, 400);
+    if (log.chequeId && amount !== undefined && amount !== log.amount)
+      return fail(res, 'This entry is a cleared cheque. Mark the cheque bounced to undo it instead.', 400);
 
     const update: Partial<IExpenseLog> = {};
     if (amount !== undefined) {
@@ -139,30 +156,37 @@ export const updateExpenseLog = async (req: Request, res: Response, next: NextFu
   }
 };
 
-/** Deletes an entry and undoes it on the bill or vendor it was paid from. */
+/** Removes an entry and undoes it on the bill or vendor it was paid from; an error message if it cannot. */
+const undoExpenseLog = async (log: IExpenseLog): Promise<string | null> => {
+  if (log.source?.kind === 'recurring') {
+    const bill = await RecurringBill.findById(log.source.id);
+    if (bill) {
+      const r = reverseRecurringPayment(recurringState(bill), {
+        amount: log.amount,
+        cycle: log.source.cycle,
+        completedInstallment: log.source.completedInstallment,
+        part: log.source.part,
+      });
+      if ('error' in r) return r.error;
+      await RecurringBill.findByIdAndUpdate(bill._id, { $set: r.state });
+    }
+  } else if (log.source?.kind === 'vendor') {
+    if (log.source.txnId) await VendorTxn.findByIdAndDelete(log.source.txnId);
+    await VendorAccount.findByIdAndUpdate(log.source.id, { $inc: { balance: log.amount } });
+  }
+  await ExpenseLog.findByIdAndDelete(log._id);
+  return null;
+};
+
+/** Deletes an entry and undoes it on the bill or vendor it was paid from (a cleared cheque goes back to pending). */
 export const deleteExpenseLog = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const log = await ExpenseLog.findById(req.params.id);
     if (!log) return fail(res, 'Expense not found', 404);
 
-    if (log.source?.kind === 'recurring') {
-      const bill = await RecurringBill.findById(log.source.id);
-      if (bill) {
-        const r = reverseRecurringPayment(recurringState(bill), {
-          amount: log.amount,
-          cycle: log.source.cycle,
-          completedInstallment: log.source.completedInstallment,
-          part: log.source.part,
-        });
-        if ('error' in r) return fail(res, r.error, 400);
-        await RecurringBill.findByIdAndUpdate(bill._id, { $set: r.state });
-      }
-    } else if (log.source?.kind === 'vendor') {
-      if (log.source.txnId) await VendorTxn.findByIdAndDelete(log.source.txnId);
-      await VendorAccount.findByIdAndUpdate(log.source.id, { $inc: { balance: log.amount } });
-    }
-
-    await ExpenseLog.findByIdAndDelete(log._id);
+    const error = await undoExpenseLog(log);
+    if (error) return fail(res, error, 400);
+    await releaseCheque(log._id);
     return ok(res, { _id: log._id }, 'Expense deleted');
   } catch (error) {
     next(error);
@@ -531,6 +555,7 @@ export const updateVendorTxn = async (req: Request, res: Response, next: NextFun
       expenseLogId = log._id;
     } else if (expenseLogId) {
       await ExpenseLog.findByIdAndDelete(expenseLogId);
+      await releaseCheque(expenseLogId);
       expenseLogId = undefined;
     }
 
@@ -556,7 +581,10 @@ export const deleteVendorTxn = async (req: Request, res: Response, next: NextFun
   try {
     const txn = await VendorTxn.findById(req.params.txnId);
     if (!txn) return fail(res, 'Entry not found', 404);
-    if (txn.expenseLogId) await ExpenseLog.findByIdAndDelete(txn.expenseLogId);
+    if (txn.expenseLogId) {
+      await ExpenseLog.findByIdAndDelete(txn.expenseLogId);
+      await releaseCheque(txn.expenseLogId);
+    }
     await VendorTxn.findByIdAndDelete(txn._id);
     await VendorAccount.findByIdAndUpdate(txn.vendorId, { $inc: { balance: -vendorBalanceDelta(txn.type, txn.amount) } });
     return ok(res, { _id: txn._id }, 'Entry deleted');
@@ -655,17 +683,61 @@ const scheduleMap = (rows?: { month: string; vendorId: string; amount: number }[
   return out;
 };
 
-/** The owner's schedule plus what was actually paid to each vendor in those months. */
+/**
+ * The repayment schedule, what was actually paid to each vendor in those months, and pending
+ * cheques to vendors by the month they are dated (planned payments on top of the schedule).
+ */
 export const getSchedule = async (_req: Request, res: Response, next: NextFunction) => {
   try {
     const doc = await LedgerSetting.findOne({});
     const schedule = scheduleMap(doc?.schedule);
-    const now = new Date();
-    const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const thisMonth = monthKeyOf(new Date());
     const months = [...new Set([thisMonth, ...Object.keys(schedule)])].sort();
     const [y, m] = months[0].split('-').map(Number);
-    const txns = await VendorTxn.find({ date: { $gte: new Date(y, m - 1, 1) } });
-    return ok(res, { schedule, paid: paidByMonth(txns), thisMonth });
+    const [txns, pending] = await Promise.all([
+      VendorTxn.find({ date: { $gte: new Date(y, m - 1, 1) } }),
+      Cheque.find({ status: 'pending' }),
+    ]);
+    return ok(res, { schedule, paid: paidByMonth(txns), cheques: chequesByMonth(pending), thisMonth });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Makes the month-by-month repayment schedule from next month on: the fixed monthly repayment split
+ * across vendors by what they owe, after pending cheques. Replaces the schedule from next month on;
+ * earlier months are kept.
+ */
+export const generateSchedule = async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const settings = await loadSettings();
+    if (!(settings.repaymentBudget > 0)) return fail(res, 'Save a monthly repayment amount first', 400);
+    const startMonth = addMonthKey(monthKeyOf(new Date()), 1);
+    const [vendors, pending, doc] = await Promise.all([
+      VendorAccount.find({}),
+      Cheque.find({ status: 'pending' }),
+      LedgerSetting.findOne({}),
+    ]);
+    const generated = buildRepaymentSchedule(vendors, settings.repaymentBudget, startMonth, chequesByMonth(pending));
+    const rows = [...(doc?.schedule ?? []).filter((r) => r.month < startMonth), ...generated];
+
+    if (doc) await LedgerSetting.findByIdAndUpdate(doc._id, { $set: { schedule: rows } });
+    else await LedgerSetting.create({ ...DEFAULT_LEDGER_SETTING, schedule: rows });
+    return ok(res, { schedule: scheduleMap(rows) }, 'Schedule made');
+  } catch (error) {
+    next(error);
+  }
+};
+
+/** Clears the schedule from this month on; earlier months stay for the record. Cheques are untouched. */
+export const clearSchedule = async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const doc = await LedgerSetting.findOne({});
+    const thisMonth = monthKeyOf(new Date());
+    const rows = (doc?.schedule ?? []).filter((r) => r.month < thisMonth);
+    if (doc) await LedgerSetting.findByIdAndUpdate(doc._id, { $set: { schedule: rows } });
+    return ok(res, { schedule: scheduleMap(rows) }, 'Schedule cleared');
   } catch (error) {
     next(error);
   }
@@ -678,6 +750,8 @@ export const setScheduleAmount = async (req: Request, res: Response, next: NextF
     if (!isMonthKey(month)) return fail(res, 'month must be YYYY-MM', 400);
     if (typeof vendorId !== 'string' || !vendorId) return fail(res, 'vendorId is required', 400);
     if (!(typeof amount === 'number' && amount >= 0)) return fail(res, 'amount must be 0 or more', 400);
+    if (!isPaymentStep(amount))
+      return fail(res, `Plan payments in ₹${PAYMENT_STEP.toLocaleString('en-IN')} steps, or one payment under ₹${PAYMENT_STEP.toLocaleString('en-IN')}`, 400);
     if (!(await VendorAccount.findById(vendorId))) return fail(res, 'Vendor not found', 404);
 
     const doc = await LedgerSetting.findOne({});
@@ -708,20 +782,282 @@ export const listDailySavings = async (req: Request, res: Response, next: NextFu
   }
 };
 
-/** Sets what was kept on a day: { day, fixed, vendor, note? }. Re-saving a day replaces it. */
+/**
+ * Sets what was kept on a day: { day, fixed, vendor, fixedOnline?, vendorOnline?, note? }.
+ * fixedOnline / vendorOnline are the online (UPI / bank) part of each total; the rest is cash.
+ * Re-saving a day replaces it.
+ */
 export const saveDailySaving = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { day, fixed, vendor, note } = req.body ?? {};
+    const { day, fixed, vendor, fixedOnline = 0, vendorOnline = 0, note } = req.body ?? {};
     if (!isDayKey(day)) return fail(res, 'day must be YYYY-MM-DD', 400);
     const ok0 = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
     if (!ok0(fixed) || !ok0(vendor)) return fail(res, 'fixed and vendor must be 0 or more', 400);
+    if (!ok0(fixedOnline) || !ok0(vendorOnline)) return fail(res, 'fixedOnline and vendorOnline must be 0 or more', 400);
+    if (fixedOnline > fixed || vendorOnline > vendor) return fail(res, 'online part cannot be more than the total', 400);
 
-    const entry = { day, fixed: money(fixed), vendor: money(vendor), note: note || undefined };
+    const entry = {
+      day,
+      fixed: money(fixed),
+      vendor: money(vendor),
+      fixedOnline: money(fixedOnline),
+      vendorOnline: money(vendorOnline),
+      note: note || undefined,
+    };
     const existing = await DailySaving.findOne({ day });
     const saved = existing
       ? await DailySaving.findByIdAndUpdate(existing._id, { $set: entry }, { new: true })
       : await DailySaving.create(entry);
     return ok(res, saved, 'Saved');
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ─── Planned payments (cheques, dated UPI / bank / cash payments) ────────────
+
+const PLANNED_FIELDS = ['method', 'chequeNo', 'bank', 'amount', 'chequeDate', 'vendorId', 'billId', 'billPart', 'payee', 'category', 'note'] as const;
+
+/**
+ * Validated planned-payment fields from the request. `current` is the entry being edited (fields not
+ * sent keep its values). Cleared links come back as '' / null so the caller can $unset them.
+ */
+const parsePlanned = async (body: Record<string, unknown>, current?: ICheque): Promise<Record<string, unknown> | string> => {
+  const out: Record<string, unknown> = {};
+  const has = (k: string) => body[k] !== undefined;
+  const editing = !!current;
+
+  const method = has('method') ? body.method : current?.method ?? 'cheque';
+  if (!PLANNED_METHODS.includes(method as PlannedMethod)) return 'method must be cheque, upi, bank_transfer or cash';
+  if (!editing || has('method')) out.method = method;
+
+  if (method === 'cheque') {
+    const chequeNo = has('chequeNo') ? body.chequeNo : current?.chequeNo;
+    if (typeof chequeNo !== 'string' || !chequeNo.trim()) return 'Cheque number is required';
+    if (!editing || has('chequeNo')) out.chequeNo = chequeNo.trim();
+  } else if (has('chequeNo') || (editing && current?.chequeNo)) {
+    out.chequeNo = '';
+  }
+  if (!editing || has('amount')) {
+    if (!isAmount(body.amount)) return 'amount must be greater than 0';
+    out.amount = money(body.amount);
+  }
+  if (!editing || has('chequeDate')) {
+    const d = typeof body.chequeDate === 'string' && body.chequeDate ? parseDate(body.chequeDate) : null;
+    if (!d) return 'Payment date is required';
+    out.chequeDate = d;
+  }
+  if (has('bank')) out.bank = typeof body.bank === 'string' ? body.bank.trim() : '';
+  if (has('note')) out.note = typeof body.note === 'string' ? body.note.trim() : '';
+
+  // Pay to: a vendor (pays down their dues), a recurring / one-off bill (pays its cycle), or anyone else.
+  if (!editing || has('vendorId') || has('billId') || has('payee')) {
+    if (typeof body.vendorId === 'string' && body.vendorId) {
+      const vendor = await VendorAccount.findById(body.vendorId);
+      if (!vendor) return 'Vendor not found';
+      Object.assign(out, { vendorId: vendor._id, billId: '', billPart: null, payee: vendor.name, category: 'vendor' });
+    } else if (typeof body.billId === 'string' && body.billId) {
+      const bill = await RecurringBill.findById(body.billId);
+      if (!bill || bill.status === 'completed') return 'Bill not found or already paid';
+      const part = body.billPart === undefined || body.billPart === null || body.billPart === '' ? undefined : Number(body.billPart);
+      if (bill.parts?.length && (part === undefined || !bill.parts[part])) return 'Choose which part of the bill this pays';
+      const p = bill.parts?.length && part !== undefined ? bill.parts[part] : undefined;
+      Object.assign(out, {
+        billId: bill._id,
+        billPart: p ? part : null,
+        vendorId: '',
+        payee: p ? `${bill.name} · ${p.label}` : bill.name,
+        category: bill.category,
+      });
+    } else {
+      if (typeof body.payee !== 'string' || !body.payee.trim()) return 'Choose a vendor or bill, or type who this is for';
+      const category = body.category ?? 'running';
+      if (!isCategory(category)) return 'Invalid category';
+      Object.assign(out, { vendorId: '', billId: '', billPart: null, payee: body.payee.trim(), category });
+    }
+  } else if (has('category') && !current?.vendorId && !current?.billId) {
+    if (!isCategory(body.category)) return 'Invalid category';
+    out.category = body.category;
+  }
+  return out;
+};
+
+/** Splits parsed fields into $set and $unset ('' / null mean "remove"). */
+const toUpdate = (fields: Record<string, unknown>) => {
+  const $set: Record<string, unknown> = {};
+  const $unset: Record<string, ''> = {};
+  for (const [k, v] of Object.entries(fields)) {
+    if (v === '' || v === null) $unset[k] = '';
+    else $set[k] = v;
+  }
+  return { $set, $unset };
+};
+
+/** Planned payments, earliest date first; ?status= narrows to one status. */
+export const listCheques = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const status = req.query.status as string | undefined;
+    const cheques = await Cheque.find(status ? { status } : {});
+    return ok(res, cheques.sort((a, b) => new Date(a.chequeDate).getTime() - new Date(b.chequeDate).getTime()));
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const createCheque = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const fields = await parsePlanned(req.body ?? {});
+    if (typeof fields === 'string') return fail(res, fields, 400);
+    const cheque = await Cheque.create({ ...toUpdate(fields).$set, status: 'pending' } as unknown as ICheque);
+    return ok(res, cheque, 'Payment planned', 201);
+  } catch (error) {
+    next(error);
+  }
+};
+
+/** Edits a planned payment that has not been paid. */
+export const updateCheque = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const cheque = await Cheque.findById(req.params.id);
+    if (!cheque) return fail(res, 'Planned payment not found', 404);
+    if (cheque.status === 'cleared') return fail(res, 'This payment is done. Undo it first, then edit.', 400);
+    const body = Object.fromEntries(PLANNED_FIELDS.filter((k) => req.body?.[k] !== undefined).map((k) => [k, req.body[k]]));
+    const fields = await parsePlanned(body, cheque);
+    if (typeof fields === 'string') return fail(res, fields, 400);
+    const { $set, $unset } = toUpdate(fields);
+    const saved = await Cheque.findByIdAndUpdate(cheque._id, Object.keys($unset).length ? { $set, $unset } : { $set }, { new: true });
+    return ok(res, saved, 'Planned payment updated');
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * The planned payment went out (cheque encashed, UPI sent…): it becomes an expense-log entry. A vendor
+ * payment also goes on the vendor's ledger; a bill payment is paid against the bill's current cycle.
+ */
+export const clearCheque = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const cheque = await Cheque.findById(req.params.id);
+    if (!cheque) return fail(res, 'Planned payment not found', 404);
+    if (cheque.status !== 'pending') return fail(res, `This payment is ${cheque.status}`, 400);
+    const date = parseDate(req.body?.date);
+    if (!date) return fail(res, 'Invalid date', 400);
+    const method: PlannedMethod = cheque.method ?? 'cheque';
+    const how = method === 'cheque' ? `Cheque #${cheque.chequeNo}${cheque.bank ? ` · ${cheque.bank}` : ''}` : `Planned ${METHOD_LABEL[method]}`;
+    const note = `${how}${cheque.note ? ` · ${cheque.note}` : ''}`;
+
+    let logId: string;
+    if (cheque.vendorId) {
+      const vendor = await VendorAccount.findById(cheque.vendorId);
+      if (!vendor) return fail(res, 'The vendor on this payment no longer exists. Edit it first.', 400);
+      const txn = await VendorTxn.create({
+        vendorId: vendor._id,
+        vendorName: vendor.name,
+        date,
+        type: 'pay',
+        amount: cheque.amount,
+        note,
+        paymentMethod: method,
+      });
+      const log = await ExpenseLog.create({
+        date,
+        category: 'vendor',
+        amount: cheque.amount,
+        note,
+        paymentMethod: method,
+        chequeId: cheque._id,
+        source: { kind: 'vendor', id: vendor._id, name: vendor.name, txnId: txn._id },
+      });
+      await VendorTxn.findByIdAndUpdate(txn._id, { $set: { expenseLogId: log._id } });
+      await VendorAccount.findByIdAndUpdate(vendor._id, { $inc: { balance: -cheque.amount } });
+      logId = log._id;
+    } else if (cheque.billId) {
+      const bill = await RecurringBill.findById(cheque.billId);
+      if (!bill) return fail(res, 'The bill on this payment no longer exists. Edit it first.', 400);
+      const state = recurringState(bill);
+      const r = applyRecurringPayment(state, cheque.amount, cheque.billPart ?? undefined);
+      if ('error' in r) return fail(res, r.error, 400);
+      const log = await ExpenseLog.create({
+        date,
+        category: bill.category,
+        amount: cheque.amount,
+        note: `${cheque.payee} · ${note}`,
+        paymentMethod: method,
+        scope: bill.scope ?? 'business',
+        chequeId: cheque._id,
+        source: {
+          kind: 'recurring',
+          id: bill._id,
+          name: bill.name,
+          cycle: state.cycle,
+          completedInstallment: !!r.completedInstallment,
+          part: cheque.billPart ?? undefined,
+        },
+      });
+      await RecurringBill.findByIdAndUpdate(bill._id, { $set: r.state });
+      logId = log._id;
+    } else {
+      const log = await ExpenseLog.create({
+        date,
+        category: cheque.category,
+        amount: cheque.amount,
+        note: `${cheque.payee} · ${note}`,
+        paymentMethod: method,
+        chequeId: cheque._id,
+      });
+      logId = log._id;
+    }
+    const saved = await Cheque.findByIdAndUpdate(
+      cheque._id,
+      { $set: { status: 'cleared', clearedOn: date, expenseLogId: logId } },
+      { new: true },
+    );
+    return ok(res, saved, method === 'cheque' ? 'Cheque cleared' : 'Payment done');
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Bounced (cheques) / cancelled / back to pending. Moving a paid entry to bounced or pending undoes
+ * its payment (expense entry, vendor payment or bill payment).
+ */
+export const setChequeStatus = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const cheque = await Cheque.findById(req.params.id);
+    if (!cheque) return fail(res, 'Planned payment not found', 404);
+    const status = req.body?.status as ChequeStatus;
+    if (!['pending', 'bounced', 'cancelled'].includes(status)) return fail(res, 'status must be pending, bounced or cancelled', 400);
+    if (status === 'bounced' && (cheque.method ?? 'cheque') !== 'cheque') return fail(res, 'Only cheques can bounce', 400);
+    if (status === cheque.status) return ok(res, cheque, 'No change');
+
+    if (cheque.status === 'cleared') {
+      if (status === 'cancelled') return fail(res, 'A paid entry cannot be cancelled. Undo it first.', 400);
+      const log = cheque.expenseLogId ? await ExpenseLog.findById(cheque.expenseLogId) : null;
+      if (log) {
+        const error = await undoExpenseLog(log);
+        if (error) return fail(res, error, 400);
+      }
+    }
+    const saved = await Cheque.findByIdAndUpdate(
+      cheque._id,
+      { $set: { status }, $unset: { expenseLogId: '', clearedOn: '' } },
+      { new: true },
+    );
+    return ok(res, saved, status === 'pending' ? 'Planned again' : `Marked ${status}`);
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const deleteCheque = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const cheque = await Cheque.findById(req.params.id);
+    if (!cheque) return fail(res, 'Planned payment not found', 404);
+    if (cheque.status === 'cleared') return fail(res, 'This payment is done. Undo it first.', 400);
+    await Cheque.findByIdAndDelete(cheque._id);
+    return ok(res, { _id: cheque._id }, 'Planned payment deleted');
   } catch (error) {
     next(error);
   }

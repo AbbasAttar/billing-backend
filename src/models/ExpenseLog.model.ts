@@ -1,7 +1,8 @@
 import { createFirestoreModel, BaseDoc } from '../lib/firestoreModel';
 
 export const EXPENSE_LOG_CATEGORIES = ['home', 'staff_snacks', 'fitting', 'vendor', 'utility', 'running'] as const;
-export const EXPENSE_LOG_METHODS = ['cash', 'upi', 'card', 'bank_transfer'] as const;
+/** cheque: set by clearing a logged cheque (see Cheque.model), not picked by hand */
+export const EXPENSE_LOG_METHODS = ['cash', 'upi', 'card', 'bank_transfer', 'cheque'] as const;
 
 export type ExpenseLogCategory = typeof EXPENSE_LOG_CATEGORIES[number];
 export type ExpenseLogMethod = typeof EXPENSE_LOG_METHODS[number];
@@ -32,6 +33,8 @@ export interface IExpenseLog extends BaseDoc {
   source?: ExpenseLogSource;
   /** personal / business, copied from the bill a payment was made against */
   scope?: 'business' | 'personal';
+  /** the cheque this entry was written for when it cleared; deleting the entry puts the cheque back to pending */
+  chequeId?: string;
   /** _id of the old `expenses` document this entry was copied from (importOldExpenses script) */
   importedFrom?: string;
   createdAt?: Date;

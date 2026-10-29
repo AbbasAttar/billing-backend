@@ -34,6 +34,9 @@ export interface PublicProductVariant {
   label: string;
   sellPrice: number;
   stock: number;
+  /** Series products: pick the size, then the type. */
+  typeName?: string;
+  size?: string;
 }
 
 export interface PublicProductAtarSize {
@@ -127,7 +130,10 @@ function fragranceToPublic(f: IFragrance): PublicProduct {
   // Only options ticked "online"; cost and wholesale price never leave the admin.
   const online = (f.variants ?? []).filter((v) => v.online !== false && v.sellPrice > 0);
   const variants: PublicProductVariant[] | undefined =
-    online.length > 0 ? online.map((v) => ({ label: v.label, sellPrice: v.sellPrice, stock: v.stock })) : undefined;
+    online.length > 0 ? online.map((v) => ({
+      label: v.label, sellPrice: v.sellPrice, stock: v.stock,
+      ...(v.typeName && v.size ? { typeName: v.typeName, size: v.size } : {}),
+    })) : undefined;
   const fromPrice = online.length > 0 ? Math.min(...online.map((v) => v.sellPrice)) : undefined;
   return {
     id: (f._id as any).toString(),

@@ -24,6 +24,14 @@ import {
   vendorSummary,
   getSchedule,
   setScheduleAmount,
+  generateSchedule,
+  clearSchedule,
+  listCheques,
+  createCheque,
+  updateCheque,
+  clearCheque,
+  setChequeStatus,
+  deleteCheque,
   listDailySavings,
   saveDailySaving,
 } from '../controllers/expenseLedger.controller';
@@ -57,6 +65,15 @@ router.put('/settings', updateLedgerSettings);
 router.get('/vendor-summary', vendorSummary);
 router.get('/schedule', getSchedule);
 router.put('/schedule', setScheduleAmount);
+router.post('/schedule/generate', generateSchedule);
+router.delete('/schedule', clearSchedule);
+
+router.get('/cheques', listCheques);
+router.post('/cheques', createCheque);
+router.put('/cheques/:id', updateCheque);
+router.post('/cheques/:id/clear', clearCheque);
+router.post('/cheques/:id/status', setChequeStatus);
+router.delete('/cheques/:id', deleteCheque);
 router.get('/daily-savings', listDailySavings);
 router.put('/daily-savings', saveDailySaving);
 

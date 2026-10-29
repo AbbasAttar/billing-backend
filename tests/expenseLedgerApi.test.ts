@@ -58,12 +58,13 @@ const fake = vi.hoisted(() => {
       },
     };
   };
-  return { ExpenseLog: model(), RecurringBill: model(), VendorAccount: model(), VendorTxn: model(), LedgerSetting: model(), DailySaving: model() };
+  return { ExpenseLog: model(), RecurringBill: model(), VendorAccount: model(), VendorTxn: model(), LedgerSetting: model(), DailySaving: model(), Cheque: model() };
 });
 
 vi.mock('../src/models/ExpenseLog.model', async (orig) => ({ ...(await orig<any>()), ExpenseLog: fake.ExpenseLog }));
 vi.mock('../src/models/RecurringBill.model', async (orig) => ({ ...(await orig<any>()), RecurringBill: fake.RecurringBill }));
 vi.mock('../src/models/DailySaving.model', () => ({ DailySaving: fake.DailySaving }));
+vi.mock('../src/models/Cheque.model', async (orig) => ({ ...(await orig<any>()), Cheque: fake.Cheque }));
 vi.mock('../src/models/LedgerSetting.model', async (orig) => ({ ...(await orig<any>()), LedgerSetting: fake.LedgerSetting }));
 vi.mock('../src/models/VendorAccount.model', async (orig) => ({
   ...(await orig<any>()),
@@ -240,7 +241,8 @@ describe('ledger API', () => {
   it('owner schedule: set, clear and read back with actual payments', async () => {
     const v = (await api.post('/vendors', { name: 'Tulsi', category: 'frame', openingBalance: 30000 })).body.data;
     expect((await api.put('/schedule', { month: '2026-11', vendorId: v._id, amount: 10000 })).status).toBe(200);
-    await api.put('/schedule', { month: '2026-12', vendorId: v._id, amount: 8000 });
+    await api.put('/schedule', { month: '2026-12', vendorId: v._id, amount: 15000 });
+    expect((await api.put('/schedule', { month: '2026-12', vendorId: v._id, amount: 12300 })).status).toBe(400);
     await api.put('/schedule', { month: '2026-12', vendorId: v._id, amount: 0 });
     expect((await api.put('/schedule', { month: 'Nov', vendorId: v._id, amount: 1 })).status).toBe(400);
     expect((await api.put('/schedule', { month: '2026-11', vendorId: 'nope', amount: 1 })).status).toBe(404);
@@ -275,5 +277,85 @@ describe('ledger API', () => {
       ['2026-10-26', 2000, 1700],
       ['2026-10-25', 2250, 0],
     ]);
+  });
+
+  it('cheques: planned until cleared, then a vendor payment; bounce and log delete undo it', async () => {
+    const v = (await api.post('/vendors', { name: 'Tulsi', category: 'frame', openingBalance: 30000 })).body.data;
+    expect((await api.post('/cheques', { chequeNo: '', amount: 5000, chequeDate: '2026-11-10' })).status).toBe(400);
+    const c = (await api.post('/cheques', { chequeNo: '000123', bank: 'SBI', amount: 5000, chequeDate: '2026-11-10', vendorId: v._id })).body.data;
+    expect(c).toMatchObject({ status: 'pending', payee: 'Tulsi', category: 'vendor' });
+    expect((await api.get('/schedule')).body.data.cheques).toEqual({ '2026-11': { [v._id]: 5000 } });
+    expect((await api.get('/logs')).body.data).toHaveLength(0);
+
+    const cleared = (await api.post(`/cheques/${c._id}/clear`, { date: '2026-11-11' })).body.data;
+    expect(cleared.status).toBe('cleared');
+    expect(fake.VendorAccount.rows.get(v._id).balance).toBe(25000);
+    const [log] = (await api.get('/logs')).body.data;
+    expect(log).toMatchObject({ amount: 5000, category: 'vendor', paymentMethod: 'cheque', chequeId: c._id });
+    expect((await api.post(`/cheques/${c._id}/clear`)).status).toBe(400);
+    expect((await api.del(`/cheques/${c._id}`)).status).toBe(400);
+
+    // Bounced after clearing: payment undone, dues back.
+    expect((await api.post(`/cheques/${c._id}/status`, { status: 'bounced' })).body.data.status).toBe('bounced');
+    expect(fake.VendorAccount.rows.get(v._id).balance).toBe(30000);
+    expect((await api.get('/logs')).body.data).toHaveLength(0);
+
+    // Re-presented and cleared again, then its expense entry deleted: back to pending.
+    await api.post(`/cheques/${c._id}/status`, { status: 'pending' });
+    await api.post(`/cheques/${c._id}/clear`);
+    const [log2] = (await api.get('/logs')).body.data;
+    await api.del(`/logs/${log2._id}`);
+    expect(fake.Cheque.rows.get(c._id).status).toBe('pending');
+    expect(fake.VendorAccount.rows.get(v._id).balance).toBe(30000);
+  });
+
+  it('cheques to others clear into their expense category', async () => {
+    const c = (await api.post('/cheques', { chequeNo: '77', amount: 12000, chequeDate: '2026-11-01', payee: 'Landlord', category: 'utility' })).body.data;
+    await api.post(`/cheques/${c._id}/clear`);
+    const [log] = (await api.get('/logs')).body.data;
+    expect(log).toMatchObject({ category: 'utility', amount: 12000, paymentMethod: 'cheque' });
+    expect(log.source).toBeUndefined();
+  });
+
+  it('planned UPI to a split bill pays that part of the cycle; undo puts it back', async () => {
+    const bill = (
+      await api.post('/recurring', {
+        name: 'Rent',
+        kind: 'ongoing',
+        category: 'utility',
+        parts: [
+          { label: 'Cash', method: 'cash', amount: 12500 },
+          { label: 'Online', method: 'upi', amount: 12500 },
+        ],
+      })
+    ).body.data;
+    expect((await api.post('/cheques', { method: 'upi', amount: 12500, chequeDate: '2026-11-05', billId: bill._id })).status).toBe(400);
+    const p = (await api.post('/cheques', { method: 'upi', amount: 12500, chequeDate: '2026-11-05', billId: bill._id, billPart: 1 })).body.data;
+    expect(p).toMatchObject({ method: 'upi', payee: 'Rent · Online', category: 'utility', status: 'pending' });
+    expect(p.chequeNo).toBeUndefined();
+    expect((await api.post(`/cheques/${p._id}/status`, { status: 'bounced' })).status).toBe(400);
+
+    await api.post(`/cheques/${p._id}/clear`, { date: '2026-11-05' });
+    expect(fake.RecurringBill.rows.get(bill._id).dueRemaining).toBe(12500);
+    const [log] = (await api.get('/logs')).body.data;
+    expect(log).toMatchObject({ paymentMethod: 'upi', category: 'utility', source: { kind: 'recurring', part: 1 } });
+
+    await api.post(`/cheques/${p._id}/status`, { status: 'pending' });
+    expect(fake.RecurringBill.rows.get(bill._id).dueRemaining).toBe(25000);
+    expect((await api.get('/logs')).body.data).toHaveLength(0);
+  });
+
+  it('makes the monthly schedule from the repayment amount', async () => {
+    expect((await api.post('/schedule/generate')).status).toBe(400);
+    const v = (await api.post('/vendors', { name: 'Tulsi', category: 'frame', openingBalance: 30000 })).body.data;
+    await api.put('/settings', { repaymentBudget: 10000 });
+    const { schedule } = (await api.post('/schedule/generate')).body.data;
+    const months = Object.keys(schedule).sort();
+    expect(months).toHaveLength(3);
+    expect(months.map((m) => schedule[m][v._id])).toEqual([10000, 10000, 10000]);
+
+    // Clearing drops this month on; a past month stays.
+    await api.put('/schedule', { month: '2020-01', vendorId: v._id, amount: 500 });
+    expect((await api.del('/schedule')).body.data.schedule).toEqual({ '2020-01': { [v._id]: 500 } });
   });
 });

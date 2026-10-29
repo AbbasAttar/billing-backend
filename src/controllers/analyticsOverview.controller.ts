@@ -39,7 +39,7 @@ async function expenseLogIn(from: Date, to: Date) {
 }
 
 /**
- * GET /analytics/overview?period=mtd|last_month|30d|90d — the main analytics page: KPIs with the
+ * GET /analytics/overview?period=mtd|last_month|30d|90d|month:YYYY-MM|fy:YYYY — the main analytics page: KPIs with the
  * comparison period, target progress, what needs attention, daily sales, category mix, cash in/out
  * (stock purchases apart from running costs) and customers.
  */

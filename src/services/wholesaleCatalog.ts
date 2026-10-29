@@ -27,7 +27,7 @@ const bareUnit = (u?: string) => (u ?? '').replace(/^per\s+/i, '').trim() || 'un
 
 /**
  * How many stock units one wholesale unit takes. Same unit = 1; "100ml" of an attar counted in tolas
- * (12 ml) = 100 / 12. Unknown pairs count 1 : 1.
+ * (12 ml) = 100 / 12; loose attar sold by weight ("25g") counts 10 g to the tola. Unknown pairs count 1 : 1.
  */
 export function stockPerWholesaleUnit(wholesaleUnit: string | undefined, stockUnit: string): number {
   const w = bareUnit(wholesaleUnit).toLowerCase();
@@ -35,6 +35,8 @@ export function stockPerWholesaleUnit(wholesaleUnit: string | undefined, stockUn
   if (w === s) return 1;
   const ml = /^(\d+(?:\.\d+)?)\s*ml$/.exec(w);
   if (ml && s === 'tola') return Number(ml[1]) / 12;
+  const g = /^(\d+(?:\.\d+)?)\s*(?:g|gm|gms|gram|grams)$/.exec(w);
+  if (g && s === 'tola') return Number(g[1]) / 10;
   if (w === 'tola' && s === 'ml') return 12;
   return 1;
 }
@@ -45,6 +47,8 @@ export interface WholesaleEntry {
   optionLabel: string | null;
   name: string;
   companyName: string;
+  /** Wholesale company id (the page's company filter matches on it). */
+  companyId: string | null;
   type: string;
   unit: string;
   costPrice: number | null;
@@ -79,6 +83,7 @@ function entryFrom(f: IFragrance & { _id: unknown }, v: IFragranceVariant | null
     optionLabel: v?.label ?? null,
     name: v ? `${f.name} · ${v.label}` : f.name,
     companyName: f.companyName ?? '',
+    companyId: f.companyId ?? null,
     type: f.type,
     unit: bareUnit(offer.unit),
     costPrice: cost && cost > 0 ? round2(cost * per) : null,

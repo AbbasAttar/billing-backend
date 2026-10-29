@@ -171,3 +171,100 @@ export function paidByMonth(txns: { vendorId: string; type: VendorTxnType; amoun
 
 /** YYYY-MM-DD day key. */
 export const isDayKey = (v: unknown): v is string => typeof v === 'string' && /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(v);
+
+/** YYYY-MM key `n` months after `ym`. */
+export function addMonthKey(ym: string, n: number): string {
+  const [y, m] = ym.split('-').map(Number);
+  const d = new Date(y, m - 1 + n, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+/** YYYY-MM key of a date (local time). */
+export const monthKeyOf = (date: Date | string) => {
+  const d = new Date(date);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+};
+
+/** Pending cheques to vendors per month per vendor, the schedule's shape. */
+export function chequesByMonth(cheques: { vendorId?: string; amount: number; chequeDate: Date | string }[]) {
+  const out: Record<string, Record<string, number>> = {};
+  for (const c of cheques) {
+    if (!c.vendorId) continue;
+    const k = monthKeyOf(c.chequeDate);
+    out[k] ??= {};
+    out[k][c.vendorId] = money((out[k][c.vendorId] ?? 0) + c.amount);
+  }
+  return out;
+}
+
+/** Scheduled payments go in steps of this much; dues below it are paid off in one go. */
+export const PAYMENT_STEP = 5000;
+
+/** A scheduled amount is valid in ₹5,000 steps, or as a single payment under ₹5,000. */
+export const isPaymentStep = (amount: number) => amount < PAYMENT_STEP || amount % PAYMENT_STEP === 0;
+
+/**
+ * Month-by-month plan that clears old vendor dues at the fixed monthly repayment, from `startMonth`
+ * until every vendor is cleared (at most `maxMonths`).
+ *
+ * Pending cheques are payments already promised: they come off the vendor's dues and take their
+ * month's budget first. Then, each month:
+ *  1. dues under ₹5,000 are paid off in one go (smallest first, while the budget lasts);
+ *  2. the rest of the budget goes out in ₹5,000 steps, shared by what each vendor still owes
+ *     (largest remainder first), never more steps than a vendor's dues hold.
+ * A vendor's odd remainder under ₹5,000 is paid off in a later month by step 1. Budget left over
+ * that does not make a whole step is not scheduled.
+ *
+ * Rows hold only the new (non-cheque) payments.
+ */
+export function buildRepaymentSchedule(
+  vendors: { _id: string; balance: number }[],
+  monthlyBudget: number,
+  startMonth: string,
+  cheques: Record<string, Record<string, number>> = {},
+  maxMonths = 60,
+): { month: string; vendorId: string; amount: number }[] {
+  const left = new Map(vendors.filter((v) => v.balance > 0).map((v) => [v._id, money(v.balance)]));
+  for (const byVendor of Object.values(cheques))
+    for (const [id, amount] of Object.entries(byVendor))
+      if (left.has(id)) left.set(id, money(Math.max(0, left.get(id)! - amount)));
+
+  const rows: { month: string; vendorId: string; amount: number }[] = [];
+  for (let i = 0; i < maxMonths; i++) {
+    const owing = [...left].filter(([, a]) => a > 0.5).sort((a, b) => a[1] - b[1]);
+    if (!owing.length) break;
+    const month = addMonthKey(startMonth, i);
+    const promised = Object.values(cheques[month] ?? {}).reduce((t, a) => t + a, 0);
+    let budget = money(Math.max(0, monthlyBudget - promised));
+    const pay = (id: string, amount: number) => {
+      rows.push({ month, vendorId: id, amount });
+      left.set(id, money(left.get(id)! - amount));
+      budget = money(budget - amount);
+    };
+
+    // 1. Small dues in one go.
+    for (const [id, owed] of owing) if (owed < PAYMENT_STEP && owed <= budget) pay(id, owed);
+
+    // 2. Whole steps, shared by what is owed (largest-remainder rounding), capped per vendor.
+    const big = owing.filter(([id]) => left.get(id)! >= PAYMENT_STEP).map(([id]) => ({ id, owed: left.get(id)! }));
+    const cap = (o: { owed: number }) => Math.floor(o.owed / PAYMENT_STEP);
+    let steps = Math.min(Math.floor(budget / PAYMENT_STEP), big.reduce((t, o) => t + cap(o), 0));
+    const owedTotal = big.reduce((t, o) => t + o.owed, 0);
+    const given = big.map((o) => {
+      const exact = (steps * o.owed) / owedTotal;
+      return { ...o, n: Math.min(cap(o), Math.floor(exact)), frac: exact - Math.floor(exact) };
+    });
+    steps -= given.reduce((t, g) => t + g.n, 0);
+    // Leftover steps: biggest fraction first, then biggest dues, while a vendor has room.
+    const order = [...given].sort((a, b) => b.frac - a.frac || b.owed - a.owed);
+    while (steps > 0) {
+      const g = order.find((x) => x.n < cap(x));
+      if (!g) break;
+      g.n++;
+      steps--;
+      order.push(order.splice(order.indexOf(g), 1)[0]);
+    }
+    for (const g of given) if (g.n > 0) pay(g.id, g.n * PAYMENT_STEP);
+  }
+  return rows;
+}
