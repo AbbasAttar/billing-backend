@@ -15,13 +15,21 @@ const sumPaid = (payments: any[] = []) =>
 const withBrand = (brand?: string, name?: string) =>
   brand && name && !name.toLowerCase().startsWith(brand.toLowerCase()) ? `${brand} ${name}` : name || brand || '';
 
+/** "BB Progressive lens": brand and name, without the "Local" brand, ending in "lens". */
+const lensName = (it: any): string => {
+  const name = withBrand(
+    it.opticalLens?.brand || it.lensBrand,
+    it.opticalLens?.web?.displayName || it.opticalLens?.name || it.lensName || it.lensLabel,
+  ).replace(/\blocal\b/gi, '').replace(/\s+/g, ' ').trim() || 'Lens';
+  return /\blens(es)?\b/i.test(name) ? name : `${name} lens`;
+};
+
 const itemName = (it: any): string =>
   it.itemName ||
   it.frame?.web?.displayName || withBrand(it.frame?.companyName, it.frame?.name) ||
   it.fragrance?.web?.displayName || withBrand(it.fragrance?.companyName, it.fragrance?.name) ||
-  it.opticalLens?.web?.displayName || it.opticalLens?.name ||
-  [it.lensBrand, it.lensName].filter(Boolean).join(' ').replace(/\blocal\b/gi, '').trim() ||
-  it.lensLabel || 'Item';
+  (it.opticalLens || it.lensBrand || it.lensName || it.lensLabel ? lensName(it) : '') ||
+  'Item';
 
 const itemType = (it: any) =>
   it.frame ? 'frame' : it.fragrance ? 'fragrance' : it.opticalLens || it.lensName || it.lensBrand ? 'lens' : 'other';
@@ -49,7 +57,7 @@ export const getPublicBill = async (req: Request, res: Response, next: NextFunct
           path: 'items',
           populate: [
             { path: 'frame', select: 'web.displayName name companyName' },
-            { path: 'opticalLens', select: 'web.displayName name' },
+            { path: 'opticalLens', select: 'web.displayName name brand' },
             { path: 'fragrance', select: 'web.displayName name companyName' },
           ],
         })
@@ -70,15 +78,20 @@ export const getPublicBill = async (req: Request, res: Response, next: NextFunct
         invoiceNumber: invoice.invoiceNumber ?? String(invoice._id).slice(-6),
         billDate: invoice.billDate ?? invoice.createdAt ?? null,
         firstName: name.trim().split(/\s+/)[0] ?? '',
-        items: (invoice.items ?? []).map((it: any) => ({
-          name: itemName(it),
-          type: itemType(it),
-          quantity: it.quantity ?? 1,
-          price: it.price ?? 0,
-          details: it.lensName
-            ? [it.lensIndex, it.lensCoating].filter(Boolean).join(' · ') || null
-            : it.fragranceGrade || it.frameVariantLabel || null,
-        })),
+        items: (invoice.items ?? []).map((it: any) => {
+          const type = itemType(it);
+          return {
+            name: itemName(it),
+            type,
+            quantity: it.quantity ?? 1,
+            price: it.price ?? 0,
+            details: type === 'lens'
+              ? [it.lensIndex, it.lensCoating].filter(Boolean).join(' · ') || null
+              : it.fragranceGrade || it.frameVariantLabel || null,
+            // Whose lens it is (a child on the parent's bill, say); defaults to the customer, as on the WhatsApp bill.
+            wearer: type === 'lens' ? it.userName?.trim() || name.trim() || null : null,
+          };
+        }),
         subtotal: invoice.subtotal ?? total,
         discount: invoice.discount ?? 0,
         returnCredit: invoice.returnCredit ?? 0,
