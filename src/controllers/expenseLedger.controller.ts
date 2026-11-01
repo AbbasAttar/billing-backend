@@ -743,14 +743,19 @@ export const clearSchedule = async (_req: Request, res: Response, next: NextFunc
   }
 };
 
-/** Sets one cell of the schedule: { month: 'YYYY-MM', vendorId, amount } (0 clears it). */
+/**
+ * Sets one cell of the schedule: { month: 'YYYY-MM', vendorId, amount } (0 clears it). `amount` is
+ * on top of that vendor's pending planned payments dated in the month; the step rule is met by
+ * either the amount or the month's total with the planned payments.
+ */
 export const setScheduleAmount = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { month, vendorId, amount } = req.body ?? {};
     if (!isMonthKey(month)) return fail(res, 'month must be YYYY-MM', 400);
     if (typeof vendorId !== 'string' || !vendorId) return fail(res, 'vendorId is required', 400);
     if (!(typeof amount === 'number' && amount >= 0)) return fail(res, 'amount must be 0 or more', 400);
-    if (!isPaymentStep(amount))
+    const planned = chequesByMonth(await Cheque.find({ status: 'pending', vendorId }))[month]?.[vendorId] ?? 0;
+    if (!isPaymentStep(amount) && !isPaymentStep(money(amount + planned)))
       return fail(res, `Plan payments in ₹${PAYMENT_STEP.toLocaleString('en-IN')} steps, or one payment under ₹${PAYMENT_STEP.toLocaleString('en-IN')}`, 400);
     if (!(await VendorAccount.findById(vendorId))) return fail(res, 'Vendor not found', 404);
 
