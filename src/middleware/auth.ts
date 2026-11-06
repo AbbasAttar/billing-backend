@@ -9,6 +9,8 @@ export type { StaffRole } from './accessPolicy';
 export interface StaffUser {
   uid: string;
   email?: string;
+  /** Display name from the Google account, when it has one. */
+  name?: string;
   role: StaffRole;
 }
 
@@ -28,6 +30,13 @@ function bearerToken(req: Request): string | null {
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer ')) return null;
   return header.slice(7).trim() || null;
+}
+
+/** Display name for a staff email: STAFF_NAMES (full email, then the part before @), else none. */
+export function staffNameFor(email?: string): string | undefined {
+  if (!email) return undefined;
+  const e = email.toLowerCase();
+  return env.STAFF_NAMES.get(e) ?? env.STAFF_NAMES.get(e.split('@')[0]);
 }
 
 /** admin > staff. */
@@ -59,7 +68,8 @@ async function resolveStaffUser(req: Request): Promise<Resolved> {
     const role = roleFor(decoded);
     const email = decoded.email?.toLowerCase();
     if (!role) return { status: 403, reason: `${email ?? decoded.uid} is not an admin or staff user` };
-    return { user: { uid: decoded.uid, email, role } };
+    const name = staffNameFor(email) ?? (typeof decoded.name === 'string' && decoded.name.trim() ? decoded.name.trim() : undefined);
+    return { user: { uid: decoded.uid, email, role, ...(name ? { name } : {}) } };
   } catch {
     return { status: 401, reason: 'invalid or expired ID token' };
   }

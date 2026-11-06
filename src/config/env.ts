@@ -3,6 +3,16 @@ import dotenv from 'dotenv';
 const emailList = (v: string | undefined) =>
   (v ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 
+/** "email-or-name-before-@=Display Name,…" → map keyed by lower-case email or email prefix. */
+const nameMap = (v: string | undefined) =>
+  new Map(
+    (v ?? '')
+      .split(',')
+      .map((pair) => pair.split('='))
+      .filter(([k, n]) => k?.trim() && n?.trim())
+      .map(([k, n]) => [k.trim().toLowerCase(), n.trim()] as [string, string]),
+  );
+
 // Tests must never pick up real secrets or Firebase credentials from .env.
 if (!process.env.VITEST) dotenv.config({ override: true });
 
@@ -34,6 +44,8 @@ export const env = {
   // The `role` custom claim ("admin" | "staff") or legacy `admin: true` claim also work.
   ADMIN_EMAILS: emailList(process.env.ADMIN_EMAILS),
   STAFF_EMAILS: emailList(process.env.STAFF_EMAILS),
+  /** Display names for staff in the audit log, e.g. STAFF_NAMES=owner=Abbas Attar,counter@x.com=Mustafa. */
+  STAFF_NAMES: nameMap(process.env.STAFF_NAMES),
   CUSTOMER_TOKEN_SECRET: process.env.CUSTOMER_TOKEN_SECRET ?? '',
   INTERNAL_API_SECRET: process.env.INTERNAL_API_SECRET ?? '',
 };

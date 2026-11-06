@@ -6,6 +6,8 @@ import { connectDB } from './config/database';
 import { errorHandler } from './middleware/errorHandler';
 import { readMeter } from './middleware/readMeter';
 import { authorizeByPolicy, whoAmI } from './middleware/auth';
+import { auditTrail } from './middleware/auditTrail';
+import auditLogRoutes from './routes/auditLog.routes';
 import { aiRateLimit } from './middleware/rateLimits';
 
 import customerRoutes from './routes/customer.routes';
@@ -26,6 +28,8 @@ import personalExpenseRoutes from './routes/personalExpense.routes';
 import expenseLedgerRoutes from './routes/expenseLedger.routes';
 import monthlyTargetRoutes from './routes/monthlyTarget.routes';
 import coatingRoutes from './routes/coating.routes';
+import lensOptionRoutes from './routes/lensOption.routes';
+import lensCatalogRoutes from './routes/lensCatalog.routes';
 import lensPricingRoutes from './routes/lensPricing.routes';
 import lensStockRoutes from './routes/lensStock.routes';
 import frameCompanyRoutes from './routes/frameCompany.routes';
@@ -35,6 +39,7 @@ import marketingRoutes from './routes/marketing.routes';
 import campaignRoutes from './routes/campaign.routes';
 import automationRoutes from './routes/automation.routes';
 import lostSaleRoutes from './routes/lostSale.routes';
+import dataQualityRoutes from './routes/dataQuality.routes';
 import savingGoalRoutes from './routes/savingGoal.routes';
 import recurringExpenseRoutes from './routes/recurringExpense.routes';
 import contactLensRoutes from './routes/contactLens.routes';
@@ -142,6 +147,7 @@ apiRouter.get('/me', whoAmI);
 // (middleware/accessPolicy.ts) decides which role each method + path needs.
 const adminRouter = express.Router();
 adminRouter.use(authorizeByPolicy);
+adminRouter.use(auditTrail); // logs every write: who, what, when (see /audit-log)
 adminRouter.use('/ai', aiRateLimit);
 adminRouter.use('/customers', customerRoutes);
 adminRouter.use('/optical-numbers', opticalNumberRoutes); // legacy — kept for backward compat
@@ -164,6 +170,8 @@ adminRouter.use('/personal-expenses', personalExpenseRoutes);
 adminRouter.use('/ledger', expenseLedgerRoutes); // expense log, recurring bills, vendor accounts
 adminRouter.use('/monthly-targets', monthlyTargetRoutes);
 adminRouter.use('/coatings', coatingRoutes);
+adminRouter.use('/lens-options', lensOptionRoutes); // lens material and colour lists
+adminRouter.use('/lens-catalog', lensCatalogRoutes); // brand coatings, products, add-ons and the counter comparison
 adminRouter.use('/lens-pricing', lensPricingRoutes);
 adminRouter.use('/lens-stock', lensStockRoutes);
 adminRouter.use('/frame-companies', frameCompanyRoutes);
@@ -173,6 +181,8 @@ adminRouter.use('/marketing', marketingRoutes);
 adminRouter.use('/campaigns', campaignRoutes);
 adminRouter.use('/automation', automationRoutes);
 adminRouter.use('/lost-sales', lostSaleRoutes);
+adminRouter.use('/data-quality', dataQualityRoutes); // cleanup queues: missing costs, walk-in bills, phones
+adminRouter.use('/audit-log', auditLogRoutes); // admin-only: read the write log
 adminRouter.use('/bill-feedback', billFeedbackRoutes); // online-bill ratings and review funnel
 adminRouter.use('/saving-goals', savingGoalRoutes);
 adminRouter.use('/recurring-expenses', recurringExpenseRoutes);
