@@ -271,6 +271,14 @@ describe('/public per-user endpoints', () => {
     expect(Invoice.findById).not.toHaveBeenCalled();
   });
 
+  it('with CUSTOMER_AUTH_ENFORCE on, a phone in the URL does not unlock an invoice', async () => {
+    Invoice.findById.mockReturnValue(chain({ _id: 'inv1', customer: { mobileNumber: PHONE }, items: [], payments: [], total: 100 }));
+    const res = await request(app).get(`/api/public/invoices/inv1?phone=${PHONE}`);
+    expect(res.status).toBe(401);
+    expect(Invoice.findById).not.toHaveBeenCalled();
+    expect((await request(app).get('/api/public/invoices/inv1').set(bearer())).status).toBe(200);
+  });
+
   it('pay info: invoice number and balance only, by id', async () => {
     Invoice.findById.mockReturnValue(chain({
       _id: 'inv1abc', invoiceNumber: 'INV0735/26-27', total: 2000,

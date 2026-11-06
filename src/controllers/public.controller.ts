@@ -451,10 +451,13 @@ export const getInvoicePayInfo = async (req: Request, res: Response, next: NextF
 export const getInvoiceById = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { id } = req.params;
-    const phone = req.customerPhone ?? (req.query.phone as string | undefined)?.replace(/\D/g, '').trim();
+    // With CUSTOMER_AUTH_ENFORCE on only the session counts; a phone in the URL is not proof of ownership.
+    const phone = env.CUSTOMER_AUTH_ENFORCE
+      ? req.customerPhone
+      : req.customerPhone ?? (req.query.phone as string | undefined)?.replace(/\D/g, '').trim();
     if (!phone) {
       // Previously an invoice could be read by id alone; ownership is now always checked.
-      res.status(env.CUSTOMER_AUTH_ENFORCE ? 401 : 400).json({ success: false, message: 'phone required' });
+      res.status(env.CUSTOMER_AUTH_ENFORCE ? 401 : 400).json({ success: false, message: env.CUSTOMER_AUTH_ENFORCE ? 'Authentication required' : 'phone required' });
       return;
     }
 
