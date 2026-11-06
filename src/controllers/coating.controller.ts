@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { Coating } from '../models/Coating.model';
 import { LensPricing } from '../models/LensPricing.model';
 import { ok, fail } from '../utils/response';
+import { readAliases, AliasError } from '../services/lensAliases';
 
 const DEFAULT_COATINGS = [
   'Hard Coat', 'Anti-Reflective', 'Blue Cut', 'Blue Cut Blue',
@@ -25,9 +26,11 @@ export const createCoating = async (req: Request, res: Response, next: NextFunct
   try {
     const { name, shortName } = req.body as { name?: string; shortName?: string };
     if (!name?.trim()) return fail(res, 'name is required', 400);
-    const coating = await Coating.create({ name: name.trim(), shortName: shortName?.trim() || undefined });
+    const aliases = readAliases(req.body?.aliases) ?? [];
+    const coating = await Coating.create({ name: name.trim(), shortName: shortName?.trim() || undefined, aliases });
     return ok(res, coating, 'Coating created', 201);
   } catch (e: any) {
+    if (e instanceof AliasError) return fail(res, e.message, 400);
     if (e.code === 11000) return fail(res, 'A coating with this name already exists', 409);
     next(e);
   }
@@ -37,14 +40,16 @@ export const updateCoating = async (req: Request, res: Response, next: NextFunct
   try {
     const { name, shortName } = req.body as { name?: string; shortName?: string };
     if (!name?.trim()) return fail(res, 'name is required', 400);
+    const aliases = readAliases(req.body?.aliases);
     const coating = await Coating.findByIdAndUpdate(
       req.params.id,
-      { name: name.trim(), shortName: shortName?.trim() || undefined },
+      { name: name.trim(), shortName: shortName?.trim() || undefined, ...(aliases !== undefined ? { aliases } : {}) },
       { new: true, runValidators: true }
     );
     if (!coating) return fail(res, 'Coating not found', 404);
     return ok(res, coating);
   } catch (e: any) {
+    if (e instanceof AliasError) return fail(res, e.message, 400);
     if (e.code === 11000) return fail(res, 'A coating with this name already exists', 409);
     next(e);
   }

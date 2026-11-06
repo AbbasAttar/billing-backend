@@ -9,7 +9,10 @@ import {
   incrementViewCount,
   PublicProductQuery,
 } from '../services/publicCatalog.service';
-import { fetchInstagramFeed } from '../services/instagram.service';
+import { pickBestRule } from '../services/lensRuleMatch';
+import { fetchInstagramFeed, refreshInstagramToken, invalidateInstagramCache } from '../services/instagram.service';
+
+const TOKEN_REFRESH_EVERY_MS = 7 * 24 * 60 * 60 * 1000;
 import { SiteSetting } from '../models/SiteSetting.model';
 import { BlogPost } from '../models/BlogPost.model';
 import { OpticalLens } from '../models/OpticalLens.model';
@@ -202,8 +205,31 @@ export const getInstagramPosts = async (_req: Request, res: Response, next: Next
       return;
     }
 
-    const posts = await fetchInstagramFeed(token, limit);
-    res.json({ success: true, data: posts });
+    let activeToken = token;
+    const refreshedAt = tokenDoc?.updatedAt ? new Date(tokenDoc.updatedAt).getTime() : 0;
+    if (Date.now() - refreshedAt > TOKEN_REFRESH_EVERY_MS) {
+      try {
+        activeToken = await refreshInstagramToken(token);
+        await SiteSetting.findOneAndUpdate(
+          { key: 'instagram_access_token' },
+          { $set: { value: activeToken } },
+          { upsert: true, new: true }
+        );
+        invalidateInstagramCache();
+      } catch (err) {
+        // Token may still work for fetching even if refresh failed (e.g. <24h old) — carry on.
+        console.warn('[instagram] token refresh failed:', (err as Error).message);
+      }
+    }
+
+    try {
+      const posts = await fetchInstagramFeed(activeToken, limit);
+      res.json({ success: true, data: posts });
+    } catch (err) {
+      // Expired/revoked token must not 500 the homepage — storefront shows its follow-us fallback.
+      console.error('[instagram] feed fetch failed:', (err as Error).message);
+      res.json({ success: true, data: [] });
+    }
   } catch (err) {
     next(err);
   }
@@ -237,38 +263,10 @@ export const getLensPricingLookup = async (req: Request, res: Response, next: Ne
     const hasAdd = qAdd !== undefined && qAdd !== '' && qAdd !== 'null';
     const addVal = hasAdd ? parseFloat(qAdd as string) : null;
 
-    const baseQuery: Record<string, unknown> = {
-      lensType, material, coating, color,
-      axisType: { $in: [axisType, 'any'] },
-      minSph: { $lte: sph },
-      maxSph: { $gte: sph },
-      minCyl: { $lte: cyl },
-      maxCyl: { $gte: cyl },
-    };
-
-    if (addVal === null) {
-      baseQuery.minAdd = null;
-    } else {
-      baseQuery.$and = [
-        { minAdd: { $ne: null } },
-        { minAdd: { $lte: addVal } },
-        { $or: [{ maxAdd: null }, { maxAdd: { $gte: addVal } }] },
-      ];
-    }
-
-    const [entry] = await LensPricing.aggregate([
-      { $match: baseQuery },
-      {
-        $addFields: {
-          _axisScore: { $cond: [{ $eq: ['$axisType', 'any'] }, 1, 0] },
-          _sphRange:  { $subtract: ['$maxSph', '$minSph'] },
-          _cylRange:  { $subtract: ['$maxCyl', '$minCyl'] },
-        },
-      },
-      { $sort: { _axisScore: 1, _sphRange: 1, _cylRange: 1 } },
-      { $limit: 1 },
-      { $project: { _axisScore: 0, _sphRange: 0, _cylRange: 0, costPrice: 0 } },
-    ]);
+    const candidates: any[] = await LensPricing.find({ lensType, material, coating, color }).lean();
+    const best = pickBestRule(candidates, { sph, cyl, add: addVal, axisType });
+    // Never expose cost to the public site.
+    const entry = best ? (({ costPrice: _cost, ...rest }) => rest)(best) : null;
 
     res.json({ success: true, data: entry ?? null });
   } catch (err) {

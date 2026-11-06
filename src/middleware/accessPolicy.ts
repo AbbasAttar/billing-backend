@@ -30,6 +30,8 @@ const STAFF_AREAS = [
   'lens-stock',
   'lens-pricing',
   'coatings',
+  'lens-options', // Lens Config lists (materials, indices, designs, tints)
+  'lens-catalog', // brand coatings, products and add-ons; staff may read and compare
   'wholesaler-queue',
   'fitting', // lens fitting jobs for other opticians
   'purchases',
@@ -58,9 +60,11 @@ const ADMIN_ONLY: Array<[RegExp, RegExp]> = [
   [/^GET$/, /^\/(frames|fragrances|lens-stock)\/(trends|sold|revenue-summary)$/],
   [/^GET$/, /^\/optical-lenses\/analytics$/],
   [/^GET$/, /^\/lens-pricing\/quote-history$/],
-  // Pricing rules and coatings are configuration (staff may still look prices up via GET and POST /match).
-  [/^(POST|PUT|PATCH)$/, /^\/coatings(\/.*)?$/],
-  [/^(POST|PUT|PATCH)$/, /^\/lens-pricing(\/(?!match$).*)?$/],
+  // Pricing rules, price books, markup, coatings and lens lists are configuration (staff may still look prices
+  // up via GET, POST /match and POST /resolve).
+  [/^(POST|PUT|PATCH)$/, /^\/(coatings|lens-options)(\/.*)?$/],
+  [/^(POST|PUT|PATCH)$/, /^\/lens-pricing(\/(?!(match|resolve)$).*)?$/],
+  [/^(POST|PUT|PATCH)$/, /^\/lens-catalog(\/(?!(compare|quote)$).*)?$/],
   // Renaming shared reference data (staff may add new companies/colours while creating a product).
   [/^(PUT|PATCH)$/, /^\/(frame-companies|frame-colors)\/.+$/],
   // Purchase-ledger maintenance jobs.

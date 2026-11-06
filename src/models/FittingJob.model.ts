@@ -7,6 +7,19 @@ export type FittingJobStatus = (typeof FITTING_JOB_STATUSES)[number];
 export const FITTING_FRAME_TYPES = ['full', 'supra', '3piece'] as const;
 export type FittingFrameType = (typeof FITTING_FRAME_TYPES)[number];
 
+/** Lens design, which (with the frame type) sets the fitting charge. */
+export const FITTING_LENS_KINDS = ['single', 'kryptok', 'dbifocal', 'progressive'] as const;
+export type FittingLensKind = (typeof FITTING_LENS_KINDS)[number];
+
+/** Lens design read off the order slip text ("CR HC KT", "PROGRESSIVE ARC [Essilor]"). */
+export const fittingLensKind = (lensSpec?: string): FittingLensKind => {
+  const tokens = String(lensSpec ?? '').toUpperCase().split(/[\s,·]+/);
+  if (tokens.includes('PROGRESSIVE')) return 'progressive';
+  if (tokens.includes('KT')) return 'kryptok';
+  if (tokens.includes('D-BIFOCAL')) return 'dbifocal';
+  return 'single';
+};
+
 /**
  * One lens-fitting job for an optician (FittingParty): the lens we order from the wholesaler plus
  * what we charge for it. total = lensCharge + fittingCharge. lensCost (what the wholesaler bills us)

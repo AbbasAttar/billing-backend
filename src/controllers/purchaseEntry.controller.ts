@@ -5,7 +5,8 @@ import { InvoiceItem } from '../models/InvoiceItem.model';
 import { Invoice } from '../models/Invoice.model';
 import { Customer } from '../models/Customer.model';
 import { Prescription } from '../models/Prescription.model';
-import { LensPricing, LENS_TYPES, LENS_MATERIALS, LENS_COLORS } from '../models/LensPricing.model';
+import { LensPricing, LENS_TYPES, isLensName } from '../models/LensPricing.model';
+import { cylInRange, cylBounds } from '../services/lensRuleMatch';
 import { getDb, snapToData } from '../lib/firestoreDb';
 import { isBackfillDone } from '../lib/backfillMarker';
 import { isMissingIndexError } from '../lib/firestoreModel';
@@ -57,9 +58,9 @@ interface BatchInvoiceHeader {
 function validateEntry(raw: RawEntry, idx: number): string | null {
   if (!LENS_TYPES.includes(raw.lensType as typeof LENS_TYPES[number]))
     return `Entry ${idx + 1}: invalid lensType "${raw.lensType}".`;
-  if (!LENS_MATERIALS.includes(raw.material as typeof LENS_MATERIALS[number]))
+  if (!isLensName(raw.material))
     return `Entry ${idx + 1}: invalid material "${raw.material}".`;
-  if (raw.color && !LENS_COLORS.includes(raw.color as typeof LENS_COLORS[number]))
+  if (raw.color && !isLensName(raw.color))
     return `Entry ${idx + 1}: invalid color "${raw.color}".`;
   if (typeof raw.coating !== 'string' || !raw.coating.trim())
     return `Entry ${idx + 1}: coating is required.`;
@@ -120,9 +121,9 @@ export const createPurchaseEntries = async (
 
     for (const raw of entriesRaw) {
       const lensType    = raw.lensType    as typeof LENS_TYPES[number];
-      const material    = raw.material    as typeof LENS_MATERIALS[number];
+      const material    = raw.material   ;
       const coating     = (raw.coating as string).trim();
-      const color       = (raw.color as typeof LENS_COLORS[number]) || 'White';
+      const color       = (raw.color) || 'White';
       const brand       = (raw.brand ? String(raw.brand).trim() : header.brand ? String(header.brand).trim() : null);
       const eye         = EYE_VALUES.includes(raw.eye as EyeValue) ? (raw.eye as EyeValue) : 'both';
       const sph         = raw.sph         as number;
@@ -204,8 +205,9 @@ export const createPurchaseEntries = async (
           if (lensPricingId) {
             const rule = await LensPricing.findById(lensPricingId);
             if (rule) {
-              if (unitCost > 0) rule.costPrice = unitCost;
-              if (unitSellPrice !== null && unitSellPrice > 0) rule.price = unitSellPrice;
+              // Purchase amounts are per lens; master rules are per pair.
+              if (unitCost > 0) rule.costPrice = unitCost * 2;
+              if (unitSellPrice !== null && unitSellPrice > 0) rule.price = unitSellPrice * 2;
               await rule.save();
             }
           } else if (unitCost > 0) {
@@ -222,8 +224,9 @@ export const createPurchaseEntries = async (
               maxCyl: cyl,
               minAdd: add,
               maxAdd: add,
-              costPrice: unitCost,
-              price: unitSellPrice !== null && unitSellPrice > 0 ? unitSellPrice : Math.round(unitCost * 2.5),
+              costPrice: unitCost * 2,
+              price: (unitSellPrice !== null && unitSellPrice > 0 ? unitSellPrice : Math.round(unitCost * 2.5)) * 2,
+              priceUnit: 'pair',
               brand: brand || undefined,
             });
           }
@@ -283,9 +286,9 @@ export const createPendingEntries = async (
         qty:          item.qty,
         notes:        item.name.trim(),
         lensType:     item.lensType  ? (LENS_TYPES.includes(item.lensType as typeof LENS_TYPES[number]) ? item.lensType : null) : null,
-        material:     item.material  ? (LENS_MATERIALS.includes(item.material as typeof LENS_MATERIALS[number]) ? item.material : null) : null,
+        material:     item.material  ? (isLensName(item.material) ? item.material : null) : null,
         coating:      item.coating   ? item.coating.trim() : null,
-        color:        item.color     ? (LENS_COLORS.includes(item.color as typeof LENS_COLORS[number]) ? item.color : null) : null,
+        color:        item.color     ? (isLensName(item.color) ? item.color : null) : null,
         sph:          typeof item.sph === 'number' ? item.sph : null,
         cyl:          typeof item.cyl === 'number' ? item.cyl : 0,
         add:          typeof item.add === 'number' ? item.add : null,
@@ -365,11 +368,11 @@ export const markReceived = async (
       // Apply any SKU overrides from request body
       if (item.lensType && LENS_TYPES.includes(item.lensType as typeof LENS_TYPES[number]))
         entry.lensType = item.lensType as typeof LENS_TYPES[number];
-      if (item.material && LENS_MATERIALS.includes(item.material as typeof LENS_MATERIALS[number]))
-        entry.material = item.material as typeof LENS_MATERIALS[number];
+      if (item.material && isLensName(item.material))
+        entry.material = item.material;
       if (item.coating && item.coating.trim()) entry.coating = item.coating.trim();
-      if (item.color && LENS_COLORS.includes(item.color as typeof LENS_COLORS[number]))
-        entry.color = item.color as typeof LENS_COLORS[number];
+      if (item.color && isLensName(item.color))
+        entry.color = item.color;
       if (item.brand) entry.brand = item.brand.trim();
       if (item.sph !== undefined) entry.sph = item.sph;
       if (item.cyl !== undefined) entry.cyl = item.cyl;
@@ -421,8 +424,9 @@ export const markReceived = async (
           if (item.lensPricingId) {
             const rule = await LensPricing.findById(item.lensPricingId);
             if (rule) {
-              if (unitCost > 0) rule.costPrice = unitCost;
-              if (item.unitSellPrice) rule.price = Number(item.unitSellPrice);
+              // Purchase amounts are per lens; master rules are per pair.
+              if (unitCost > 0) rule.costPrice = unitCost * 2;
+              if (item.unitSellPrice) rule.price = Number(item.unitSellPrice) * 2;
               await rule.save();
             }
           } else if (unitCost > 0 && lt && mat && coat && sph !== null) {
@@ -438,8 +442,9 @@ export const markReceived = async (
               maxCyl: cylVal,
               minAdd: addVal,
               maxAdd: addVal,
-              costPrice: unitCost,
-              price: item.unitSellPrice ? Number(item.unitSellPrice) : Math.round(unitCost * 2.5),
+              costPrice: unitCost * 2,
+              price: (item.unitSellPrice ? Number(item.unitSellPrice) : Math.round(unitCost * 2.5)) * 2,
+              priceUnit: 'pair',
               brand: item.brand || entry.brand || undefined,
             });
           }
@@ -547,11 +552,11 @@ export const updatePurchaseEntry = async (
     if (lensType !== undefined && (lensType === null || LENS_TYPES.includes(lensType))) {
       entry.lensType = lensType;
     }
-    if (material !== undefined && (material === null || LENS_MATERIALS.includes(material))) {
+    if (material !== undefined && (material === null || isLensName(material))) {
       entry.material = material;
     }
     if (coating !== undefined) entry.coating = coating ? String(coating).trim() : null;
-    if (color !== undefined && (color === null || LENS_COLORS.includes(color))) {
+    if (color !== undefined && (color === null || isLensName(color))) {
       entry.color = color;
     }
     if (eye !== undefined && EYE_VALUES.includes(eye)) entry.eye = eye;
@@ -588,8 +593,9 @@ export const updatePurchaseEntry = async (
         if (entry.lensPricingId) {
           const rule = await LensPricing.findById(entry.lensPricingId);
           if (rule) {
-            rule.costPrice = entry.unitCost;
-            if (entry.unitSellPrice) rule.price = entry.unitSellPrice;
+            // Purchase amounts are per lens; master rules are per pair.
+            rule.costPrice = entry.unitCost * 2;
+            if (entry.unitSellPrice) rule.price = entry.unitSellPrice * 2;
             await rule.save();
           }
         } else if (entry.lensType && entry.material && entry.coating && entry.sph !== null) {
@@ -605,8 +611,9 @@ export const updatePurchaseEntry = async (
             maxCyl: entry.cyl || 0,
             minAdd: entry.add,
             maxAdd: entry.add,
-            costPrice: entry.unitCost,
-            price: entry.unitSellPrice || Math.round(entry.unitCost * 2.5),
+            costPrice: entry.unitCost * 2,
+            price: (entry.unitSellPrice || Math.round(entry.unitCost * 2.5)) * 2,
+            priceUnit: 'pair',
             brand: entry.brand || undefined,
           });
         }
@@ -1380,10 +1387,9 @@ function matchPricingRuleFast(allRules: any[], lens: {
     const maxS = Math.max(rule.minSph ?? -20, rule.maxSph ?? 20);
     if (sph < minS - 0.001 || sph > maxS + 0.001) continue;
 
-    // CYL bracket
-    const minC = Math.min(rule.minCyl ?? -10, rule.maxCyl ?? 10);
-    const maxC = Math.max(rule.minCyl ?? -10, rule.maxCyl ?? 10);
-    if (cyl < minC - 0.001 || cyl > maxC + 0.001) continue;
+    // CYL matched by size — sign is only notation (services/lensRuleMatch)
+    if (rule.minCyl != null && rule.maxCyl != null && !cylInRange(rule, cyl)) continue;
+    const [minC, maxC] = rule.minCyl != null && rule.maxCyl != null ? cylBounds(rule) : [0, 10];
 
     // ADD bracket
     if (addVal !== null && rule.minAdd !== null && rule.minAdd !== undefined) {
@@ -1526,7 +1532,8 @@ export async function enrichPurchaseEntriesWithInvoices(entries: any[]): Promise
         add: resolvedAdd,
         unitSellPrice: resolvedSellPrice,
         relativeInvoice,
-        expectedCost: matchedRule?.costPrice ?? null,
+        // Per-lens expectation from a per-pair rule.
+        expectedCost: matchedRule?.costPrice != null ? matchedRule.costPrice / 2 : null,
         expectedSell: matchedRule?.price ?? null,
         pricingId: matchedRule ? String(matchedRule._id || matchedRule.id) : null,
       };

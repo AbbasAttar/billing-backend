@@ -1,7 +1,9 @@
 import { NextFunction, Request, Response } from 'express';
-import { LensPricing, LENS_TYPES, LENS_MATERIALS, LENS_COLORS, AXIS_TYPES } from '../models/LensPricing.model';
+import { LensPricing, LENS_TYPES, AXIS_TYPES, isLensName } from '../models/LensPricing.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
 import { fail, ok } from '../utils/response';
+import { pickBestRule, cylInRange, sphInRange, addInRange } from '../services/lensRuleMatch';
+import { invalidateLensPricingCache } from '../services/purchaseLookup';
 
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -14,10 +16,10 @@ export const getAll = async (_req: Request, res: Response, next: NextFunction) =
 
 export const create = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { lensType, material, coating, color, axisType = 'any', minSph, maxSph, minCyl, maxCyl, minAdd, maxAdd, price, costPrice = 0 } = req.body;
+    const { lensType, material, coating, color, axisType = 'any', minSph, maxSph, minCyl, maxCyl, minAdd, maxAdd, price, costPrice = 0, company } = req.body;
     if (!LENS_TYPES.includes(lensType)) return fail(res, 'Invalid lensType', 400);
-    if (!LENS_MATERIALS.includes(material)) return fail(res, 'Invalid material', 400);
-    if (!LENS_COLORS.includes(color)) return fail(res, 'Invalid color', 400);
+    if (!isLensName(material)) return fail(res, 'Invalid material', 400);
+    if (!isLensName(color)) return fail(res, 'Invalid color', 400);
     if (!AXIS_TYPES.includes(axisType)) return fail(res, 'Invalid axisType', 400);
     if (!coating?.trim()) return fail(res, 'coating is required', 400);
     if (typeof price !== 'number' || price < 0) return fail(res, 'price must be >= 0', 400);
@@ -33,7 +35,10 @@ export const create = async (req: Request, res: Response, next: NextFunction) =>
       minAdd: minAdd ?? null,
       maxAdd: maxAdd ?? null,
       price, costPrice,
+      priceUnit: 'pair',
+      ...(company?.trim() ? { company: company.trim() } : {}),
     });
+    invalidateLensPricingCache();
     return ok(res, entry, 'Pricing rule created', 201);
   } catch (e) { next(e); }
 };
@@ -43,18 +48,18 @@ export const update = async (req: Request, res: Response, next: NextFunction) =>
     const entry = await LensPricing.findById(req.params.id);
     if (!entry) return fail(res, 'Not found', 404);
 
-    const { lensType, material, coating, color, axisType, minSph, maxSph, minCyl, maxCyl, minAdd, maxAdd, price, costPrice } = req.body;
+    const { lensType, material, coating, color, axisType, minSph, maxSph, minCyl, maxCyl, minAdd, maxAdd, price, costPrice, company } = req.body;
 
     if (lensType !== undefined) {
       if (!LENS_TYPES.includes(lensType)) return fail(res, 'Invalid lensType', 400);
       entry.lensType = lensType;
     }
     if (material !== undefined) {
-      if (!LENS_MATERIALS.includes(material)) return fail(res, 'Invalid material', 400);
+      if (!isLensName(material)) return fail(res, 'Invalid material', 400);
       entry.material = material;
     }
     if (color !== undefined) {
-      if (!LENS_COLORS.includes(color)) return fail(res, 'Invalid color', 400);
+      if (!isLensName(color)) return fail(res, 'Invalid color', 400);
       entry.color = color;
     }
     if (axisType !== undefined) {
@@ -70,8 +75,10 @@ export const update = async (req: Request, res: Response, next: NextFunction) =>
     if ('maxAdd' in req.body) entry.maxAdd = maxAdd ?? null;
     if (price !== undefined) entry.price = price;
     if (costPrice !== undefined) entry.costPrice = costPrice;
+    if (company !== undefined && company?.trim()) entry.company = company.trim();
 
     await entry.save();
+    invalidateLensPricingCache();
     return ok(res, entry, 'Updated');
   } catch (e) { next(e); }
 };
@@ -80,6 +87,7 @@ export const remove = async (req: Request, res: Response, next: NextFunction) =>
   try {
     const entry = await LensPricing.findByIdAndDelete(req.params.id);
     if (!entry) return fail(res, 'Not found', 404);
+    invalidateLensPricingCache();
     return ok(res, { _id: entry._id }, 'Deleted');
   } catch (e) { next(e); }
 };
@@ -98,39 +106,8 @@ export const lookup = async (req: Request, res: Response, next: NextFunction) =>
     const hasAdd = qAdd !== undefined && qAdd !== '' && qAdd !== 'null';
     const addVal = hasAdd ? parseFloat(qAdd as string) : null;
 
-    const baseQuery: Record<string, unknown> = {
-      lensType, material, coating, color,
-      axisType: { $in: [axisType, 'any'] },
-      minSph: { $lte: sph },
-      maxSph: { $gte: sph },
-      minCyl: { $lte: cyl },
-      maxCyl: { $gte: cyl },
-    };
-
-    if (addVal === null) {
-      baseQuery.minAdd = null;
-    } else {
-      baseQuery.$and = [
-        { minAdd: { $ne: null } },
-        { minAdd: { $lte: addVal } },
-        { $or: [{ maxAdd: null }, { maxAdd: { $gte: addVal } }] },
-      ];
-    }
-
-    // Sort: exact axis match first (0) before 'any' (1), then narrowest range
-    const [entry] = await LensPricing.aggregate([
-      { $match: baseQuery },
-      {
-        $addFields: {
-          _axisScore: { $cond: [{ $eq: ['$axisType', 'any'] }, 1, 0] },
-          _sphRange:  { $subtract: ['$maxSph', '$minSph'] },
-          _cylRange:  { $subtract: ['$maxCyl', '$minCyl'] },
-        },
-      },
-      { $sort: { _axisScore: 1, _sphRange: 1, _cylRange: 1 } },
-      { $limit: 1 },
-      { $project: { _axisScore: 0, _sphRange: 0, _cylRange: 0 } },
-    ]);
+    const candidates = await LensPricing.find({ lensType, material, coating, color }).lean();
+    const entry = pickBestRule(candidates as any[], { sph, cyl, add: addVal, axisType });
 
     return ok(res, entry ?? null);
   } catch (e) { next(e); }
@@ -246,10 +223,8 @@ export const matchPricingRule = async (req: Request, res: Response, next: NextFu
         score += 30;
       }
 
-      // CYL power bracket: minCyl <= cyl <= maxCyl
-      const minC = Math.min(rule.minCyl, rule.maxCyl);
-      const maxC = Math.max(rule.minCyl, rule.maxCyl);
-      if (cyl >= minC - 0.001 && cyl <= maxC + 0.001) {
+      // CYL matched by size — sign is only notation (see services/lensRuleMatch)
+      if (cylInRange(rule, cyl)) {
         matchedBy.cyl = true;
         score += 30;
       }
@@ -292,10 +267,11 @@ export const matchPricingRule = async (req: Request, res: Response, next: NextFu
       return ok(res, {
         matched: true,
         pricingId: r._id,
-        costPerLens: r.costPrice,
-        sellPerLens: r.price,
-        costPerPair: r.costPrice * 2,
-        sellPerPair: r.price * 2,
+        // Rule prices are per pair (owner decision, Nov 2026).
+        costPerLens: r.costPrice / 2,
+        sellPerLens: r.price / 2,
+        costPerPair: r.costPrice,
+        sellPerPair: r.price,
         brand: r.brand ?? null,
         matchedBy: best.matchedBy,
         matrix: {
@@ -538,30 +514,16 @@ export const getPresentationOptions = async (req: Request, res: Response, next: 
   try {
     const { sph: qSph, cyl: qCyl, add: qAdd, lensType = 'Single Vision' } = req.query as Record<string, string | undefined>;
 
-    const sph = Math.abs(parseFloat(qSph ?? '0'));
-    const cyl = Math.abs(parseFloat(qCyl ?? '0'));
-    const add = qAdd ? Math.abs(parseFloat(qAdd)) : null;
+    const sph = parseFloat(qSph ?? '0') || 0;
+    const cyl = parseFloat(qCyl ?? '0') || 0;
+    const add = qAdd && parseFloat(qAdd) > 0 ? Math.abs(parseFloat(qAdd)) : null;
 
-    const baseQuery: Record<string, unknown> = {
-      minSph: { $lte: sph },
-      maxSph: { $gte: sph },
-      minCyl: { $lte: cyl },
-      maxCyl: { $gte: cyl },
-    };
-
-    if (lensType) {
-      baseQuery.lensType = lensType;
-    }
-
-    if (add !== null && add > 0) {
-      baseQuery.$or = [
-        { minAdd: null },
-        { minAdd: { $lte: add }, maxAdd: { $gte: add } },
-        { minAdd: { $lte: add }, maxAdd: null },
-      ];
-    }
-
-    const options = await LensPricing.find(baseQuery).sort({ price: 1, costPrice: 1 });
+    const pool: any[] = await LensPricing.find(lensType ? { lensType } : {}).lean();
+    const options = pool
+      .filter((r) => sphInRange(r, sph) && cylInRange(r, cyl))
+      // With an ADD, keep rules covering it plus rules that don't price ADD separately.
+      .filter((r) => add === null || r.minAdd == null || addInRange(r, add))
+      .sort((a, b) => a.price - b.price || a.costPrice - b.costPrice);
 
     return ok(res, {
       rx: { sph, cyl, add, lensType },
@@ -636,7 +598,7 @@ export const seedEnterpriseCatalog = async (_req: Request, res: Response, next: 
           minCyl: rule.minCyl,
           maxCyl: rule.maxCyl,
         },
-        { $set: rule },
+        { $set: { ...rule, priceUnit: 'pair' } },
         { upsert: true }
       );
       insertedCount++;

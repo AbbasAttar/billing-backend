@@ -10,8 +10,30 @@ import {
   getPresentationOptions,
   seedEnterpriseCatalog,
 } from '../controllers/lensPricing.controller';
+import {
+  listCompanies,
+  createCompany,
+  updateCompany,
+  removeCompany,
+  getBook,
+  putBook,
+  getMarkup,
+  putMarkup,
+  resolve,
+} from '../controllers/lensPriceBook.controller';
 
 const router = Router();
+
+// Price book v2 (docs/lens-price-book-v2-plan.md) — declared before '/:id'.
+router.post('/resolve', resolve);
+router.get('/companies', listCompanies);
+router.post('/companies', createCompany);
+router.put('/companies/:id', updateCompany);
+router.delete('/companies/:id', removeCompany);
+router.get('/books/:company', getBook);
+router.put('/books/:company', putBook);
+router.get('/markup', getMarkup);
+router.put('/markup', putMarkup);
 
 router.get('/match', matchPricingRule);
 router.post('/match', matchPricingRule);

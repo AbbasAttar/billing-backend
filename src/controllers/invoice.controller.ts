@@ -1,7 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { isAdminRequest } from '../middleware/auth';
 import * as XLSX from 'xlsx';
-import { Coating } from '../models/Coating.model';
 import { Invoice, IPayment } from '../models/Invoice.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
 import { OpticalLens } from '../models/OpticalLens.model';
@@ -22,6 +21,7 @@ import { ModelTx, runModelTransaction } from '../lib/firestoreModel';
 import { PurchaseEntry } from '../models/PurchaseEntry.model';
 import { createPendingPurchasesForInvoice, invalidateInvoiceLookupCache } from './purchaseEntry.controller';
 import type { CreateInvoiceInput, CreateInvoiceItemInput, DemandLogInput } from '../types';
+import { buildLensName, getLensShortNames } from '../services/lensShortNames';
 
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -1565,9 +1565,9 @@ export const downloadTodayExcel = async (req: Request, res: Response, next: Next
     const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
     const endOfDay   = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
 
-    const [invoices, coatingMap] = await Promise.all([
+    const [invoices, shortNames] = await Promise.all([
       populateInvoice(Invoice.find({ billDate: { $gte: startOfDay, $lte: endOfDay } }).sort({ billDate: 1 })),
-      getCoatingShortNames(),
+      getLensShortNames(),
     ]);
 
     const rows: Record<string, unknown>[] = [];
@@ -1581,7 +1581,7 @@ export const downloadTodayExcel = async (req: Request, res: Response, next: Next
           INVOICE: inv.invoiceNumber ?? '',
           NAME:    customer?.name ?? '',
           DATE:    toExcelDate(new Date(inv.billDate)),
-          LENS:    buildLensName(lensItem, coatingMap),
+          LENS:    buildLensName(lensItem, shortNames),
           RESPH:   lensItem.rightSpherical  ?? '',
           RECYL:   lensItem.rightCylinder   ?? '',
           REAXIS:  lensItem.rightAxis       ?? '',
@@ -1635,42 +1635,6 @@ function applyDateFormat(ws: XLSX.WorkSheet) {
   }
 }
 
-async function getCoatingShortNames(): Promise<Map<string, string>> {
-  const coatings = await Coating.find({ shortName: { $ne: null, $exists: true } }).lean();
-  const map = new Map<string, string>();
-  for (const c of coatings) {
-    if (c.shortName) map.set(c.name, c.shortName);
-  }
-  return map;
-}
-
-function buildLensName(item: any, coatingShortNames: Map<string, string> = new Map()): string {
-  const parts: string[] = [];
-
-  const color = (item.lensColor ?? '').trim();
-  if (color === 'Photo Chromatic') parts.push('PG');
-  else if (color === 'Polarized') parts.push('Polarize');
-  else if (/gradal/i.test(color)) parts.push('GRD');
-  // White or empty → nothing
-
-  const material = (item.lensMaterial ?? '').trim();
-  if (material === 'Fiber') parts.push('CR');
-  else if (material === 'Glass') parts.push('Glass');
-  else if (material === 'Polycarbonate') parts.push('PC');
-
-  const coatingName = (item.lensCoating ?? '').trim();
-  if (coatingName) {
-    parts.push(coatingShortNames.get(coatingName) || coatingName);
-  }
-
-  const lensType = (item.lensType ?? '').trim();
-  if (lensType === 'Bifocal') parts.push('KT');
-  else if (lensType === 'Progressive') parts.push('Progressive');
-  // Single Vision → nothing
-
-  return parts.join(' ') || (item.lensLabel ?? '').trim() || 'Lens';
-}
-
 export const pushToExcel = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const invoice = await populateInvoice(Invoice.findById(req.params.id));
@@ -1686,8 +1650,7 @@ export const pushToExcel = async (req: Request, res: Response, next: NextFunctio
       return;
     }
 
-    const coatingMap = await getCoatingShortNames();
-    const lensName = buildLensName(lensItem, coatingMap);
+    const lensName = buildLensName(lensItem, await getLensShortNames());
 
     const row = {
       SHOP: 'AOH',

@@ -1,5 +1,8 @@
 import { createFirestoreModel, BaseDoc } from '../lib/firestoreModel';
 
+/** A statement can only be raised once the priced, unbilled jobs add up to this much. */
+export const MIN_FITTING_STATEMENT_TOTAL = 4000;
+
 /** Snapshot of a job as it appears on the optician's statement (no cost/margin split). */
 export interface FittingStatementLine {
   job: string;

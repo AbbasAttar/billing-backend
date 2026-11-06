@@ -55,6 +55,25 @@ export async function fetchInstagramFeed(
   return items.slice(0, limit);
 }
 
+/**
+ * Exchange a still-valid long-lived token (≥24h old) for a fresh 60-day one.
+ * Instagram tokens die silently after 60 days; refreshing weekly keeps the feed alive forever.
+ * An already-expired token cannot be refreshed — a new one must be generated in the Meta console.
+ */
+export async function refreshInstagramToken(accessToken: string): Promise<string> {
+  const url =
+    `https://graph.instagram.com/refresh_access_token` +
+    `?grant_type=ig_refresh_token&access_token=${accessToken}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Instagram refresh ${res.status}: ${body.slice(0, 300)}`);
+  }
+  const json = (await res.json()) as { access_token?: string };
+  if (!json.access_token) throw new Error('Instagram refresh: no access_token in response');
+  return json.access_token;
+}
+
 export function invalidateInstagramCache() {
   _cache.clear();
 }

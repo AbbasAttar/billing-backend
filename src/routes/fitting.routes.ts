@@ -7,6 +7,8 @@ import {
   createJob,
   updateJob,
   deleteJob,
+  getRates,
+  updateRates,
   createStatement,
   getStatements,
   getStatement,
@@ -25,6 +27,9 @@ router.get('/jobs', getJobs);
 router.post('/jobs', createJob);
 router.patch('/jobs/:id', updateJob);
 router.delete('/jobs/:id', deleteJob);
+
+router.get('/rates', getRates);
+router.put('/rates', updateRates);
 
 router.get('/statements', getStatements);
 router.post('/statements', createStatement);

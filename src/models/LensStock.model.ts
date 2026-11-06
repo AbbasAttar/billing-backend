@@ -1,11 +1,11 @@
 import { createFirestoreModel, BaseDoc } from '../lib/firestoreModel';
-import { LENS_TYPES, LENS_MATERIALS, LENS_COLORS } from './LensPricing.model';
+import { LENS_TYPES } from './LensPricing.model';
 
 export interface ILensStock extends BaseDoc {
   lensType: typeof LENS_TYPES[number];
-  material: typeof LENS_MATERIALS[number];
+  material: string;
   coating: string;
-  color: typeof LENS_COLORS[number];
+  color: string;
   sph: number;
   cyl: number;
   add: number | null;

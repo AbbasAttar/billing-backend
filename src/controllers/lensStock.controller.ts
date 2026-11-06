@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { LensStock } from '../models/LensStock.model';
-import { LENS_TYPES, LENS_MATERIALS, LENS_COLORS } from '../models/LensPricing.model';
+import { LENS_TYPES, isLensName } from '../models/LensPricing.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
 import { ok, fail } from '../utils/response';
 
@@ -30,8 +30,8 @@ export const create = async (req: Request, res: Response, next: NextFunction) =>
     const { lensType, material, coating, color, sph, cyl, add, quantity, reorderLevel, costPrice } = req.body;
 
     if (!LENS_TYPES.includes(lensType))     return fail(res, 'Invalid lensType', 400);
-    if (!LENS_MATERIALS.includes(material)) return fail(res, 'Invalid material', 400);
-    if (!LENS_COLORS.includes(color))       return fail(res, 'Invalid color', 400);
+    if (!isLensName(material)) return fail(res, 'Invalid material', 400);
+    if (!isLensName(color))       return fail(res, 'Invalid color', 400);
     if (!coating?.trim())                   return fail(res, 'coating is required', 400);
     if (typeof sph !== 'number')            return fail(res, 'sph is required', 400);
 
@@ -66,11 +66,11 @@ export const update = async (req: Request, res: Response, next: NextFunction) =>
       patch.lensType = lensType;
     }
     if (material !== undefined) {
-      if (!LENS_MATERIALS.includes(material)) return fail(res, 'Invalid material', 400);
+      if (!isLensName(material)) return fail(res, 'Invalid material', 400);
       patch.material = material;
     }
     if (color !== undefined) {
-      if (!LENS_COLORS.includes(color)) return fail(res, 'Invalid color', 400);
+      if (!isLensName(color)) return fail(res, 'Invalid color', 400);
       patch.color = color;
     }
     if (coating   !== undefined) patch.coating      = coating.trim();

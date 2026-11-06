@@ -1,7 +1,15 @@
 import { Request, Response, NextFunction } from 'express';
 import { FittingParty, DEFAULT_FITTING_BILL_THRESHOLD } from '../models/FittingParty.model';
-import { FittingJob, FITTING_JOB_STATUSES, FITTING_FRAME_TYPES, fittingJobAmounts } from '../models/FittingJob.model';
-import { FittingStatement, FittingStatementLine } from '../models/FittingStatement.model';
+import {
+  FittingJob,
+  FITTING_JOB_STATUSES,
+  FITTING_FRAME_TYPES,
+  FITTING_LENS_KINDS,
+  fittingJobAmounts,
+  fittingLensKind,
+} from '../models/FittingJob.model';
+import { FittingRateCard, loadFittingRates, fittingRateFor } from '../models/FittingRateCard.model';
+import { FittingStatement, FittingStatementLine, MIN_FITTING_STATEMENT_TOTAL } from '../models/FittingStatement.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
 import { buildDirectLabItem } from './wholesalerQueue.controller';
 
@@ -142,19 +150,24 @@ export const createJob = async (req: Request, res: Response, next: NextFunction)
       labItem = idOf(item);
     }
 
+    const frameType = FITTING_FRAME_TYPES.includes(b.frameType) ? b.frameType : 'full';
+    const quantity = Number(b.quantity) > 0 ? Number(b.quantity) : 1;
+    const { rates } = await loadFittingRates();
+    const fittingCharge = money(b.fittingCharge) || fittingRateFor(rates, frameType, fittingLensKind(b.lensSpec)) * quantity;
+
     const job = await FittingJob.create({
       party: idOf(party),
       partyName: party.name,
       date,
       patientName,
       frameNote: b.frameNote?.trim() || undefined,
-      frameType: FITTING_FRAME_TYPES.includes(b.frameType) ? b.frameType : 'full',
+      frameType,
       lensSpec: String(b.lensSpec).trim(),
       eye,
       reRx: eye !== 'left' ? b.reRx || undefined : undefined,
       leRx: eye !== 'right' ? b.leRx || undefined : undefined,
-      quantity: Number(b.quantity) > 0 ? Number(b.quantity) : 1,
-      ...fittingJobAmounts({ lensCost: money(b.lensCost), lensCharge: money(b.lensCharge), fittingCharge: money(b.fittingCharge) }),
+      quantity,
+      ...fittingJobAmounts({ lensCost: money(b.lensCost), lensCharge: money(b.lensCharge), fittingCharge }),
       // Past entries copied from the books come in already delivered.
       status: FITTING_JOB_STATUSES.includes(b.status) ? b.status : 'ordered',
       labItem,
@@ -205,6 +218,14 @@ export const updateJob = async (req: Request, res: Response, next: NextFunction)
         return;
       }
       update.frameType = b.frameType;
+      // A new frame type re-prices the fitting from the rate card, unless a charge came with it.
+      if (b.fittingCharge === undefined && !job.billed) {
+        const { rates } = await loadFittingRates();
+        const rate = fittingRateFor(rates, b.frameType, fittingLensKind(job.lensSpec));
+        if (rate) {
+          Object.assign(update, fittingJobAmounts({ lensCost: update.lensCost ?? job.lensCost, lensCharge: update.lensCharge ?? job.lensCharge, fittingCharge: rate * (job.quantity || 1) }));
+        }
+      }
     }
     for (const k of ['patientName', 'frameNote', 'notes'] as const) {
       if (b[k] !== undefined) update[k] = String(b[k]).trim();
@@ -235,6 +256,51 @@ export const deleteJob = async (req: Request, res: Response, next: NextFunction)
   }
 };
 
+// ── Rate card ─────────────────────────────────────────────────────────────────
+
+// GET /api/fitting/rates — fitting charge per pair for each frame type × lens kind
+export const getRates = async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { rates } = await loadFittingRates();
+    res.json({ rates });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// PUT /api/fitting/rates { rates: [{ frameType, lensKind, amount }] } — also prices open jobs that have no fitting charge yet
+export const updateRates = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const current = await loadFittingRates();
+    const incoming = Array.isArray(req.body?.rates) ? req.body.rates : [];
+    for (const r of incoming) {
+      if (!FITTING_FRAME_TYPES.includes(r?.frameType) || !FITTING_LENS_KINDS.includes(r?.lensKind)) {
+        res.status(400).json({ message: 'Unknown frame type or lens kind.' });
+        return;
+      }
+      const cell = current.rates.find((c) => c.frameType === r.frameType && c.lensKind === r.lensKind)!;
+      cell.amount = money(r.amount);
+    }
+    if (current._id) await FittingRateCard.findByIdAndUpdate(current._id, { $set: { rates: current.rates } });
+    else await FittingRateCard.create({ rates: current.rates });
+
+    const open = await FittingJob.find({ billed: false }).lean();
+    let priced = 0;
+    for (const j of open as any[]) {
+      if (j.status === 'cancelled' || j.fittingCharge) continue;
+      const rate = fittingRateFor(current.rates, j.frameType, fittingLensKind(j.lensSpec));
+      if (!rate) continue;
+      await FittingJob.findByIdAndUpdate(idOf(j), {
+        $set: fittingJobAmounts({ lensCost: j.lensCost, lensCharge: j.lensCharge, fittingCharge: rate * (j.quantity || 1) }),
+      });
+      priced++;
+    }
+    res.json({ rates: current.rates, priced });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // ── Statements ────────────────────────────────────────────────────────────────
 
 // POST /api/fitting/statements { party, jobIds? } — bills the given (or all open, priced) jobs
@@ -254,6 +320,11 @@ export const createStatement = async (req: Request, res: Response, next: NextFun
       .sort((a: any, b: any) => new Date(a.date).getTime() - new Date(b.date).getTime());
     if (!jobs.length) {
       res.status(400).json({ message: 'No priced, unbilled jobs to put on a statement.' });
+      return;
+    }
+    const jobsTotal = jobs.reduce((s: number, j: any) => s + (j.total || 0), 0);
+    if (jobsTotal < MIN_FITTING_STATEMENT_TOTAL) {
+      res.status(400).json({ message: `A statement needs at least ₹${MIN_FITTING_STATEMENT_TOTAL} of priced jobs (currently ₹${jobsTotal}).` });
       return;
     }
 
