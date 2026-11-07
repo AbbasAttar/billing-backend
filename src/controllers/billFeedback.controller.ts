@@ -45,7 +45,7 @@ const seedFields = (invoice: any) => ({
 
 // ── GET /api/public/bill/:id ─────────────────────────────────────────────────
 // Online bill linked from the WhatsApp invoice. Anyone with the link can read it, like /pay/:id,
-// so it carries no phone, address or prescription: first name, items, totals and feedback state.
+// so it carries no phone, address or prescription: name, items, totals and feedback state.
 export const getPublicBill = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const id = String(req.params.id ?? '');
@@ -78,6 +78,8 @@ export const getPublicBill = async (req: Request, res: Response, next: NextFunct
         invoiceNumber: invoice.invoiceNumber ?? String(invoice._id).slice(-6),
         billDate: invoice.billDate ?? invoice.createdAt ?? null,
         firstName: name.trim().split(/\s+/)[0] ?? '',
+        // Full name for the "Billed to" line (lens lines already show it as the wearer).
+        customerName: name.trim().replace(/\s+/g, ' '),
         items: (invoice.items ?? []).map((it: any) => {
           const type = itemType(it);
           return {
