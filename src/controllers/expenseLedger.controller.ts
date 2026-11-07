@@ -100,17 +100,50 @@ export const listExpenseLogs = async (req: Request, res: Response, next: NextFun
   }
 };
 
+/**
+ * Cash paid out of the counter drawer in a date range (default: today). Staff may read this so the
+ * counter page can show drawer cash net of payouts; only amount, note, category and time are sent.
+ */
+export const listCounterPayouts = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { startDate, endDate } = req.query as Record<string, string | undefined>;
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const start = startDate ? parseDate(startDate) : todayStart;
+    const end = endDate ? parseDate(endDate) : new Date(todayStart.getTime() + 86_400_000 - 1);
+    if (!start || !end) return fail(res, 'Invalid date range', 400);
+
+    // Filter the flag in memory: the day's entries are few and this avoids another composite index.
+    const logs = await ExpenseLog.find({ date: { $gte: start, $lte: end } }).sort({ date: -1 });
+    const payouts = logs
+      .filter((l) => l.fromCounter && l.paymentMethod === 'cash')
+      .map((l) => ({ _id: l._id, date: l.date, amount: l.amount, category: l.category, note: l.note }));
+    const total = money(payouts.reduce((s, p) => s + p.amount, 0));
+    return ok(res, { total, payouts });
+  } catch (error) {
+    next(error);
+  }
+};
+
 export const createExpenseLog = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { date, category, amount, note, paymentMethod } = req.body ?? {};
+    const { date, category, amount, note, paymentMethod, fromCounter } = req.body ?? {};
     if (!isAmount(amount)) return fail(res, 'amount must be greater than 0', 400);
     if (!isCategory(category)) return fail(res, `category must be one of: ${EXPENSE_LOG_CATEGORIES.join(', ')}`, 400);
     const method = paymentMethod ?? 'cash';
     if (!isMethod(method)) return fail(res, 'Invalid paymentMethod', 400);
+    if (fromCounter === true && method !== 'cash') return fail(res, 'Only cash can be paid from the counter', 400);
     const parsed = parseDate(date);
     if (!parsed) return fail(res, 'Invalid date', 400);
 
-    const log = await ExpenseLog.create({ date: parsed, category, amount: money(amount), note, paymentMethod: method });
+    const log = await ExpenseLog.create({
+      date: parsed,
+      category,
+      amount: money(amount),
+      note,
+      paymentMethod: method,
+      fromCounter: fromCounter === true,
+    });
     return ok(res, log, 'Expense logged', 201);
   } catch (error) {
     next(error);
@@ -121,7 +154,7 @@ export const updateExpenseLog = async (req: Request, res: Response, next: NextFu
   try {
     const log = await ExpenseLog.findById(req.params.id);
     if (!log) return fail(res, 'Expense not found', 404);
-    const { date, category, amount, note, paymentMethod } = req.body ?? {};
+    const { date, category, amount, note, paymentMethod, fromCounter } = req.body ?? {};
 
     // Payments from a bill or vendor keep their amount and category; delete and re-pay to change them.
     if (log.source && ((amount !== undefined && amount !== log.amount) || (category !== undefined && category !== log.category)))
@@ -148,6 +181,16 @@ export const updateExpenseLog = async (req: Request, res: Response, next: NextFu
       update.date = parsed;
     }
     if (note !== undefined) update.note = note;
+
+    // Counter cash is cash only: switching the method away from cash clears the flag.
+    const nextMethod = update.paymentMethod ?? log.paymentMethod;
+    if (fromCounter !== undefined) {
+      if (typeof fromCounter !== 'boolean') return fail(res, 'fromCounter must be true or false', 400);
+      if (fromCounter && nextMethod !== 'cash') return fail(res, 'Only cash can be paid from the counter', 400);
+      update.fromCounter = fromCounter;
+    } else if (nextMethod !== 'cash' && log.fromCounter) {
+      update.fromCounter = false;
+    }
 
     const saved = await ExpenseLog.findByIdAndUpdate(req.params.id, { $set: update }, { new: true });
     return ok(res, saved, 'Expense updated');
@@ -322,6 +365,7 @@ export const payRecurringBill = async (req: Request, res: Response, next: NextFu
     if ('error' in r) return fail(res, r.error, 400);
 
     const log = await ExpenseLog.create({
+      fromCounter: req.body?.fromCounter === true && method === 'cash',
       date: parsed,
       category: bill.category,
       amount: money(Number(amount)),
@@ -489,6 +533,7 @@ export const addVendorTxn = async (req: Request, res: Response, next: NextFuncti
       });
       if (t === 'pay') {
         const log = await ExpenseLog.create({
+          fromCounter: req.body?.fromCounter === true && method === 'cash',
           date: parsed,
           category: 'vendor',
           amount: amt,

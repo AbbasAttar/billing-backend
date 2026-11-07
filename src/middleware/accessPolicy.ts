@@ -41,7 +41,7 @@ const STAFF_AREAS = [
 ];
 
 /** Dashboard endpoints the counter home screen needs; the rest of /dashboard is business data. */
-const STAFF_DASHBOARD = /^\/dashboard\/(recalls(\/.*)?|daily-tasks)$/;
+const STAFF_DASHBOARD = /^\/dashboard\/(recalls(\/.*)?|daily-tasks|counter-payouts)$/;
 
 /** Exceptions inside staff areas that still need an admin. [method regex, path regex] */
 const ADMIN_ONLY: Array<[RegExp, RegExp]> = [

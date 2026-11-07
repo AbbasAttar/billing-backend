@@ -31,6 +31,8 @@ export interface IExpenseLog extends BaseDoc {
   note?: string;
   paymentMethod: ExpenseLogMethod;
   source?: ExpenseLogSource;
+  /** cash taken out of the shop counter drawer; the counter page deducts it from drawer cash */
+  fromCounter?: boolean;
   /** personal / business, copied from the bill a payment was made against */
   scope?: 'business' | 'personal';
   /** the cheque this entry was written for when it cleared; deleting the entry puts the cheque back to pending */

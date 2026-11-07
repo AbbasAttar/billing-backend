@@ -106,6 +106,32 @@ describe('ledger API', () => {
     expect(list.body.data).toHaveLength(1);
   });
 
+  it('counter cash: flag on create/edit, cash only, listed for the counter page (staff too)', async () => {
+    const day = new Date();
+    day.setHours(12, 0, 0, 0);
+    const date = day.toISOString();
+    const tea = (await api.post('/logs', { category: 'staff_snacks', amount: 80, note: 'tea', date, fromCounter: true })).body.data;
+    expect(tea.fromCounter).toBe(true);
+    // UPI can't come out of the drawer.
+    expect((await api.post('/logs', { category: 'utility', amount: 500, date, paymentMethod: 'upi', fromCounter: true })).status).toBe(400);
+    const bill = (await api.post('/logs', { category: 'utility', amount: 300, date })).body.data;
+    expect(bill.fromCounter).toBe(false);
+
+    // Edit an existing entry to mark it as paid from the counter.
+    const edited = await api.put(`/logs/${bill._id}`, { fromCounter: true });
+    expect(edited.body.data.fromCounter).toBe(true);
+    // Switching it to UPI clears the flag.
+    const upi = await api.put(`/logs/${tea._id}`, { paymentMethod: 'upi' });
+    expect(upi.body.data.fromCounter).toBe(false);
+
+    const range = `startDate=${new Date(day.getTime() - 3600_000).toISOString()}&endDate=${new Date(day.getTime() + 3600_000).toISOString()}`;
+    verifyIdToken.mockResolvedValue({ uid: 's1', email: 'counter@shop.com', email_verified: true });
+    const r = await request(app).get(`/api/dashboard/counter-payouts?${range}`).set(auth);
+    expect(r.status).toBe(200);
+    expect(r.body.data.total).toBe(300);
+    expect(r.body.data.payouts.map((p: any) => p._id)).toEqual([bill._id]);
+  });
+
   it('recurring: partial pay, full pay, reset, undo via log delete', async () => {
     const bill = (await api.post('/recurring', { name: 'Rent', kind: 'ongoing', category: 'utility', amount: 25000 })).body.data;
 

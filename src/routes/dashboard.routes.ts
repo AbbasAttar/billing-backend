@@ -22,9 +22,11 @@ import {
   logRecallOutcome,
   setRecallPreference,
 } from '../controllers/dashboard.controller';
+import { listCounterPayouts } from '../controllers/expenseLedger.controller';
 
 const router = Router();
 
+router.get('/counter-payouts',  listCounterPayouts);
 router.get('/daily',            getDailyKPIs);
 router.get('/daily-tasks',      getDailyTasks);
 router.get('/recalls',          getRecallTasks);
