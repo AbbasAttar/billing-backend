@@ -14,6 +14,28 @@ function formatPowerVal(val: number): string {
   return `${val > 0 ? '+' : ''}${val.toFixed(2)}`;
 }
 
+// Resolve both eyes' power. Left eye copies the right only when the line is flagged
+// same-number AND carries no left-eye data at all. New Rx lines default isSameNumber=true
+// even with distinct eyes, so a per-field fallback would leak RE cyl/axis into an LE
+// that simply has no cylinder.
+function resolveEyes(item: any) {
+  const right = {
+    sph: item.rightSpherical ?? item.spherical ?? null,
+    cyl: item.rightCylinder ?? item.cylinder ?? null,
+    axis: item.rightAxis ?? item.axis ?? null,
+    add: item.rightAddition ?? item.addition ?? null,
+  };
+  const ownLeft = {
+    sph: item.leftSpherical ?? null,
+    cyl: item.leftCylinder ?? null,
+    axis: item.leftAxis ?? null,
+    add: item.leftAddition ?? null,
+  };
+  const leftEmpty = Object.values(ownLeft).every((v) => v === null);
+  const left = item.isSameNumber && leftEmpty ? { ...right } : ownLeft;
+  return { right, left };
+}
+
 // Helper to format an eye Rx cleanly (e.g. "SPH 0.00 / CYL -3.50 × 180° | ADD +2.00")
 function formatEyePower(
   sph: number | null | undefined,
@@ -304,15 +326,9 @@ export const getPendingOrderItems = async (
     }
 
     const enriched = items.map((item: any) => {
-      const rightSph = item.rightSpherical ?? item.spherical ?? null;
-      const rightCyl = item.rightCylinder ?? item.cylinder ?? null;
-      const rightAxis = item.rightAxis ?? item.axis ?? null;
-      const rightAdd = item.rightAddition ?? item.addition ?? null;
-
-      const leftSph = item.leftSpherical ?? (item.isSameNumber ? rightSph : null);
-      const leftCyl = item.leftCylinder ?? (item.isSameNumber ? rightCyl : null);
-      const leftAxis = item.leftAxis ?? (item.isSameNumber ? rightAxis : null);
-      const leftAdd = item.leftAddition ?? (item.isSameNumber ? rightAdd : null);
+      const { right, left } = resolveEyes(item);
+      const { sph: rightSph, cyl: rightCyl, axis: rightAxis, add: rightAdd } = right;
+      const { sph: leftSph, cyl: leftCyl, axis: leftAxis, add: leftAdd } = left;
 
       const ctx = itemCtx.get((item._id as mongoose.Types.ObjectId).toString()) ?? null;
       const frameData = item.frame || null;
@@ -465,15 +481,9 @@ export const getDailyWholesalerSummary = async (
       const coatingKey = item.lensCoating || item.opticalLens?.coating || 'White / Hard Coat';
       coatingCounts[coatingKey] = (coatingCounts[coatingKey] || 0) + pairQty;
 
-      const rightSph = item.rightSpherical ?? item.spherical ?? null;
-      const rightCyl = item.rightCylinder ?? item.cylinder ?? null;
-      const rightAxis = item.rightAxis ?? item.axis ?? null;
-      const rightAdd = item.rightAddition ?? item.addition ?? null;
-
-      const leftSph = item.leftSpherical ?? (item.isSameNumber ? rightSph : null);
-      const leftCyl = item.leftCylinder ?? (item.isSameNumber ? rightCyl : null);
-      const leftAxis = item.leftAxis ?? (item.isSameNumber ? rightAxis : null);
-      const leftAdd = item.leftAddition ?? (item.isSameNumber ? rightAdd : null);
+      const { right, left } = resolveEyes(item);
+      const { sph: rightSph, cyl: rightCyl, axis: rightAxis, add: rightAdd } = right;
+      const { sph: leftSph, cyl: leftCyl, axis: leftAxis, add: leftAdd } = left;
 
       const ctx = itemCtx.get((item._id as mongoose.Types.ObjectId).toString());
       const frameName = item.frame?.houseName || item.frame?.name || ctx?.frameName || item.frameVariantLabel || 'Customer Own Frame';
@@ -704,8 +714,9 @@ export const markSentToWholesaler = async (
         unitSellPrice,
       };
 
-      const rightSph = item.rightSpherical ?? item.spherical ?? null;
-      const leftSph = item.leftSpherical ?? (item.isSameNumber ? rightSph : null);
+      const { right, left } = resolveEyes(item);
+      const rightSph = right.sph;
+      const leftSph = left.sph;
 
       if ((eye === 'both' || !eye) && rightSph !== null && leftSph !== null) {
         pendingEntries.push({
@@ -713,8 +724,8 @@ export const markSentToWholesaler = async (
           notes: `${clientLabel} (RE)`,
           importedFrom: `${itemIdStr}_re`,
           sph: rightSph,
-          cyl: item.rightCylinder ?? item.cylinder ?? 0,
-          add: item.rightAddition ?? item.addition ?? null,
+          cyl: right.cyl ?? 0,
+          add: right.add,
           eye: 'right',
         });
         pendingEntries.push({
@@ -722,8 +733,8 @@ export const markSentToWholesaler = async (
           notes: `${clientLabel} (LE)`,
           importedFrom: `${itemIdStr}_le`,
           sph: leftSph,
-          cyl: item.leftCylinder ?? (item.isSameNumber ? item.rightCylinder ?? 0 : 0),
-          add: item.leftAddition ?? (item.isSameNumber ? item.rightAddition ?? null : null),
+          cyl: left.cyl ?? 0,
+          add: left.add,
           eye: 'left',
         });
       } else {
