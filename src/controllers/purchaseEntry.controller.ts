@@ -396,7 +396,10 @@ export const markReceived = async (
       const cylVal = typeof entry.cyl === 'number' ? entry.cyl : 0;
       const addVal = typeof entry.add === 'number' ? entry.add : null;
 
-      if (lt && mat && coat && col && sph !== null) {
+      // Entries made from a customer bill (importedFrom) are lenses ordered for that customer and fitted;
+      // they never sit on the shelf, so receiving them records the cost only and leaves lens stock alone.
+      const fromBill = !!(entry as any).importedFrom;
+      if (!fromBill && lt && mat && coat && col && sph !== null) {
         const totalLenses = entry.eye === 'both' ? entry.qty * 2 : entry.qty;
         const stockUpdate: any = {
           $set: { lastCost: unitCost, costPrice: unitCost },
@@ -405,6 +408,9 @@ export const markReceived = async (
         // Only increment inventory quantity if not already previously received to prevent double counting
         if (!wasAlreadyReceived) {
           stockUpdate.$inc = { quantity: totalLenses };
+        } else {
+          // No count change, but a newly inserted row still needs a quantity field (missing = NaN on screen).
+          stockUpdate.$setOnInsert.quantity = 0;
         }
 
         try {
@@ -568,7 +574,9 @@ export const updatePurchaseEntry = async (
     invalidateInvoiceLookupCache();
 
     // If unitCost was updated and complete SKU is known, update LensStock lastCost
-    if (entry.unitCost !== null && entry.lensType && entry.material && entry.coating && entry.color && entry.sph !== null) {
+    // Shelf purchases only: refresh the matching stock row's cost. Never create a row here (that made
+    // count-less stock rows), and never for lenses ordered for a customer bill.
+    if (!(entry as any).importedFrom && entry.unitCost !== null && entry.lensType && entry.material && entry.coating && entry.color && entry.sph !== null) {
       await LensStock.findOneAndUpdate(
         {
           lensType: entry.lensType,
@@ -579,11 +587,8 @@ export const updatePurchaseEntry = async (
           cyl: typeof entry.cyl === 'number' ? entry.cyl : 0,
           add: typeof entry.add === 'number' ? entry.add : null,
         },
-        {
-          $set: { lastCost: entry.unitCost },
-          $setOnInsert: { reorderLevel: 2, costPrice: entry.unitCost },
-        },
-        { upsert: true, new: true, runValidators: false },
+        { $set: { lastCost: entry.unitCost } },
+        { upsert: false, new: true, runValidators: false },
       );
     }
 
@@ -1181,6 +1186,8 @@ export async function createPendingPurchasesForInvoice(invoiceId: string | any):
       );
 
       if (!isLens) continue;
+      // Taken off the counter shelf: nothing was bought for this bill.
+      if (item.fulfillmentSource === 'stock' && item.sentToWholesaler === false) continue;
 
       const itId = String(item._id || item.id);
 

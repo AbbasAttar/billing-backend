@@ -5,6 +5,7 @@
 import { LensCompany, LOCAL_COMPANY, type ILensCompany } from '../models/LensCompany.model';
 import { LensPriceBook, type ILensPriceBook } from '../models/LensPriceBook.model';
 import { LensStock } from '../models/LensStock.model';
+import { PurchaseEntry } from '../models/PurchaseEntry.model';
 import { SiteSetting } from '../models/SiteSetting.model';
 import { getLensPricingRulesCached } from './purchaseLookup';
 import {
@@ -51,20 +52,18 @@ const same = (a: unknown, b: unknown) =>
   String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
 
 /**
- * Latest purchase cost per pair. Phase 1 reads LensStock.lastCost (per lens, exact power), which has
- * no company, so it only answers for Local lenses. Phase 4 adds company-aware purchase costs.
+ * Latest purchase cost per pair (per lens, exact power), from the purchase ledger — every received
+ * lens purchase, whether for the shelf or for a customer bill. Falls back to the stock row's cost.
+ * It has no company, so it only answers for Local lenses. Phase 4 adds company-aware purchase costs.
  */
 async function lastPurchaseCost(spec: LensSpec, rx: EyeRx): Promise<number | null> {
   if (!same(spec.company || LOCAL_COMPANY, LOCAL_COMPANY)) return null;
-  const stock: any = await LensStock.findOne({
-    lensType: spec.lensType,
-    material: spec.material,
-    coating: spec.coating,
-    color: spec.color,
-    sph: rx.sph,
-    cyl: rx.cyl,
-    add: rx.add,
-  }).lean();
+  const match = { lensType: spec.lensType, material: spec.material, coating: spec.coating, color: spec.color, sph: rx.sph, cyl: rx.cyl, add: rx.add };
+  const bought: any[] = await PurchaseEntry.find({ ...match, status: 'received' }).lean();
+  const time = (d: any) => (d ? new Date(d).getTime() : 0);
+  const latest = bought.filter((p) => Number(p.unitCost) > 0).sort((a, b) => time(b.purchaseDate) - time(a.purchaseDate))[0];
+  if (latest) return Number(latest.unitCost) * 2;
+  const stock: any = await LensStock.findOne(match).lean();
   const perLens = Number(stock?.lastCost ?? stock?.costPrice);
   return perLens > 0 ? perLens * 2 : null;
 }

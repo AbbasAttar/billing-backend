@@ -506,6 +506,10 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       const deductions: StockDeduction[] = [];
       for (const item of items as any[]) {
         if (item.type !== 'opticalLens' || item.isCustomLens) continue;
+        // Only lenses taken off the counter shelf leave stock. Lenses ordered from the wholesaler (or
+        // already ordered) were never on the shelf, even when a matching power happens to be in stock.
+        const fromCounterStock = item.fulfillmentSource === 'stock' && item.sendToWholesaler === false;
+        if (!fromCounterStock) continue;
         const lensType = item.lensType ?? null;
         const material = item.lensMaterial ?? null;
         const coating = item.lensCoating ?? null;

@@ -53,6 +53,8 @@ const ADMIN_ONLY: Array<[RegExp, RegExp]> = [
   [/^PATCH$/, /\/archive$/],
   // Merging duplicate products moves stock and archives one; marking a pair as different hides it from the check.
   [/^POST$/, /^\/fragrances\/[^/]+\/(merge|not-duplicate)$/],
+  // Folding duplicate lens stock rows deletes rows.
+  [/^POST$/, /^\/lens-stock\/merge-duplicates$/],
   // Invoice numbering and corrections to money already recorded.
   [/^POST$/, /^\/invoices\/renumber$/],
   [/^PATCH$/, /^\/invoices\/[^/]+\/payment\/[^/]+$/],

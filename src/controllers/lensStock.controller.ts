@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { toMinusCyl } from '../utils/lensPower';
 import { LensStock } from '../models/LensStock.model';
 import { LENS_TYPES, isLensName } from '../models/LensPricing.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
@@ -23,29 +24,70 @@ export const getAll = async (req: Request, res: Response, next: NextFunction) =>
   } catch (e) { next(e); }
 };
 
+// ── Same lens + power ─────────────────────────────────────────────────────────
+
+/** ADD as stored for matching: single vision (and missing / 0 ADD) is null. */
+const normAdd = (add: unknown): number | null => (typeof add === 'number' && add > 0 ? Math.round(add * 100) / 100 : null);
+const num2 = (n: unknown) => Math.round((typeof n === 'number' ? n : 0) * 100) / 100;
+
+/** Axis as stored: 0–180 with a CYL, otherwise null. Undefined input = not given. */
+const readAxis = (axis: unknown, cyl: unknown): number | null =>
+  num2(cyl) !== 0 && typeof axis === 'number' && axis >= 0 && axis <= 180 ? Math.round(axis) : null;
+
+/** Key for "the same physical lens": kind + power (+ axis with a CYL on bifocal / progressive; an uncut single-vision blank turns to any axis). Firestore has no unique index, so this is checked in code. */
+export function stockKey(r: { lensType?: unknown; material?: unknown; coating?: unknown; color?: unknown; sph?: unknown; cyl?: unknown; axis?: unknown; add?: unknown }): string {
+  const t = (v: unknown) => String(v ?? '').trim().toLowerCase();
+  // Plus-cyl and minus-cyl spellings of one power are the same lens.
+  const p = toMinusCyl(num2(r.sph), num2(r.cyl), typeof r.axis === 'number' ? r.axis : null);
+  return [t(r.lensType), t(r.material), t(r.coating), t(r.color), p.sph, p.cyl, (t(r.lensType) === 'single vision' ? null : readAxis(p.axis, p.cyl)) ?? '', normAdd(r.add) ?? ''].join('|');
+}
+
+/** Another row for the same lens + power, if one exists (ignoring `exceptId`). */
+async function findSameLens(row: Parameters<typeof stockKey>[0], exceptId?: string) {
+  const key = stockKey(row);
+  // Not narrowed by SPH: an older plus-cyl row has a different SPH for the same lens.
+  const candidates = await LensStock.find({ lensType: row.lensType });
+  return candidates.find((c: any) => String(c._id ?? c.id) !== exceptId && stockKey(c) === key) ?? null;
+}
+
+const DUPLICATE_MSG = 'A stock entry for this exact lens already exists';
+
+/** Which eye the spare lens of a half pair is for (progressive). Anything else = not recorded. */
+const readOddEye = (v: unknown): 'right' | 'left' | null => (v === 'right' || v === 'left' ? v : null);
+
 // ── CREATE ────────────────────────────────────────────────────────────────────
 
 export const create = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { lensType, material, coating, color, sph, cyl, add, quantity, reorderLevel, costPrice } = req.body;
+    const { lensType, material, coating, color, sph, cyl, axis, add, quantity, reorderLevel, costPrice, oddEye } = req.body;
 
     if (!LENS_TYPES.includes(lensType))     return fail(res, 'Invalid lensType', 400);
+    if (axis !== undefined && axis !== null && (typeof axis !== 'number' || axis < 0 || axis > 180)) return fail(res, 'axis must be 0–180', 400);
     if (!isLensName(material)) return fail(res, 'Invalid material', 400);
     if (!isLensName(color))       return fail(res, 'Invalid color', 400);
     if (!coating?.trim())                   return fail(res, 'coating is required', 400);
     if (typeof sph !== 'number')            return fail(res, 'sph is required', 400);
 
-    const entry = await LensStock.create({
+    // Always stored in minus cyl: 0 / +0.50 × 90 is saved as +0.50 / -0.50 × 180.
+    const power = toMinusCyl(sph, typeof cyl === 'number' ? cyl : 0, typeof axis === 'number' ? axis : null);
+    const doc = {
       lensType,
       material,
       coating: coating.trim(),
       color,
-      sph,
-      cyl:          typeof cyl === 'number'          ? cyl          : 0,
-      add:          typeof add === 'number'           ? add          : null,
+      sph:          power.sph,
+      cyl:          power.cyl,
+      axis:         readAxis(power.axis, power.cyl),
+      add:          lensType === 'Single Vision' ? null : normAdd(add),
+    };
+    if (await findSameLens(doc)) return fail(res, DUPLICATE_MSG, 409);
+
+    const entry = await LensStock.create({
+      ...doc,
       quantity:     typeof quantity === 'number'      ? quantity     : 0,
       reorderLevel: typeof reorderLevel === 'number'  ? reorderLevel : 2,
       costPrice:    typeof costPrice === 'number'     ? costPrice    : 0,
+      oddEye:       readOddEye(oddEye),
     });
     return ok(res, entry, 'Stock entry created', 201);
   } catch (e: any) {
@@ -58,8 +100,10 @@ export const create = async (req: Request, res: Response, next: NextFunction) =>
 
 export const update = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { lensType, material, coating, color, sph, cyl, add, quantity, reorderLevel, costPrice } = req.body;
+    const { lensType, material, coating, color, sph, cyl, axis, add, quantity, reorderLevel, costPrice, oddEye } = req.body;
     const patch: Record<string, unknown> = {};
+    if (axis !== undefined && axis !== null && (typeof axis !== 'number' || axis < 0 || axis > 180)) return fail(res, 'axis must be 0–180', 400);
+    if (oddEye !== undefined) patch.oddEye = readOddEye(oddEye);
 
     if (lensType  !== undefined) {
       if (!LENS_TYPES.includes(lensType)) return fail(res, 'Invalid lensType', 400);
@@ -76,10 +120,26 @@ export const update = async (req: Request, res: Response, next: NextFunction) =>
     if (coating   !== undefined) patch.coating      = coating.trim();
     if (sph       !== undefined) patch.sph          = sph;
     if (cyl       !== undefined) patch.cyl          = cyl;
-    if (add       !== undefined) patch.add          = add;
+    if (add       !== undefined) patch.add          = normAdd(add);
     if (quantity  !== undefined) patch.quantity     = quantity;
     if (reorderLevel !== undefined) patch.reorderLevel = reorderLevel;
     if (costPrice !== undefined) patch.costPrice    = costPrice;
+
+    const current = await LensStock.findById(req.params.id);
+    if (!current) return fail(res, 'Stock entry not found', 404);
+    const next = { ...(typeof (current as any).toObject === 'function' ? (current as any).toObject() : current), ...patch };
+    if (next.lensType === 'Single Vision') patch.add = null;
+    if (axis !== undefined || cyl !== undefined) patch.axis = readAxis(axis !== undefined ? axis : next.axis, next.cyl);
+    if (sph !== undefined || cyl !== undefined || axis !== undefined) {
+      // Keep the row in minus cyl.
+      const p = toMinusCyl(Number(next.sph) || 0, Number(next.cyl) || 0, (patch.axis ?? next.axis ?? null) as number | null);
+      patch.sph = p.sph;
+      patch.cyl = p.cyl;
+      patch.axis = readAxis(p.axis, p.cyl);
+    }
+    if (await findSameLens({ ...next, ...patch }, String(req.params.id))) {
+      return fail(res, DUPLICATE_MSG, 409);
+    }
 
     const entry = await LensStock.findByIdAndUpdate(req.params.id, patch, { new: true, runValidators: true });
     if (!entry) return fail(res, 'Stock entry not found', 404);
@@ -100,9 +160,16 @@ export const adjust = async (req: Request, res: Response, next: NextFunction) =>
     const entry = await LensStock.findById(req.params.id);
     if (!entry) return fail(res, 'Stock entry not found', 404);
 
-    const newQty = entry.quantity + delta;
+    // Old upsert-bug rows keep their count under a literal "$inc" field; changing them here would be
+    // double-counted when repairLensStockOperators.ts folds that field in.
+    if (['$inc', '$set', '$setOnInsert'].some((k) => k in (entry as any))) {
+      return fail(res, 'This row needs the lens stock repair script before its count can change', 409);
+    }
+    const newQty = (Number.isFinite(entry.quantity) ? entry.quantity : 0) + delta;
     if (newQty < 0) return fail(res, 'Cannot reduce quantity below 0', 400);
     entry.quantity = newQty;
+    // A full pair again: no spare lens, so which eye it was no longer applies.
+    if (newQty % 2 === 0 && (entry as any).oddEye) (entry as any).oddEye = null;
     await entry.save();
     return ok(res, entry);
   } catch (e) { next(e); }
@@ -115,6 +182,50 @@ export const remove = async (req: Request, res: Response, next: NextFunction) =>
     const entry = await LensStock.findByIdAndDelete(req.params.id);
     if (!entry) return fail(res, 'Stock entry not found', 404);
     return ok(res, { _id: entry._id }, 'Stock entry deleted');
+  } catch (e) { next(e); }
+};
+
+// ── MERGE DUPLICATES (admin) ─────────────────────────────────────────────────
+
+/**
+ * Rows for the same lens + power are folded into the oldest one: quantities summed, the highest reorder
+ * level kept, the cost taken from the most recently updated row that has one. The extra rows are deleted.
+ */
+export const mergeDuplicates = async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const all: any[] = await LensStock.find({});
+    const groups = new Map<string, any[]>();
+    for (const r of all) groups.set(stockKey(r), [...(groups.get(stockKey(r)) ?? []), r]);
+
+    let merged = 0;
+    let removed = 0;
+    let skipped = 0;
+    // Rows from the old upsert bug hold their count under literal "$inc"/"$set" fields; folding them here
+    // would lose that stock. Leave those groups until repairLensStockOperators.ts has been run.
+    const broken = (r: any) => ['$inc', '$set', '$setOnInsert'].some((k) => r && typeof r === 'object' && k in r);
+    const time = (d: unknown) => (d ? new Date(d as string).getTime() : 0);
+    for (const rows of groups.values()) {
+      if (rows.length < 2) continue;
+      if (rows.some(broken)) { skipped++; continue; }
+      rows.sort((a, b) => time(a.createdAt) - time(b.createdAt));
+      const [keep, ...extra] = rows;
+      const latestCost = [...rows].sort((a, b) => time(b.updatedAt) - time(a.updatedAt)).find((r) => (r.costPrice ?? 0) > 0);
+      const update: Record<string, number> = {
+        reorderLevel: Math.max(...rows.map((r) => r.reorderLevel ?? 0)),
+        costPrice: latestCost?.costPrice ?? keep.costPrice ?? 0,
+      };
+      // Leave quantity unset when none of the rows was ever counted, so it stays "not counted".
+      if (rows.some((r) => Number.isFinite(r.quantity))) {
+        update.quantity = rows.reduce((s, r) => s + (Number.isFinite(r.quantity) ? Math.max(0, r.quantity) : 0), 0);
+      }
+      await LensStock.findByIdAndUpdate(String(keep._id ?? keep.id), update);
+      for (const r of extra) {
+        await LensStock.findByIdAndDelete(String(r._id ?? r.id));
+        removed++;
+      }
+      merged++;
+    }
+    return ok(res, { merged, removed, skipped }, merged ? `Merged ${merged} lenses, removed ${removed} duplicate rows` : 'No duplicates merged');
   } catch (e) { next(e); }
 };
 
