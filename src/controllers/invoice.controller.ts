@@ -22,6 +22,7 @@ import { PurchaseEntry } from '../models/PurchaseEntry.model';
 import { createPendingPurchasesForInvoice, invalidateInvoiceLookupCache } from './purchaseEntry.controller';
 import type { CreateInvoiceInput, CreateInvoiceItemInput, DemandLogInput } from '../types';
 import { buildLensName, getLensShortNames } from '../services/lensShortNames';
+import { toMinusCyl } from '../utils/lensPower';
 
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -245,7 +246,32 @@ interface StockDeduction {
   color: string;
   sph: number;
   cyl: number;
+  axis: number | null;
   add: number | null;
+}
+
+const lower = (v: unknown) => String(v ?? '').trim().toLowerCase();
+const r2 = (v: unknown) => Math.round((Number(v) || 0) * 100) / 100;
+const addOf = (v: unknown) => (typeof v === 'number' && v > 0 ? r2(v) : null);
+
+/**
+ * Does this stock row hold the lens a bill line takes? Names match ignoring case, powers are
+ * compared in minus cyl (so a plus-cyl Rx finds its stock row), and ADD only counts off single vision.
+ * Axis only has to agree when both the row and the bill have one: an uncut single-vision blank
+ * turns to any axis, and older bifocal rows often have none recorded.
+ */
+export function stockRowFits(row: any, d: StockDeduction): boolean {
+  if (lower(row.lensType) !== lower(d.lensType)) return false;
+  if (lower(row.material) !== lower(d.material) || lower(row.coating) !== lower(d.coating) || lower(row.color) !== lower(d.color)) return false;
+  const want = toMinusCyl(r2(d.sph), r2(d.cyl), d.axis);
+  const have = toMinusCyl(r2(row.sph), r2(row.cyl), typeof row.axis === 'number' ? row.axis : null);
+  if (want.sph !== have.sph || want.cyl !== have.cyl) return false;
+  if (lower(d.lensType) !== 'single vision' && addOf(row.add) !== addOf(d.add)) return false;
+  if (lower(d.lensType) !== 'single vision' && want.cyl !== 0 && typeof want.axis === 'number' && typeof have.axis === 'number') {
+    const gap = Math.abs(want.axis - have.axis) % 180;
+    if (Math.min(gap, 180 - gap) > 5) return false;
+  }
+  return true;
 }
 
 export const createInvoice = async (req: Request, res: Response, next: NextFunction) => {
@@ -505,7 +531,8 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
 
       const deductions: StockDeduction[] = [];
       for (const item of items as any[]) {
-        if (item.type !== 'opticalLens' || item.isCustomLens) continue;
+        // A typed (custom) price does not change where the lens came from, so it still leaves stock.
+        if (item.type !== 'opticalLens') continue;
         // Only lenses taken off the counter shelf leave stock. Lenses ordered from the wholesaler (or
         // already ordered) were never on the shelf, even when a matching power happens to be in stock.
         const fromCounterStock = item.fulfillmentSource === 'stock' && item.sendToWholesaler === false;
@@ -518,17 +545,20 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         const eye = item.eye ?? 'both';
         const base = { lensType, material, coating, color };
         if ((eye === 'right' || eye === 'both') && (item.rightSpherical ?? null) !== null) {
-          deductions.push({ ...base, sph: item.rightSpherical, cyl: item.rightCylinder ?? 0, add: item.rightAddition ?? null });
+          deductions.push({ ...base, sph: item.rightSpherical, cyl: item.rightCylinder ?? 0, axis: item.rightAxis ?? null, add: item.rightAddition ?? null });
         }
         if ((eye === 'left' || eye === 'both') && (item.leftSpherical ?? null) !== null) {
-          deductions.push({ ...base, sph: item.leftSpherical, cyl: item.leftCylinder ?? 0, add: item.leftAddition ?? null });
+          deductions.push({ ...base, sph: item.leftSpherical, cyl: item.leftCylinder ?? 0, axis: item.leftAxis ?? null, add: item.leftAddition ?? null });
         }
       }
       // Each deduction takes one unit from the first matching stock row that still has stock.
       const stockRows = new Map<string, any>();
       const stockTaken = new Map<string, number>();
+      // Rows are read by lens type and matched in code (names, minus cyl, ADD), not by exact field equality.
+      const rowsByType = new Map<string, any[]>();
       for (const d of deductions) {
-        const rows = await t.query<any>(LensStock, { ...d });
+        if (!rowsByType.has(d.lensType)) rowsByType.set(d.lensType, await t.query<any>(LensStock, { lensType: d.lensType }));
+        const rows = rowsByType.get(d.lensType)!.filter((r) => stockRowFits(r, d));
         for (const r of rows) if (!stockRows.has(r.id)) stockRows.set(r.id, r);
         const row = rows
           .sort((a, b) => (a.id < b.id ? -1 : 1))
