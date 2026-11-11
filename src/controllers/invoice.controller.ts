@@ -22,7 +22,7 @@ import { PurchaseEntry } from '../models/PurchaseEntry.model';
 import { createPendingPurchasesForInvoice, invalidateInvoiceLookupCache } from './purchaseEntry.controller';
 import type { CreateInvoiceInput, CreateInvoiceItemInput, DemandLogInput } from '../types';
 import { buildLensName, getLensShortNames } from '../services/lensShortNames';
-import { toMinusCyl } from '../utils/lensPower';
+import { LensStockMoves, LensStockShortError, bodyHasSource, lensNeeds, needsKey, sourceFields, sourceFromBody, sourceOfStored, type LensTake } from '../services/lensStockMoves';
 
 const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -139,7 +139,7 @@ class InvoiceHttpError extends Error {
 }
 
 function sendHttpError(error: unknown, res: Response): boolean {
-  if (error instanceof InvoiceHttpError) {
+  if (error instanceof InvoiceHttpError || error instanceof LensStockShortError) {
     res.status(error.status).json({ message: error.message });
     return true;
   }
@@ -238,41 +238,6 @@ async function respondWithInvoice(res: Response, invoiceId: string, status = 200
 }
 
 // ── CREATE invoice (one transaction) ─────────────────────────────────────────
-
-interface StockDeduction {
-  lensType: string;
-  material: string;
-  coating: string;
-  color: string;
-  sph: number;
-  cyl: number;
-  axis: number | null;
-  add: number | null;
-}
-
-const lower = (v: unknown) => String(v ?? '').trim().toLowerCase();
-const r2 = (v: unknown) => Math.round((Number(v) || 0) * 100) / 100;
-const addOf = (v: unknown) => (typeof v === 'number' && v > 0 ? r2(v) : null);
-
-/**
- * Does this stock row hold the lens a bill line takes? Names match ignoring case, powers are
- * compared in minus cyl (so a plus-cyl Rx finds its stock row), and ADD only counts off single vision.
- * Axis only has to agree when both the row and the bill have one: an uncut single-vision blank
- * turns to any axis, and older bifocal rows often have none recorded.
- */
-export function stockRowFits(row: any, d: StockDeduction): boolean {
-  if (lower(row.lensType) !== lower(d.lensType)) return false;
-  if (lower(row.material) !== lower(d.material) || lower(row.coating) !== lower(d.coating) || lower(row.color) !== lower(d.color)) return false;
-  const want = toMinusCyl(r2(d.sph), r2(d.cyl), d.axis);
-  const have = toMinusCyl(r2(row.sph), r2(row.cyl), typeof row.axis === 'number' ? row.axis : null);
-  if (want.sph !== have.sph || want.cyl !== have.cyl) return false;
-  if (lower(d.lensType) !== 'single vision' && addOf(row.add) !== addOf(d.add)) return false;
-  if (lower(d.lensType) !== 'single vision' && want.cyl !== 0 && typeof want.axis === 'number' && typeof have.axis === 'number') {
-    const gap = Math.abs(want.axis - have.axis) % 180;
-    if (Math.min(gap, 180 - gap) > 5) return false;
-  }
-  return true;
-}
 
 export const createInvoice = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -529,42 +494,15 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         returnedNow.set(p.itemId, taken);
       }
 
-      const deductions: StockDeduction[] = [];
-      for (const item of items as any[]) {
-        // A typed (custom) price does not change where the lens came from, so it still leaves stock.
-        if (item.type !== 'opticalLens') continue;
-        // Only lenses taken off the counter shelf leave stock. Lenses ordered from the wholesaler (or
-        // already ordered) were never on the shelf, even when a matching power happens to be in stock.
-        const fromCounterStock = item.fulfillmentSource === 'stock' && item.sendToWholesaler === false;
-        if (!fromCounterStock) continue;
-        const lensType = item.lensType ?? null;
-        const material = item.lensMaterial ?? null;
-        const coating = item.lensCoating ?? null;
-        const color = item.lensColor ?? null;
-        if (!lensType || !material || !coating || !color) continue;
-        const eye = item.eye ?? 'both';
-        const base = { lensType, material, coating, color };
-        if ((eye === 'right' || eye === 'both') && (item.rightSpherical ?? null) !== null) {
-          deductions.push({ ...base, sph: item.rightSpherical, cyl: item.rightCylinder ?? 0, axis: item.rightAxis ?? null, add: item.rightAddition ?? null });
-        }
-        if ((eye === 'left' || eye === 'both') && (item.leftSpherical ?? null) !== null) {
-          deductions.push({ ...base, sph: item.leftSpherical, cyl: item.leftCylinder ?? 0, axis: item.leftAxis ?? null, add: item.leftAddition ?? null });
-        }
-      }
-      // Each deduction takes one unit from the first matching stock row that still has stock.
-      const stockRows = new Map<string, any>();
-      const stockTaken = new Map<string, number>();
-      // Rows are read by lens type and matched in code (names, minus cyl, ADD), not by exact field equality.
-      const rowsByType = new Map<string, any[]>();
-      for (const d of deductions) {
-        if (!rowsByType.has(d.lensType)) rowsByType.set(d.lensType, await t.query<any>(LensStock, { lensType: d.lensType }));
-        const rows = rowsByType.get(d.lensType)!.filter((r) => stockRowFits(r, d));
-        for (const r of rows) if (!stockRows.has(r.id)) stockRows.set(r.id, r);
-        const row = rows
-          .sort((a, b) => (a.id < b.id ? -1 : 1))
-          .find((r) => (typeof r.quantity === 'number' ? r.quantity : 0) - (stockTaken.get(r.id) ?? 0) > 0);
-        if (row) stockTaken.set(row.id, (stockTaken.get(row.id) ?? 0) + 1);
-      }
+      // Counter-stock lenses come off the shelf; each line remembers which rows it took (lensStockTaken).
+      // Lenses ordered from the wholesaler, already ordered or sourced locally never touch lens stock.
+      const lensMoves = new LensStockMoves(t);
+      const counterLines = (items as any[])
+        .map((it, i) => ({ it, i }))
+        .filter(({ it }) => it.type === 'opticalLens' && sourceFromBody(it) === 'counter');
+      await lensMoves.load(counterLines.map((x) => x.it), []);
+      const lensTakenByIndex = new Map<number, LensTake[]>();
+      for (const { it, i } of counterLines) lensTakenByIndex.set(i, lensMoves.take(it));
 
       // Writes.
       const seq = (counter?.lastSeq ?? 0) + 1;
@@ -720,7 +658,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
       const itemIds: string[] = [];
       let totalCogs = 0;
 
-      for (const item of resolved) {
+      for (const [lineIndex, item] of resolved.entries()) {
         let costPrice = typeof item.costPrice === 'number' ? item.costPrice : 0;
         if (costPrice === 0) {
           if (item.type === 'frame' && item.frame) {
@@ -793,22 +731,14 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
           doc.leftAxis = item.leftAxis ?? null;
           doc.leftAddition = item.leftAddition ?? null;
 
-          const isAlreadyOrdered = !!(item.alreadyOrdered || item.skipWholesalerQueue || item.fulfillmentSource === 'already_ordered');
-          const isCounterStock = item.fulfillmentSource === 'stock' && item.sendToWholesaler === false;
-          if (isAlreadyOrdered) {
-            doc.fulfillmentSource = 'stock';
-            doc.sentToWholesaler = true;
-            doc.labStatus = 'fitted';
-            doc.wholesalerOrderDate = new Date();
-          } else if (isCounterStock) {
-            doc.fulfillmentSource = 'stock';
-            doc.sentToWholesaler = false;
-            doc.labStatus = 'fitted';
-          } else {
-            doc.fulfillmentSource = item.fulfillmentSource || 'ordered';
-            doc.sentToWholesaler = item.sentToWholesaler || false;
-            doc.labStatus = item.labStatus || 'pending';
+          const source = sourceFromBody(item);
+          Object.assign(doc, sourceFields(source));
+          if (source === 'ordered') {
+            if (item.sentToWholesaler) doc.sentToWholesaler = true;
+            if (item.labStatus) doc.labStatus = item.labStatus;
           }
+          const taken = lensTakenByIndex.get(lineIndex);
+          if (taken?.length) doc.lensStockTaken = taken;
           doc.requestedQty = item.requestedQty ?? item.quantity;
           doc.fulfilledQty = item.fulfilledQty ?? item.quantity;
         }
@@ -870,11 +800,7 @@ export const createInvoice = async (req: Request, res: Response, next: NextFunct
         invoiceDocId,
       );
 
-      for (const [rowId, taken] of stockTaken) {
-        const row = stockRows.get(rowId);
-        const current = typeof row?.quantity === 'number' ? row.quantity : 0;
-        await t.update(LensStock, rowId, { quantity: Math.max(0, current - taken) }, row ?? null);
-      }
+      await lensMoves.write();
 
       return invoiceDocId;
     });
@@ -1184,6 +1110,11 @@ export const deleteInvoice = async (req: Request, res: Response, next: NextFunct
       const wholesaleItems = await t.getMany<any>(WholesaleItem, wsRead.legacyIds);
       for (const old of wholesaleItems.values()) if (old?.migratedTo) wsRead.fragranceIds.add(String(old.migratedTo));
       const wsFragrances = await t.getMany<any>(Fragrance, [...wsRead.fragranceIds]);
+      // Counter-stock lenses this bill recorded taking go back on the shelf.
+      const lensMoves = new LensStockMoves(t);
+      const lensTaken = [...items.values()].map((i) => i.lensStockTaken).filter((x) => x?.length);
+      await lensMoves.load([], lensTaken);
+      for (const taken of lensTaken) lensMoves.give(taken);
       const restored = new Map<string, any>();
       for (const item of items.values()) {
         // Pieces already returned were put back when they came in.
@@ -1231,6 +1162,7 @@ export const deleteInvoice = async (req: Request, res: Response, next: NextFunct
         const line = returnLines.get(lineId);
         await t.update(InvoiceItem, lineId, { returnedQty: Math.max(0, (line?.returnedQty || 0) - qty) }, line ?? null);
       }
+      await lensMoves.write();
       for (const id of itemIds) t.delete(InvoiceItem, id);
       t.delete(Invoice, invoiceId);
     });
@@ -1294,9 +1226,17 @@ export const addItemToInvoice = async (req: Request, res: Response, next: NextFu
       return;
     }
 
+    const lensSource = isLens ? sourceFromBody(body) : null;
     await mutateInvoice(
       invoiceId,
       async (invoice, items, t) => {
+        // A counter-stock lens comes off the shelf (read before any write; refused if not in stock).
+        const lensMoves = new LensStockMoves(t);
+        let lensTaken: LensTake[] = [];
+        if (lensSource === 'counter') {
+          await lensMoves.load([body], []);
+          lensTaken = lensMoves.take(body);
+        }
         // Read the product first (all reads come before writes) so the line carries its cost.
         let productCostPrice: number | null = null;
         let frameDoc: any = null;
@@ -1374,9 +1314,13 @@ export const addItemToInvoice = async (req: Request, res: Response, next: NextFu
           doc.leftAxis = body.leftAxis;
           doc.leftAddition = body.leftAddition;
           doc.isCustomLens = body.isCustomLens ?? !body.opticalLens;
+          doc.type = 'opticalLens';
+          Object.assign(doc, sourceFields(lensSource ?? 'ordered'));
+          if (lensTaken.length) doc.lensStockTaken = lensTaken;
         }
 
         const created = await t.create<any>(InvoiceItem, doc);
+        await lensMoves.write();
         invoice.items.push(created.id);
         items.set(created.id, created);
         recalcFromItems(invoice, items);
@@ -1412,6 +1356,12 @@ export const removeItemFromInvoice = async (req: Request, res: Response, next: N
 
         // A removed frame line puts its pieces back (read before any write).
         const removed = items.get(invoice.items[index]);
+        // So does a counter-stock lens line, for the lenses it recorded taking.
+        const lensMoves = new LensStockMoves(t);
+        if (removed?.lensStockTaken?.length) {
+          await lensMoves.load([], [removed.lensStockTaken]);
+          lensMoves.give(removed.lensStockTaken);
+        }
         if (removed?.frame) {
           const frameId = idOf(removed.frame);
           const frameDoc = await t.get<any>(Frame, frameId);
@@ -1421,6 +1371,7 @@ export const removeItemFromInvoice = async (req: Request, res: Response, next: N
           if (set) await t.update(Frame, frameId, { $set: set }, frameDoc);
         }
 
+        await lensMoves.write();
         const [removedId] = invoice.items.splice(index, 1);
         t.delete(InvoiceItem, removedId);
         items.delete(removedId);
@@ -1516,12 +1467,37 @@ export const updateItemInInvoice = async (req: Request, res: Response, next: Nex
       return;
     }
 
+    let lensSourceChange: { from: string; to: string } | null = null;
     await mutateInvoice(
       invoiceId,
       async (invoice, items, t) => {
         if (!invoice.items.includes(itemId)) throw new InvoiceHttpError(400, 'Item does not belong to this invoice');
         const existing = items.get(itemId) ?? null;
         const update: Record<string, any> = { ...descriptive, quantity, price };
+
+        // Lens source and counter stock (reads first). A line already on counter stock is not taken
+        // again; switching it away puts its lenses back; switching to counter takes them (or refuses).
+        const lensMoves = new LensStockMoves(t);
+        const isLensLine = !!existing && !existing.frame && !existing.fragrance && existing.type !== 'wholesale' &&
+          (existing.type === 'opticalLens' || !!existing.lensType || !!existing.opticalLens);
+        if (isLensLine) {
+          const oldSource = sourceOfStored(existing);
+          const newSource = bodyHasSource(req.body) ? sourceFromBody(req.body) : oldSource;
+          const after = { ...existing, ...descriptive };
+          const before: LensTake[] = existing.lensStockTaken ?? [];
+          const lensChanged = needsKey(existing) !== needsKey(after);
+          const giveBack = oldSource === 'counter' && (newSource !== 'counter' || lensChanged);
+          const takeNew = newSource === 'counter' && (oldSource !== 'counter' || lensChanged);
+          if (giveBack || takeNew) {
+            await lensMoves.load(takeNew ? [after] : [], [before]);
+            if (giveBack) lensMoves.give(before);
+            update.lensStockTaken = takeNew ? lensMoves.take(after) : [];
+          }
+          if (newSource !== oldSource) {
+            Object.assign(update, sourceFields(newSource));
+            lensSourceChange = { from: oldSource, to: newSource };
+          }
+        }
         if (fragranceGrade !== undefined) update.fragranceGrade = fragranceGrade;
         // Frame tags edited on a saved line: merged into its snapshot; model details also go to the frame.
         let frameLearn: { id: string; doc: any; set: Record<string, unknown> } | null = null;
@@ -1578,11 +1554,29 @@ export const updateItemInInvoice = async (req: Request, res: Response, next: Nex
           await t.update(Frame, frameLearn.id, { $set: frameLearn.set }, frameLearn.doc);
         }
         await t.update(InvoiceItem, itemId, update, existing);
+        await lensMoves.write();
         if (existing) items.set(itemId, { ...existing, ...update });
         recalcFromItems(invoice, items);
       },
       { loadItems: true },
     );
+
+    // The purchase side follows the source: nothing is bought for a counter lens; any other source
+    // gets its pending purchase entry (createPendingPurchasesForInvoice skips lines that already have one).
+    const change = lensSourceChange as { from: string; to: string } | null;
+    if (change?.to === 'counter') {
+      await PurchaseEntry.deleteMany({
+        importedFrom: { $in: [itemId, `${itemId}_re`, `${itemId}_le`] },
+        status: 'pending',
+      }).catch((e: unknown) => console.warn('[updateItemInInvoice] pending purchase cleanup error:', e));
+      invalidateInvoiceLookupCache();
+    } else if (change) {
+      try {
+        await createPendingPurchasesForInvoice(invoiceId);
+      } catch (purchaseErr) {
+        console.warn('[updateItemInInvoice] Auto-create pending purchase error:', purchaseErr);
+      }
+    }
 
     await respondWithInvoice(res, invoiceId);
   } catch (error) {

@@ -50,7 +50,9 @@ export interface IInvoiceItem extends BaseDoc {
   lensColor?: string;
   isCustomLens?: boolean;
   isSameNumber?: boolean;
-  fulfillmentSource?: 'stock' | 'ordered' | 'unfulfilled';
+  fulfillmentSource?: 'stock' | 'ordered' | 'local' | 'unfulfilled';
+  /** Counter-stock line: stock rows it took one lens from per eye, so edits and deletes can put them back. */
+  lensStockTaken?: { row: string; qty: number }[];
   requestedQty?: number | null;
   fulfilledQty?: number | null;
   sentToWholesaler?: boolean;

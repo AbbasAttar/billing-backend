@@ -411,7 +411,7 @@ export const getDailyWholesalerSummary = async (
     endOfDay.setHours(23, 59, 59, 999);
 
     // Find all lens items created or dispatched today
-    const items = await InvoiceItem.find({
+    const fetched = await InvoiceItem.find({
       $or: [
         { createdAt: { $gte: startOfDay, $lte: endOfDay } },
         { wholesalerOrderDate: { $gte: startOfDay, $lte: endOfDay } },
@@ -431,6 +431,8 @@ export const getDailyWholesalerSummary = async (
       .populate('opticalLens', 'name brand category coating index')
       .sort({ createdAt: 1 })
       .lean();
+    // Lenses off our counter or bought from a local wholesaler are not part of this wholesaler's order.
+    const items = fetched.filter((i: any) => !(i.fulfillmentSource === 'local' || (i.fulfillmentSource === 'stock' && i.sentToWholesaler === false)));
 
     // Map invoices for frame context and invoice numbers (strictly no customer personal details sent to wholesaler)
     const itemIds = items.map((i) => i._id);

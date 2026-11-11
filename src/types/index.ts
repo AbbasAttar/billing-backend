@@ -66,7 +66,7 @@ export interface CreateOpticalLensItemInput {
   leftAxis?: number | null;
   leftAddition?: number | null;
   // Fulfillment tracking
-  fulfillmentSource?: 'stock' | 'ordered' | 'unfulfilled';
+  fulfillmentSource?: 'stock' | 'ordered' | 'local' | 'unfulfilled';
   requestedQty?: number | null;
   fulfilledQty?: number | null;
   quantity: number;
