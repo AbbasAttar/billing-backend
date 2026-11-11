@@ -4,6 +4,9 @@ import { LensStock } from '../models/LensStock.model';
 import { LENS_TYPES, isLensName } from '../models/LensPricing.model';
 import { InvoiceItem } from '../models/InvoiceItem.model';
 import { ok, fail } from '../utils/response';
+import { type LensLine, eyeSales, hasLensKind, normalizeLensLine, powerKey, windowFrom } from '../services/lensSales';
+import { buildPowerDemand } from '../services/lensDemand';
+import { PurchaseEntry } from '../models/PurchaseEntry.model';
 
 // ── GET all ──────────────────────────────────────────────────────────────────
 
@@ -229,237 +232,80 @@ export const mergeDuplicates = async (_req: Request, res: Response, next: NextFu
   } catch (e) { next(e); }
 };
 
-// ── TRENDS ────────────────────────────────────────────────────────────────────
+// ── SALES HELPERS ─────────────────────────────────────────────────────────────
 
-export const trends = async (_req: Request, res: Response, next: NextFunction) => {
-  try {
-    // Top lens combos sold (merge RE + LE sold across all invoices)
-    const topSold = await InvoiceItem.aggregate([
-      {
-        $match: {
-          lensType: { $ne: null, $exists: true },
-          lensMaterial: { $ne: null, $exists: true },
-          rightSpherical: { $ne: null },
-        },
-      },
-      {
-        $project: {
-          lensType: 1,
-          material: '$lensMaterial',
-          coating: '$lensCoating',
-          color: '$lensColor',
-          sph: '$rightSpherical',
-          cyl: { $ifNull: ['$rightCylinder', 0] },
-          add: '$rightAddition',
-        },
-      },
-      {
-        $unionWith: {
-          coll: 'invoiceitems',
-          pipeline: [
-            {
-              $match: {
-                lensType: { $ne: null, $exists: true },
-                lensMaterial: { $ne: null, $exists: true },
-                leftSpherical: { $ne: null },
-              },
-            },
-            {
-              $project: {
-                lensType: 1,
-                material: '$lensMaterial',
-                coating: '$lensCoating',
-                color: '$lensColor',
-                sph: '$leftSpherical',
-                cyl: { $ifNull: ['$leftCylinder', 0] },
-                add: '$leftAddition',
-              },
-            },
-          ],
-        },
-      },
-      {
-        $group: {
-          _id: {
-            lensType: '$lensType',
-            material: '$material',
-            coating: '$coating',
-            color: '$color',
-            sph: '$sph',
-            cyl: '$cyl',
-            add: '$add',
-          },
-          count: { $sum: 1 },
-        },
-      },
-      { $sort: { count: -1 } },
-      { $limit: 20 },
-      {
-        $project: {
-          _id: 0,
-          lensType: '$_id.lensType',
-          material: '$_id.material',
-          coating: '$_id.coating',
-          color: '$_id.color',
-          sph: '$_id.sph',
-          cyl: '$_id.cyl',
-          add: '$_id.add',
-          count: 1,
-        },
-      },
-    ]);
+/** Single vision blanks have no ADD (same rule as stock matching): drop a stray reading ADD. */
+const svNoAdd = <T extends { add: number | null }>(lensType: string, e: T): T =>
+  lensType.trim().toLowerCase() === 'single vision' && e.add !== null ? { ...e, add: null } : e;
 
-    // Low stock alerts (quantity <= reorderLevel)
-    const lowStock = await LensStock.find({
-      $expr: { $lte: ['$quantity', '$reorderLevel'] },
-    })
-      .sort({ quantity: 1 })
-      .limit(50)
-      .lean();
-
-    // Power distribution (SPH histogram across all sold lenses)
-    const sphDistRaw = await InvoiceItem.aggregate([
-      {
-        $match: {
-          lensType: { $ne: null, $exists: true },
-          lensMaterial: { $ne: null, $exists: true },
-        },
-      },
-      {
-        $facet: {
-          re: [
-            { $match: { rightSpherical: { $ne: null } } },
-            { $group: { _id: '$rightSpherical', count: { $sum: 1 } } },
-          ],
-          le: [
-            { $match: { leftSpherical: { $ne: null } } },
-            { $group: { _id: '$leftSpherical', count: { $sum: 1 } } },
-          ],
-        },
-      },
-    ]);
-
-    const sphMap = new Map<number, number>();
-    for (const { _id, count } of sphDistRaw[0].re) {
-      sphMap.set(_id, (sphMap.get(_id) ?? 0) + count);
-    }
-    for (const { _id, count } of sphDistRaw[0].le) {
-      sphMap.set(_id, (sphMap.get(_id) ?? 0) + count);
-    }
-    const sphDistribution = Array.from(sphMap.entries())
-      .map(([sph, count]) => ({ sph, count }))
-      .sort((a, b) => a.sph - b.sph);
-
-    // Restock suggestions: top-sold combos that have low/no stock
-    const restockSuggestions = await Promise.all(
-      topSold.slice(0, 10).map(async (combo) => {
-        const stock = await LensStock.findOne({
-          lensType: combo.lensType,
-          material: combo.material,
-          coating: combo.coating ?? null,
-          color: combo.color ?? null,
-          sph: combo.sph,
-          cyl: combo.cyl ?? 0,
-          add: combo.add ?? null,
-        }).lean();
-        return {
-          ...combo,
-          currentStock: stock?.quantity ?? 0,
-          reorderLevel: stock?.reorderLevel ?? 2,
-          needsRestock: !stock || stock.quantity <= stock.reorderLevel,
-        };
-      })
-    );
-
-    return ok(res, {
-      topSold,
-      lowStock,
-      sphDistribution,
-      restockSuggestions: restockSuggestions.filter((r) => r.needsRestock),
-    });
-  } catch (e) { next(e); }
-};
+/** Lens lines in the window that carry a lens kind (so they can be matched to stock). */
+async function kindLines(from: Date): Promise<LensLine[]> {
+  const rows = (await InvoiceItem.find({ createdAt: { $gte: from } }).lean()) as LensLine[];
+  return rows.filter(hasLensKind).map(normalizeLensLine);
+}
 
 // ── SOLD NUMBERS ─────────────────────────────────────────────────────────────
 
+/**
+ * GET /lens-stock/sold?days=N — every power + lens type + material sold in the window.
+ * Sold = pieces (lenses); prices are per lens; revenue is each eye's share of its line,
+ * so a pair line's revenue is counted once.
+ */
 export const sold = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const days = Math.min(parseInt(req.query.days as string) || 90, 730);
-    const from = new Date();
-    from.setDate(from.getDate() - days);
+    const { days, from } = windowFrom(req.query.days);
+    const lines = await kindLines(from);
 
-    const baseMatch: Record<string, any> = {
-      createdAt: { $gte: from },
-      lensType: { $exists: true, $ne: null },
-      lensMaterial: { $exists: true, $ne: null },
-    };
+    const groups = new Map<string, {
+      sph: number; cyl: number; add: number | null; lensType: string; material: string;
+      timesSold: number; priced: number; minPrice: number; maxPrice: number; totalRevenue: number;
+    }>();
+    for (const it of lines) {
+      for (const raw of eyeSales(it)) {
+        if (raw.eye === 'single') continue;
+        const e = svNoAdd(String(it.lensType), raw);
+        const key = [it.lensType, it.lensMaterial, powerKey(e)].join('|');
+        const g = groups.get(key) ?? {
+          sph: e.sph, cyl: e.cyl, add: e.add, lensType: it.lensType as string, material: it.lensMaterial as string,
+          timesSold: 0, priced: 0, minPrice: Infinity, maxPrice: -Infinity, totalRevenue: 0,
+        };
+        g.timesSold += e.pieces;
+        g.priced += e.unitPrice * e.pieces;
+        g.minPrice = Math.min(g.minPrice, e.unitPrice);
+        g.maxPrice = Math.max(g.maxPrice, e.unitPrice);
+        g.totalRevenue += e.revenue;
+        groups.set(key, g);
+      }
+    }
 
-    // Project right-eye rows
-    const reProject = {
-      sph:      '$rightSpherical',
-      cyl:      { $ifNull: ['$rightCylinder', 0] },
-      add:      { $ifNull: ['$rightAddition', null] },
-      lensType: '$lensType',
-      material: '$lensMaterial',
-      coating:  '$lensCoating',
-      price:    '$price',
-      quantity: '$quantity',
-    };
-
-    // Project left-eye rows
-    const leProject = {
-      sph:      '$leftSpherical',
-      cyl:      { $ifNull: ['$leftCylinder', 0] },
-      add:      { $ifNull: ['$leftAddition', null] },
-      lensType: '$lensType',
-      material: '$lensMaterial',
-      coating:  '$lensCoating',
-      price:    '$price',
-      quantity: '$quantity',
-    };
-
-    const records = await InvoiceItem.aggregate([
-      { $match: { ...baseMatch, rightSpherical: { $ne: null } } },
-      { $project: reProject },
-      {
-        $unionWith: {
-          coll: 'invoiceitems',
-          pipeline: [
-            { $match: { ...baseMatch, leftSpherical: { $ne: null } } },
-            { $project: leProject },
-          ],
-        },
-      },
-      {
-        $group: {
-          _id:          { sph: '$sph', cyl: '$cyl', add: '$add', lensType: '$lensType', material: '$material' },
-          timesSold:    { $sum: '$quantity' },
-          avgPrice:     { $avg: '$price' },
-          minPrice:     { $min: '$price' },
-          maxPrice:     { $max: '$price' },
-          totalRevenue: { $sum: { $multiply: ['$price', '$quantity'] } },
-        },
-      },
-      { $sort: { timesSold: -1 } },
-      { $limit: 500 },
-      {
-        $project: {
-          _id:          0,
-          sph:          '$_id.sph',
-          cyl:          '$_id.cyl',
-          add:          '$_id.add',
-          lensType:     '$_id.lensType',
-          material:     '$_id.material',
-          timesSold:    1,
-          avgPrice:     { $round: ['$avgPrice', 0] },
-          minPrice:     1,
-          maxPrice:     1,
-          totalRevenue: { $round: ['$totalRevenue', 0] },
-        },
-      },
-    ]);
+    const records = [...groups.values()]
+      .sort((a, b) => b.timesSold - a.timesSold)
+      .map(({ priced, ...g }) => ({
+        ...g,
+        avgPrice: g.timesSold > 0 ? Math.round(priced / g.timesSold) : 0,
+        minPrice: Math.round(g.minPrice),
+        maxPrice: Math.round(g.maxPrice),
+        totalRevenue: Math.round(g.totalRevenue),
+      }));
 
     return ok(res, { days, from, records });
+  } catch (e) { next(e); }
+};
+
+// ── DEMAND per power (stock chart Sold / Buy modes) ─────────────────────────
+
+/**
+ * GET /lens-stock/demand?days=N — per lens kind + power: lenses sold in the window (off our shelf vs
+ * got elsewhere) and lenses on pending purchase entries. The page works out what to buy.
+ */
+export const demand = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { days, from } = windowFrom(req.query.days);
+    const [lines, pending] = await Promise.all([
+      kindLines(from),
+      PurchaseEntry.find({ status: 'pending' }).lean(),
+    ]);
+    return ok(res, { days, from, powers: buildPowerDemand(lines, pending as any[]) });
   } catch (e) { next(e); }
 };
 

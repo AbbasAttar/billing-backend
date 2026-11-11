@@ -3,6 +3,7 @@ import { env } from '../config/env';
 import { getAdminAuth } from '../lib/firebaseAdmin';
 import { verifyCustomerToken } from '../lib/sessionToken';
 import { requiredRole, type StaffRole } from './accessPolicy';
+import { DEV_ADMIN, isDevBypassRequest } from '../lib/devAuthBypass';
 
 export type { StaffRole } from './accessPolicy';
 
@@ -59,6 +60,8 @@ export function roleFor(decoded: { email?: string; email_verified?: boolean; rol
 type Resolved = { user: StaffUser } | { status: 401 | 403 | 503; reason: string };
 
 async function resolveStaffUser(req: Request): Promise<Resolved> {
+  // Local development only (see lib/devAuthBypass): requests from this machine act as the admin.
+  if (isDevBypassRequest(req)) return { user: { ...DEV_ADMIN } };
   const token = bearerToken(req);
   if (!token) return { status: 401, reason: 'no bearer token' };
   const auth = getAdminAuth();

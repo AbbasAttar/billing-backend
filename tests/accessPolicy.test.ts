@@ -33,7 +33,6 @@ describe('access policy', () => {
     ['POST', '/purchases/batch'],
     ['PATCH', '/customer-requirements/r1/status'],
     ['DELETE', '/notifications/fcm-token'],
-    ['GET', '/reports/lens-reorder'],
     ['GET', '/dashboard/recalls'],
     ['POST', '/dashboard/recalls/mark-sent'],
     ['POST', '/dashboard/recalls/outcome'],

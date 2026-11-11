@@ -39,6 +39,7 @@ import marketingRoutes from './routes/marketing.routes';
 import campaignRoutes from './routes/campaign.routes';
 import automationRoutes from './routes/automation.routes';
 import lostSaleRoutes from './routes/lostSale.routes';
+import lensBookRoutes from './routes/lensBook.routes';
 import dataQualityRoutes from './routes/dataQuality.routes';
 import savingGoalRoutes from './routes/savingGoal.routes';
 import recurringExpenseRoutes from './routes/recurringExpense.routes';
@@ -58,7 +59,6 @@ import expenseRoutes from './routes/expense.routes';
 import vendorBillRoutes from './routes/vendorBill.routes';
 import obligationPaymentRoutes from './routes/obligationPayment.routes';
 import financeOverviewRoutes from './routes/financeOverview.routes';
-import lensReorderRoutes from './routes/lensReorder.routes';
 import purchaseEntryRoutes from './routes/purchaseEntry.routes';
 import wholesalerQueueRoutes from './routes/wholesalerQueue.routes';
 import fittingRoutes from './routes/fitting.routes';
@@ -181,6 +181,7 @@ adminRouter.use('/marketing', marketingRoutes);
 adminRouter.use('/campaigns', campaignRoutes);
 adminRouter.use('/automation', automationRoutes);
 adminRouter.use('/lost-sales', lostSaleRoutes);
+adminRouter.use('/lens-book', lensBookRoutes); // old paper-book lens sales, analytics only (admin)
 adminRouter.use('/data-quality', dataQualityRoutes); // cleanup queues: missing costs, walk-in bills, phones
 adminRouter.use('/audit-log', auditLogRoutes); // admin-only: read the write log
 adminRouter.use('/bill-feedback', billFeedbackRoutes); // online-bill ratings and review funnel
@@ -197,7 +198,6 @@ adminRouter.use('/debt-payments', debtPaymentRoutes);
 adminRouter.use('/obligations', obligationRoutes);
 adminRouter.use('/obligation-payments', obligationPaymentRoutes);
 adminRouter.use('/finance', financeOverviewRoutes);
-adminRouter.use('/reports', lensReorderRoutes);
 adminRouter.use('/purchases', purchaseEntryRoutes);
 adminRouter.use('/wholesaler-queue', wholesalerQueueRoutes);
 adminRouter.use('/fitting', fittingRoutes);

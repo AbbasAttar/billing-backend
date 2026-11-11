@@ -38,7 +38,7 @@ const ENDPOINTS = [
   '/payments/given',
   '/cashflow/summary',
   '/optical-lenses/analytics',
-  '/lens-stock/trends',
+  '/lens-stock/sold',
   '/fragrances/revenue-summary',
   '/frames',
   '/fragrances',

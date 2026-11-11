@@ -15,6 +15,13 @@ const nameMap = (v: string | undefined) =>
 
 // Tests must never pick up real secrets or Firebase credentials from .env.
 if (!process.env.VITEST) dotenv.config({ override: true });
+// Machine-only settings (e.g. DEV_AUTH_BYPASS). Never read on Firebase / Cloud Run.
+if (!process.env.VITEST && !process.env.K_SERVICE && !process.env.FUNCTION_TARGET && !process.env.FUNCTION_NAME) {
+  dotenv.config({ path: '.env.local', override: true, quiet: true } as dotenv.DotenvConfigOptions);
+  if (process.env.DEV_AUTH_BYPASS === '1') {
+    console.warn('[AUTH] DEV_AUTH_BYPASS on: requests from this machine act as admin (local only, from .env.local).');
+  }
+}
 
 export const env = {
   PORT: parseInt(process.env.PORT || process.env.APP_PORT || '3001', 10),

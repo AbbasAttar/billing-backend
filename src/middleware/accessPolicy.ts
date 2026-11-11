@@ -37,7 +37,6 @@ const STAFF_AREAS = [
   'purchases',
   'customer-requirements',
   'notifications',
-  'reports', // lens re-order suggestions only (GET /reports/lens-reorder)
 ];
 
 /** Dashboard endpoints the counter home screen needs; the rest of /dashboard is business data. */
@@ -59,7 +58,7 @@ const ADMIN_ONLY: Array<[RegExp, RegExp]> = [
   [/^POST$/, /^\/invoices\/renumber$/],
   [/^PATCH$/, /^\/invoices\/[^/]+\/payment\/[^/]+$/],
   // Sales performance data shown on analytics tabs.
-  [/^GET$/, /^\/(frames|fragrances|lens-stock)\/(trends|sold|revenue-summary)$/],
+  [/^GET$/, /^\/(frames|fragrances|lens-stock)\/(trends|sold|demand|revenue-summary)$/],
   [/^GET$/, /^\/optical-lenses\/analytics$/],
   [/^GET$/, /^\/lens-pricing\/quote-history$/],
   // Pricing rules, price books, markup, coatings and lens lists are configuration (staff may still look prices

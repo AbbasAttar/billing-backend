@@ -11,6 +11,7 @@
  */
 
 import { isCatchAllFrame } from './catchAllProducts';
+import { canonicalLensType } from './lensSales';
 
 export interface OxItem {
   frame?: unknown; opticalLens?: unknown; isCustomLens?: boolean; type?: string; fragrance?: unknown; wholesaleItem?: unknown;
@@ -41,7 +42,8 @@ const isFrame = (it: OxItem) => !!(it.frame || it.type === 'frame');
 
 /** Single Vision / Bifocal / Progressive, from the category first (the type field sometimes holds a product name). */
 export function lensTypeOf(it: OxItem): string {
-  for (const v of [it.lensCategory, it.lensType]) {
+  for (const raw of [it.lensCategory, it.lensType]) {
+    const v = canonicalLensType(raw); // "Kryptok Bifocal" is the shop's Bifocal
     const hit = LENS_TYPES.find((t) => t.toLowerCase() === (v ?? '').trim().toLowerCase());
     if (hit) return hit;
   }

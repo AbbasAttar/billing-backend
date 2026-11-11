@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getAll, create, update, adjust, remove, trends, sold, mergeDuplicates } from '../controllers/lensStock.controller';
+import { getAll, create, update, adjust, remove, sold, demand, mergeDuplicates } from '../controllers/lensStock.controller';
 import * as cut from '../controllers/cutLens.controller';
 
 const router = Router();
@@ -11,8 +11,8 @@ router.put('/cut/:id', cut.update);
 router.patch('/cut/:id/used', cut.markUsed);
 router.delete('/cut/:id', cut.remove);
 
-router.get('/trends', trends);
 router.get('/sold', sold);
+router.get('/demand', demand);
 router.get('/', getAll);
 router.post('/', create);
 router.post('/merge-duplicates', mergeDuplicates);
